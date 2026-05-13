@@ -588,4 +588,22 @@ func TestDecorateModelChoices(t *testing.T) {
 		assert.True(t, got[1].IsCurrent)
 		assert.True(t, got[1].IsCustom)
 	})
+
+	// AvailableModels implementations may return a slice backed by an
+	// internal cache; mutating its IsCurrent flag in place would leak
+	// state across sessions. The function must therefore never modify
+	// the input slice or its underlying array.
+	t.Run("does not mutate the input slice", func(t *testing.T) {
+		t.Parallel()
+		input := []ModelChoice{
+			{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
+			{Name: "other", Ref: "openai/gpt-4o"},
+		}
+		orig := make([]ModelChoice, len(input))
+		copy(orig, input)
+
+		_ = DecorateModelChoices(input, "openai/gpt-4o", []string{"anthropic/claude-sonnet-4-0"})
+
+		assert.Equal(t, orig, input, "DecorateModelChoices must not modify the input slice")
+	})
 }

@@ -82,21 +82,30 @@ type SessionModelsResponse struct {
 //
 // currentRef is the model override active for the agent ("" when none),
 // and customRefs is the session's CustomModelsUsed history.
+//
+// The input slice is never mutated: callers can safely pass a slice that
+// is shared with or backed by an internal cache.
 func DecorateModelChoices(models []ModelChoice, currentRef string, customRefs []string) []ModelChoice {
-	existingRefs := make(map[string]bool, len(models))
-	for _, m := range models {
+	// Defensive copy: AvailableModels implementations may return a slice
+	// backed by an internal cache. Mutating its IsCurrent flag in place
+	// would leak picker state across sessions/agents.
+	result := make([]ModelChoice, len(models), len(models)+len(customRefs)+1)
+	copy(result, models)
+
+	existingRefs := make(map[string]bool, len(result))
+	for _, m := range result {
 		existingRefs[m.Ref] = true
 	}
 
 	currentFound := currentRef == ""
-	for i := range models {
+	for i := range result {
 		if currentRef != "" {
-			if models[i].Ref == currentRef {
-				models[i].IsCurrent = true
+			if result[i].Ref == currentRef {
+				result[i].IsCurrent = true
 				currentFound = true
 			}
 		} else {
-			models[i].IsCurrent = models[i].IsDefault
+			result[i].IsCurrent = result[i].IsDefault
 		}
 	}
 
@@ -111,7 +120,7 @@ func DecorateModelChoices(models []ModelChoice, currentRef string, customRefs []
 		if isCurrent {
 			currentFound = true
 		}
-		models = append(models, ModelChoice{
+		result = append(result, ModelChoice{
 			Name:      ref,
 			Ref:       ref,
 			Provider:  prov,
@@ -126,7 +135,7 @@ func DecorateModelChoices(models []ModelChoice, currentRef string, customRefs []
 	// choice so the picker can still highlight the active selection.
 	if !currentFound && strings.Contains(currentRef, "/") {
 		prov, name, _ := strings.Cut(currentRef, "/")
-		models = append(models, ModelChoice{
+		result = append(result, ModelChoice{
 			Name:      currentRef,
 			Ref:       currentRef,
 			Provider:  prov,
@@ -136,7 +145,7 @@ func DecorateModelChoices(models []ModelChoice, currentRef string, customRefs []
 		})
 	}
 
-	return models
+	return result
 }
 
 // ModelSwitcherConfig holds the configuration needed for model switching.
