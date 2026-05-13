@@ -634,15 +634,18 @@ func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
 	resolved := m.application.ResolveCommand(ctx, command)
 
 	var cmds []tea.Cmd
+	switchSucceeded := true
 	if ok && cmd.Agent != "" && cmd.Agent != m.sessionState.CurrentAgentName() {
+		prevAgent := m.sessionState.CurrentAgentName()
 		switched, switchCmd := m.handleSwitchAgent(cmd.Agent)
 		m = switched.(*appModel)
 		if switchCmd != nil {
 			cmds = append(cmds, switchCmd)
 		}
+		switchSucceeded = m.sessionState.CurrentAgentName() != prevAgent
 	}
 
-	if resolved != "" {
+	if resolved != "" && switchSucceeded {
 		cmds = append(cmds, core.CmdHandler(messages.SendMsg{Content: resolved}))
 	}
 
