@@ -97,7 +97,7 @@ func TestEnableDisableLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	names := toolNames(toolList)
 	assert.ElementsMatch(t, []string{
-		ToolNameSearch, ToolNameList, ToolNameEnable, ToolNameDisable,
+		ToolNameSearch, ToolNameList, ToolNameEnable, ToolNameDisable, ToolNameResetAuth,
 	}, names)
 
 	// Enable: a callback should fire and the underlying mcp.Toolset should
@@ -398,6 +398,135 @@ func TestToolsExposesEnabledServerTools(t *testing.T) {
 
 	// Cleanup so the test doesn't leak the supervisor's watch goroutine.
 	require.NoError(t, ts.Stop(ctx))
+}
+
+// TestResetAuthForwardsToTokenStore verifies that reset_remote_mcp_server_auth
+// places the right call with the right URL.
+func TestResetAuthForwardsToTokenStore(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+
+	var removedURLs []string
+	ts.removeOAuthToken = func(url string) error {
+		removedURLs = append(removedURLs, url)
+		return nil
+	}
+
+	var oauthServer Server
+	for _, s := range ts.catalog.Servers {
+		if s.Auth.Type == "oauth" {
+			oauthServer = s
+			break
+		}
+	}
+	require.NotEmpty(t, oauthServer.ID, "need at least one oauth server in catalog")
+
+	res, err := ts.handleResetAuth(t.Context(), ResetAuthArgs{ID: oauthServer.ID})
+	require.NoError(t, err)
+	require.False(t, res.IsError, "reset auth: %s", res.Output)
+	assert.Contains(t, res.Output, "cleared OAuth credentials")
+	assert.Equal(t, []string{oauthServer.URL}, removedURLs,
+		"removeOAuthToken must be called once with the catalog URL")
+}
+
+// TestResetAuthUnknownServer confirms unknown ids surface a friendly error
+// without touching the token store.
+func TestResetAuthUnknownServer(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+	called := 0
+	ts.removeOAuthToken = func(string) error { called++; return nil }
+
+	res, err := ts.handleResetAuth(t.Context(), ResetAuthArgs{ID: "definitely-not-a-server"})
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, res.Output, "unknown server id")
+	assert.Zero(t, called, "token store must not be touched for unknown ids")
+}
+
+// TestResetAuthNoOpForNonOAuth confirms that resetting auth for an
+// api_key/none server is a no-op that doesn't reach the token store.
+func TestResetAuthNoOpForNonOAuth(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+	called := 0
+	ts.removeOAuthToken = func(string) error { called++; return nil }
+
+	var apiKeyID string
+	for _, s := range ts.catalog.Servers {
+		if s.Auth.Type == "api_key" {
+			apiKeyID = s.ID
+			break
+		}
+	}
+	require.NotEmpty(t, apiKeyID)
+
+	res, err := ts.handleResetAuth(t.Context(), ResetAuthArgs{ID: apiKeyID})
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	assert.Contains(t, res.Output, "nothing to reset")
+	assert.Zero(t, called, "api_key servers must not touch the OAuth token store")
+}
+
+// TestResetAuthDisablesEnabledServer makes sure resetting auth for a
+// currently-enabled server stops its toolset (so the next enable does a
+// fresh handshake) AND fires the tools-changed handler.
+func TestResetAuthDisablesEnabledServer(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+	ts.removeOAuthToken = func(string) error { return nil }
+
+	var changes atomic.Int32
+	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+
+	var oauthID string
+	for _, s := range ts.catalog.Servers {
+		if s.Auth.Type == "oauth" {
+			oauthID = s.ID
+			break
+		}
+	}
+	require.NotEmpty(t, oauthID)
+
+	ctx := t.Context()
+	_, err := ts.handleEnable(ctx, EnableArgs{ID: oauthID})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), changes.Load())
+
+	ts.mu.RLock()
+	_, present := ts.enabled[oauthID]
+	ts.mu.RUnlock()
+	require.True(t, present, "server should be enabled before reset")
+
+	res, err := ts.handleResetAuth(ctx, ResetAuthArgs{ID: oauthID})
+	require.NoError(t, err)
+	require.False(t, res.IsError, "reset: %s", res.Output)
+	assert.Contains(t, res.Output, "has been disabled")
+
+	ts.mu.RLock()
+	_, stillThere := ts.enabled[oauthID]
+	ts.mu.RUnlock()
+	assert.False(t, stillThere, "server must be removed from enabled after reset")
+
+	assert.Equal(t, int32(2), changes.Load(),
+		"reset on an enabled server must fire tools-changed exactly once more")
+}
+
+// TestResetAuthSurfacesStoreErrors confirms that errors from the token
+// store are surfaced to the caller as IsError results (not panics).
+func TestResetAuthSurfacesStoreErrors(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+	ts.removeOAuthToken = func(string) error { return errors.New("keyring on fire") }
+
+	var oauthID string
+	for _, s := range ts.catalog.Servers {
+		if s.Auth.Type == "oauth" {
+			oauthID = s.ID
+			break
+		}
+	}
+	require.NotEmpty(t, oauthID)
+
+	res, err := ts.handleResetAuth(t.Context(), ResetAuthArgs{ID: oauthID})
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, res.Output, "keyring on fire")
 }
 
 // TestToolsAuthRequiredIsDeferred verifies the on-demand semantics: a

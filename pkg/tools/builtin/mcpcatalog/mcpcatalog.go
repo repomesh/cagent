@@ -2,7 +2,7 @@
 // streamable-http servers as a single agent-side toolset that supports
 // on-demand activation.
 //
-// The toolset surfaces four meta-tools to the model:
+// The toolset surfaces five meta-tools to the model:
 //
 //   - search_remote_mcp_servers — case-insensitive fuzzy search over the
 //     curated catalog (id / title / description / category / tags).
@@ -11,6 +11,8 @@
 //     (defers the actual TCP connect / OAuth handshake until Tools() is
 //     next enumerated).
 //   - disable_remote_mcp_server — stop the toolset and remove its tools.
+//   - reset_remote_mcp_server_auth — drop persisted OAuth credentials so
+//     the next enable triggers a fresh authorization flow.
 //
 // Activated servers' tools are merged into Tools(); tool list changes are
 // reported via a tools.ChangeNotifier handler so the runtime refreshes
@@ -40,10 +42,11 @@ import (
 )
 
 const (
-	ToolNameSearch  = "search_remote_mcp_servers"
-	ToolNameEnable  = "enable_remote_mcp_server"
-	ToolNameDisable = "disable_remote_mcp_server"
-	ToolNameList    = "list_remote_mcp_servers"
+	ToolNameSearch    = "search_remote_mcp_servers"
+	ToolNameEnable    = "enable_remote_mcp_server"
+	ToolNameDisable   = "disable_remote_mcp_server"
+	ToolNameList      = "list_remote_mcp_servers"
+	ToolNameResetAuth = "reset_remote_mcp_server_auth"
 )
 
 // Toolset implements on-demand activation of remote (streamable-http) MCP
@@ -78,6 +81,11 @@ type Toolset struct {
 	toolsChangedHandler func()
 	managedOAuth        bool
 	managedOAuthSet     bool // distinguishes "default" from "explicitly false"
+
+	// removeOAuthToken drops a persisted OAuth token by resource URL.
+	// Defaults to mcp.RemoveOAuthToken; tests inject a stub to avoid
+	// touching the OS keyring.
+	removeOAuthToken func(resourceURL string) error
 }
 
 var (
@@ -101,11 +109,12 @@ func New(envProvider environment.Provider) *Toolset {
 		byID[s.ID] = s
 	}
 	return &Toolset{
-		catalog:  cat,
-		byID:     byID,
-		expander: js.NewJsExpander(envProvider),
-		env:      envProvider,
-		enabled:  make(map[string]*tools.StartableToolSet),
+		catalog:          cat,
+		byID:             byID,
+		expander:         js.NewJsExpander(envProvider),
+		env:              envProvider,
+		enabled:          make(map[string]*tools.StartableToolSet),
+		removeOAuthToken: mcp.RemoveOAuthToken,
 	}
 }
 
@@ -134,6 +143,10 @@ Workflow:
      refuse the connection.
   3. Use the newly activated tools as you would any other.
   4. Call ` + ToolNameDisable + ` to remove a server when no longer needed.
+  5. If a previously authorized OAuth server starts rejecting requests
+     (token revoked, scopes changed, signed in to the wrong account),
+     call ` + ToolNameResetAuth + ` to wipe the persisted credentials.
+     The next enable will trigger a fresh authorization URL.
 
 Prefer enabling only the servers you actually need — every server adds
 tools to the prompt and contributes to context usage.`
@@ -288,6 +301,18 @@ func (t *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 			Handler:      tools.NewHandler(t.handleDisable),
 			Annotations: tools.ToolAnnotations{
 				Title: "Disable remote MCP server",
+			},
+		},
+		{
+			Name:         ToolNameResetAuth,
+			Category:     "mcp_catalog",
+			Description:  "Clear persisted OAuth credentials (access token, refresh token, dynamic-client-registration data) for a catalog server. The next enable will trigger a fresh authorization flow. No-op for api_key/none servers.",
+			Parameters:   tools.MustSchemaFor[ResetAuthArgs](),
+			OutputSchema: tools.MustSchemaFor[string](),
+			Handler:      tools.NewHandler(t.handleResetAuth),
+			Annotations: tools.ToolAnnotations{
+				Title:           "Reset remote MCP server auth",
+				DestructiveHint: new(true),
 			},
 		},
 	}
@@ -574,4 +599,56 @@ func (t *Toolset) handleList(_ context.Context, _ ListArgs) (*tools.ToolCallResu
 		return nil, err
 	}
 	return tools.ResultSuccess(fmt.Sprintf("%d enabled server(s):\n%s", len(enabled), string(out))), nil
+}
+
+// ResetAuthArgs is the input schema for reset_remote_mcp_server_auth.
+type ResetAuthArgs struct {
+	ID string `json:"id" jsonschema:"Catalog id of the server whose persisted OAuth credentials should be cleared."`
+}
+
+func (t *Toolset) handleResetAuth(ctx context.Context, args ResetAuthArgs) (*tools.ToolCallResult, error) {
+	id := strings.TrimSpace(args.ID)
+	server, ok := t.byID[id]
+	if !ok {
+		return tools.ResultError(fmt.Sprintf("unknown server id %q (use %s first to discover available ids)", id, ToolNameSearch)), nil
+	}
+
+	if server.Auth.Type != "oauth" {
+		return tools.ResultSuccess(fmt.Sprintf("server %q uses %s auth — nothing to reset.", id, server.Auth.Type)), nil
+	}
+
+	// Stop and forget any live MCP toolset for this server. The active
+	// supervisor still holds the (about-to-be-revoked) token in memory, so
+	// without stopping it the user would keep talking to the old session
+	// until it died on its own. Re-enabling triggers a fresh handshake.
+	t.mu.Lock()
+	wrapped, wasEnabled := t.enabled[id]
+	if wasEnabled {
+		delete(t.enabled, id)
+	}
+	notify := t.toolsChangedHandler
+	t.mu.Unlock()
+
+	if wasEnabled {
+		if err := wrapped.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.WarnContext(ctx, "Failed to stop remote MCP toolset on auth reset", "id", id, "error", err)
+		}
+	}
+
+	if err := t.removeOAuthToken(server.URL); err != nil {
+		return tools.ResultError(fmt.Sprintf("failed to clear OAuth credentials for %q: %v", id, err)), nil
+	}
+
+	if wasEnabled && notify != nil {
+		notify()
+	}
+
+	msg := strings.Builder{}
+	fmt.Fprintf(&msg, "cleared OAuth credentials for %q (%s).\n", id, server.URL)
+	if wasEnabled {
+		msg.WriteString("the server was enabled and has been disabled; re-enable it to start a fresh authorization flow.\n")
+	} else {
+		msg.WriteString("enable the server to start a fresh authorization flow.\n")
+	}
+	return tools.ResultSuccess(msg.String()), nil
 }
