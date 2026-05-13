@@ -20,7 +20,7 @@
 
 agents:
   root:
-    model: openai/gpt-5
+    model: anthropic/claude-sonnet-4-6
     description: Agent that can on-demand connect to remote MCP servers from the Docker MCP Catalog.
     instruction: |
       You can discover and activate remote MCP servers on demand.
