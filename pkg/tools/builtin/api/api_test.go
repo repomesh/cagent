@@ -14,6 +14,8 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/useragent"
+	"github.com/docker/docker-agent/pkg/version"
 )
 
 // newAPIToolForTest constructs an APITool that bypasses SSRF dial-time
@@ -131,6 +133,26 @@ func TestAPITool_Headers(t *testing.T) {
 	assert.Equal(t, "custom-value", ts.receivedHeaders.Get("X-Custom-Header"))
 	assert.Equal(t, "secret-key", ts.receivedHeaders.Get("X-API-Key"))
 	assert.Equal(t, "another-value", ts.receivedHeaders.Get("X-Another-Header"))
+}
+
+// TestAPITool_IdentityHeaders pins the docker-agent identity headers that
+// every built-in tool sends so backends can attribute traffic to a specific
+// docker-agent install. X-Docker-Desktop-Version is only present when
+// Docker Desktop is reachable, so we accept its absence.
+func TestAPITool_IdentityHeaders(t *testing.T) {
+	t.Parallel()
+	ts := getTestServer(t)
+
+	tool := newAPIToolForTest(latest.APIToolConfig{
+		Method:   http.MethodGet,
+		Endpoint: ts.serverURL,
+	}, testExpander())
+
+	_, err := tool.callTool(t.Context(), tools.ToolCall{})
+	require.NoError(t, err)
+
+	assert.Equal(t, useragent.Header, ts.receivedHeaders.Get("User-Agent"))
+	assert.Equal(t, version.Version, ts.receivedHeaders.Get(useragent.HeaderAgentVersion))
 }
 
 func TestAPITool_DefaultOutputSchema(t *testing.T) {
