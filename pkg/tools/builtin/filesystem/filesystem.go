@@ -16,6 +16,8 @@ import (
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/fsx"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -122,6 +124,46 @@ func WithDenyList(roots []string) Opt {
 		}
 		t.denyList = set
 	}
+}
+
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(_ context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+	wd := runConfig.WorkingDir
+	if wd == "" {
+		var err error
+		wd, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get working directory: %w", err)
+		}
+	}
+
+	var opts []Opt
+
+	ignoreVCS := true
+	if toolset.IgnoreVCS != nil {
+		ignoreVCS = *toolset.IgnoreVCS
+	}
+	opts = append(opts, WithIgnoreVCS(ignoreVCS))
+
+	if len(toolset.AllowList) > 0 {
+		opts = append(opts, WithAllowList(toolset.AllowList))
+	}
+	if len(toolset.DenyList) > 0 {
+		opts = append(opts, WithDenyList(toolset.DenyList))
+	}
+
+	if len(toolset.PostEdit) > 0 {
+		postEditConfigs := make([]PostEditConfig, len(toolset.PostEdit))
+		for i, pe := range toolset.PostEdit {
+			postEditConfigs[i] = PostEditConfig{
+				Path: pe.Path,
+				Cmd:  pe.Cmd,
+			}
+		}
+		opts = append(opts, WithPostEditCommands(postEditConfigs))
+	}
+
+	return NewFilesystemTool(wd, opts...), nil
 }
 
 func NewFilesystemTool(workingDir string, opts ...Opt) *Tool {

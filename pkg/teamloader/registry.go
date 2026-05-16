@@ -55,7 +55,7 @@ func NewDefaultToolsetRegistry() ToolsetRegistry {
 			"think":             think.CreateToolSet,
 			"shell":             shell.CreateToolSet,
 			"script":            shell.CreateScriptToolSet,
-			"filesystem":        createFilesystemTool,
+			"filesystem":        filesystem.CreateToolSet,
 			"fetch":             createFetchTool,
 			"mcp":               createMCPTool,
 			"api":               createAPITool,
@@ -149,49 +149,6 @@ func resolveToolsetWorkingDir(toolsetWorkingDir, agentWorkingDir string) string 
 	// agentWorkingDir is empty and path is relative: return as-is.
 	// The child process will inherit the OS working directory.
 	return toolsetWorkingDir
-}
-
-func createFilesystemTool(_ context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
-	wd := runConfig.WorkingDir
-	if wd == "" {
-		var err error
-		wd, err = os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get working directory: %w", err)
-		}
-	}
-
-	var opts []filesystem.Opt
-
-	// Handle ignore_vcs configuration (default to true)
-	ignoreVCS := true
-	if toolset.IgnoreVCS != nil {
-		ignoreVCS = *toolset.IgnoreVCS
-	}
-	opts = append(opts, filesystem.WithIgnoreVCS(ignoreVCS))
-
-	// Handle allow/deny lists for filesystem operations.
-	// An empty / nil list preserves the default behaviour (no restriction).
-	if len(toolset.AllowList) > 0 {
-		opts = append(opts, filesystem.WithAllowList(toolset.AllowList))
-	}
-	if len(toolset.DenyList) > 0 {
-		opts = append(opts, filesystem.WithDenyList(toolset.DenyList))
-	}
-
-	// Handle post-edit commands
-	if len(toolset.PostEdit) > 0 {
-		postEditConfigs := make([]filesystem.PostEditConfig, len(toolset.PostEdit))
-		for i, pe := range toolset.PostEdit {
-			postEditConfigs[i] = filesystem.PostEditConfig{
-				Path: pe.Path,
-				Cmd:  pe.Cmd,
-			}
-		}
-		opts = append(opts, filesystem.WithPostEditCommands(postEditConfigs))
-	}
-
-	return filesystem.NewFilesystemTool(wd, opts...), nil
 }
 
 func createAPITool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
