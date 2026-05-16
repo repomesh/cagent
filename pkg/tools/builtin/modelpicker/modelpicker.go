@@ -2,9 +2,12 @@ package modelpicker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -12,6 +15,14 @@ const (
 	ToolNameChangeModel = "change_model"
 	ToolNameRevertModel = "revert_model"
 )
+
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+	if len(toolset.Models) == 0 {
+		return nil, errors.New("model_picker toolset requires at least one model")
+	}
+	return NewModelPickerTool(toolset.Models), nil
+}
 
 // Tool provides tools for dynamically switching the agent's model mid-conversation.
 type Tool struct {

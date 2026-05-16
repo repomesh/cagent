@@ -55,7 +55,7 @@ func NewDefaultToolsetRegistry() ToolsetRegistry {
 			"lsp":               lsp.CreateToolSet,
 			"user_prompt":       userprompt.CreateToolSet,
 			"openapi":           openapi.CreateToolSet,
-			"model_picker":      createModelPickerTool,
+			"model_picker":      modelpicker.CreateToolSet,
 			"background_agents": createBackgroundAgentsTool,
 			"rag":               createRAGTool,
 		},
@@ -104,13 +104,6 @@ func (r *toolsetRegistry) CreateTool(ctx context.Context, toolset latest.Toolset
 // module root in a monorepo) are intentional and must not be silently blocked.
 func resolveToolsetWorkingDir(toolsetWorkingDir, agentWorkingDir string) string {
 	return workingdir.Resolve(toolsetWorkingDir, agentWorkingDir)
-}
-
-func createModelPickerTool(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
-	if len(toolset.Models) == 0 {
-		return nil, errors.New("model_picker toolset requires at least one model")
-	}
-	return modelpicker.NewModelPickerTool(toolset.Models), nil
 }
 
 func createBackgroundAgentsTool(_ context.Context, _ latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
