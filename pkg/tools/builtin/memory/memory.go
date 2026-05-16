@@ -47,7 +47,7 @@ var (
 )
 
 // CreateToolSet is used by the tools registry.
-func CreateToolSet(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
+func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
 	var validatedMemoryPath string
 
 	if toolset.Path != "" {

@@ -102,7 +102,7 @@ var (
 )
 
 // CreateToolSet is used by the tools registry.
-func CreateToolSet(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	toolsetPath := toolset.Path
 	if toolsetPath == "" {
 		toolsetPath = "tasks.json"

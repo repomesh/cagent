@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
-	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -22,7 +21,7 @@ const (
 )
 
 // CreateToolSet is used by the tools registry.
-func CreateToolSet(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+func CreateToolSet(toolset latest.Toolset) (tools.ToolSet, error) {
 	if toolset.Shared {
 		return newSharedTodoTool(), nil
 	}

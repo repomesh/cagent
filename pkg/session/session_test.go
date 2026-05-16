@@ -10,7 +10,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
@@ -18,7 +17,7 @@ import (
 
 func todoToolSet(t *testing.T) tools.ToolSet {
 	t.Helper()
-	toolSet, err := todo.CreateToolSet(t.Context(), latest.Toolset{}, "", &config.RuntimeConfig{}, "")
+	toolSet, err := todo.CreateToolSet(latest.Toolset{})
 	require.NoError(t, err)
 	return toolSet
 }

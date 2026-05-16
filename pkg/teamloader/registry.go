@@ -39,9 +39,15 @@ type ToolsetRegistry interface {
 func NewDefaultToolsetRegistry() ToolsetRegistry {
 	return &toolsetRegistry{
 		creators: map[string]ToolsetCreator{
-			"todo":              todo.CreateToolSet,
-			"tasks":             tasks.CreateToolSet,
-			"memory":            memory.CreateToolSet,
+			"todo": func(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+				return todo.CreateToolSet(toolset)
+			},
+			"tasks": func(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+				return tasks.CreateToolSet(toolset, parentDir, runConfig)
+			},
+			"memory": func(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
+				return memory.CreateToolSet(toolset, parentDir, runConfig, configName)
+			},
 			"think":             think.CreateToolSet,
 			"shell":             shell.CreateToolSet,
 			"script":            shell.CreateScriptToolSet,
