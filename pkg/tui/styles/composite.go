@@ -2,9 +2,10 @@ package styles
 
 import (
 	"strings"
-	"sync"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/docker/docker-agent/pkg/concurrent"
 )
 
 // ANSI reset sequences we need to handle
@@ -15,17 +16,12 @@ const (
 
 // styleSeqCache caches the style sequence for common styles.
 // The cache maps a style's string representation to its escape sequence.
-var (
-	styleSeqCache   = make(map[string]string)
-	styleSeqCacheMu sync.RWMutex
-)
+var styleSeqCache concurrent.Map[string, string]
 
 // clearStyleSeqCache clears the style sequence cache.
 // Called when the theme changes to ensure styles are re-computed with new colors.
 func clearStyleSeqCache() {
-	styleSeqCacheMu.Lock()
-	styleSeqCache = make(map[string]string)
-	styleSeqCacheMu.Unlock()
+	styleSeqCache.Clear()
 }
 
 // getStyleSeq returns the ANSI escape sequence for a style's colors only.
@@ -35,12 +31,9 @@ func getStyleSeq(style lipgloss.Style) string {
 	// This is a simple way to identify the style
 	cacheKey := style.Render("")
 
-	styleSeqCacheMu.RLock()
-	if seq, ok := styleSeqCache[cacheKey]; ok {
-		styleSeqCacheMu.RUnlock()
+	if seq, ok := styleSeqCache.Load(cacheKey); ok {
 		return seq
 	}
-	styleSeqCacheMu.RUnlock()
 
 	// Compute the style sequence
 	cleanStyle := style.
@@ -66,9 +59,7 @@ func getStyleSeq(style lipgloss.Style) string {
 	styleSeq = strings.TrimSuffix(styleSeq, resetFull)
 	styleSeq = strings.TrimSuffix(styleSeq, resetShort)
 
-	styleSeqCacheMu.Lock()
-	styleSeqCache[cacheKey] = styleSeq
-	styleSeqCacheMu.Unlock()
+	styleSeqCache.Store(cacheKey, styleSeq)
 
 	return styleSeq
 }
