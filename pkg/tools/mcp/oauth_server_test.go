@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCallbackServer_Port(t *testing.T) {
@@ -70,6 +72,54 @@ func TestBuildRedirectURI(t *testing.T) {
 				t.Errorf("buildRedirectURI(%q, %q, %d) = %q, want %q", tt.override, fallback, port, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCallbackServer_DuplicateCallbacksDoNotBlock guards against a regression
+// where extra callbacks (stale browser tabs, page refreshes, or any local
+// process probing the loopback port) blocked the HTTP handler goroutine on
+// a full result channel. Sends are now non-blocking; the first callback
+// wins and later ones must be dropped without wedging the server.
+func TestCallbackServer_DuplicateCallbacksDoNotBlock(t *testing.T) {
+	cs, err := NewCallbackServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Shutdown(t.Context()) }()
+
+	cs.SetExpectedState("expected-state")
+	callbackURL := cs.GetRedirectURI() + "?code=authcode&state=expected-state"
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// Fire several callbacks back-to-back. Each one must complete (so the
+	// handler goroutine isn't stuck) regardless of whether anyone is
+	// reading from resultCh yet.
+	for i := range 5 {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, callbackURL, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("callback %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("callback %d: status = %d, want 200", i, resp.StatusCode)
+		}
+	}
+
+	// The first callback must still be deliverable to the waiter.
+	code, state, err := cs.WaitForCallback(t.Context())
+	if err != nil {
+		t.Fatalf("WaitForCallback: %v", err)
+	}
+	if code != "authcode" || state != "expected-state" {
+		t.Errorf("got code=%q state=%q, want code=authcode state=expected-state", code, state)
 	}
 }
 

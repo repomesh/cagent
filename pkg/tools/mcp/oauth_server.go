@@ -21,13 +21,22 @@ type CallbackServer struct {
 	listener net.Listener
 	mu       sync.Mutex
 
-	// Channels for communicating the authorization code and state
-	codeCh  chan string
-	stateCh chan string
-	errCh   chan error
+	// resultCh delivers the outcome of the first received callback.
+	// It is buffered (size 1) and all sends are non-blocking so that a
+	// stray duplicate or attacker-triggered callback cannot wedge the
+	// HTTP handler goroutine on a full channel.
+	resultCh chan callbackResult
 
 	// Expected state parameter for CSRF protection
 	expectedState string
+}
+
+// callbackResult is the outcome of a single OAuth callback. Exactly one
+// of err / (code, state) is set.
+type callbackResult struct {
+	code  string
+	state string
+	err   error
 }
 
 // NewCallbackServer creates a new OAuth callback server on a random available port
@@ -46,9 +55,7 @@ func NewCallbackServerOnPort(port int) (*CallbackServer, error) {
 
 	cs := &CallbackServer{
 		listener: listener,
-		codeCh:   make(chan string, 1),
-		stateCh:  make(chan string, 1),
-		errCh:    make(chan error, 1),
+		resultCh: make(chan callbackResult, 1),
 	}
 
 	mux := http.NewServeMux()
@@ -132,7 +139,7 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 			errMsg = fmt.Sprintf("%s: %s", errMsg, errDesc)
 		}
 
-		cs.errCh <- fmt.Errorf("OAuth error: %s", errMsg)
+		cs.deliver(callbackResult{err: fmt.Errorf("OAuth error: %s", errMsg)})
 
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, `<!DOCTYPE html>
@@ -157,7 +164,7 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 	state := query.Get("state")
 
 	if code == "" {
-		cs.errCh <- errors.New("no authorization code received")
+		cs.deliver(callbackResult{err: errors.New("no authorization code received")})
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, "No authorization code received")
 		return
@@ -171,14 +178,13 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 	cs.mu.Unlock()
 
 	if expectedState == "" || subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
-		cs.errCh <- errors.New("OAuth state mismatch (possible CSRF attempt or stale callback)")
+		cs.deliver(callbackResult{err: errors.New("OAuth state mismatch (possible CSRF attempt or stale callback)")})
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, "Invalid state parameter")
 		return
 	}
 
-	cs.codeCh <- code
-	cs.stateCh <- state
+	cs.deliver(callbackResult{code: code, state: state})
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `<!DOCTYPE html>
@@ -198,17 +204,21 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 </html>`)
 }
 
+// deliver attempts to publish r on resultCh without blocking. The first
+// callback wins; later callbacks (stale browser tabs, duplicate clicks,
+// any local process probing the loopback port) are dropped on the floor
+// instead of pinning the HTTP handler goroutine on a full channel.
+func (cs *CallbackServer) deliver(r callbackResult) {
+	select {
+	case cs.resultCh <- r:
+	default:
+	}
+}
+
 func (cs *CallbackServer) WaitForCallback(ctx context.Context) (code, state string, err error) {
 	select {
-	case code = <-cs.codeCh:
-		select {
-		case state = <-cs.stateCh:
-			return code, state, nil
-		case <-ctx.Done():
-			return "", "", ctx.Err()
-		}
-	case err = <-cs.errCh:
-		return "", "", err
+	case r := <-cs.resultCh:
+		return r.code, r.state, r.err
 	case <-ctx.Done():
 		return "", "", ctx.Err()
 	}
