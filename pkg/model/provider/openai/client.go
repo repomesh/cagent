@@ -274,6 +274,15 @@ func (c *Client) CreateChatCompletionStream(
 		}
 		params.Tools = toolsParam
 
+		// Explicitly send tool_choice="auto". The OpenAI spec treats omission as
+		// equivalent to "auto", but some strict OpenAI-compatible gateways
+		// (notably LiteLLM) reject requests where tool_choice is missing while
+		// tools are present. Sending the default value explicitly is
+		// spec-compliant and preserves the model's autonomy to call tools.
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfAuto: param.NewOpt("auto"),
+		}
+
 		if c.ModelConfig.ParallelToolCalls != nil {
 			params.ParallelToolCalls = openai.Bool(*c.ModelConfig.ParallelToolCalls)
 		}
@@ -406,6 +415,13 @@ func (c *Client) CreateResponseStream(
 			slog.DebugContext(ctx, "Added tool to OpenAI responses request", "tool_name", tool.Name)
 		}
 		params.Tools = toolsParam
+
+		// Explicitly send tool_choice="auto". See the matching comment in the
+		// Chat Completions path above for rationale (LiteLLM-style gateways
+		// reject requests where tool_choice is omitted).
+		params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{
+			OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsAuto),
+		}
 
 		if c.ModelConfig.ParallelToolCalls != nil {
 			params.ParallelToolCalls = param.NewOpt(*c.ModelConfig.ParallelToolCalls)
