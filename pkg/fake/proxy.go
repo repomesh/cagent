@@ -220,6 +220,11 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 	thinkingConfigRegex := regexp.MustCompile(`"thinkingConfig":\{[^}]*\},?`)
 	// Normalize OpenAI reasoning config (varies based on NoThinking flag and thinking budget).
 	reasoningRegex := regexp.MustCompile(`"reasoning":\{[^}]*\},?`)
+	// Normalize OpenAI tool_choice field. The string form ("auto", "none",
+	// "required") is now sent explicitly whenever tools are present so that
+	// strict gateways (LiteLLM) accept the request, but older cassettes were
+	// recorded without it.
+	toolChoiceRegex := regexp.MustCompile(`"tool_choice":"[^"]*",?`)
 
 	return func(r *http.Request, i cassette.Request) bool {
 		if r.Body == nil || r.Body == http.NoBody {
@@ -249,10 +254,12 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 		normalizedReq = maxTokensRegex.ReplaceAllString(normalizedReq, "")
 		normalizedReq = thinkingConfigRegex.ReplaceAllString(normalizedReq, "")
 		normalizedReq = reasoningRegex.ReplaceAllString(normalizedReq, "")
+		normalizedReq = toolChoiceRegex.ReplaceAllString(normalizedReq, "")
 		normalizedCassette := callIDRegex.ReplaceAllString(i.Body, "call_ID")
 		normalizedCassette = maxTokensRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = thinkingConfigRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = reasoningRegex.ReplaceAllString(normalizedCassette, "")
+		normalizedCassette = toolChoiceRegex.ReplaceAllString(normalizedCassette, "")
 
 		return normalizedReq == normalizedCassette
 	}
