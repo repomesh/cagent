@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/tools/toolsetpath"
+
 	"github.com/google/uuid"
 
 	"github.com/docker/docker-agent/pkg/config"
@@ -108,7 +110,7 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 		toolsetPath = "tasks.json"
 	}
 
-	validatedPath, err := resolveToolsetPath(toolsetPath, parentDir, runConfig)
+	validatedPath, err := toolsetpath.Resolve(toolsetPath, parentDir, runConfig)
 	if err != nil {
 		return nil, fmt.Errorf("invalid tasks storage path: %w", err)
 	}
@@ -117,21 +119,6 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 	}
 
 	return New(validatedPath), nil
-}
-
-func resolveToolsetPath(toolsetPath, parentDir string, runConfig *config.RuntimeConfig) (string, error) {
-	toolsetPath = path.ExpandPath(toolsetPath)
-
-	var basePath string
-	if filepath.IsAbs(toolsetPath) {
-		basePath = ""
-	} else if wd := runConfig.WorkingDir; wd != "" {
-		basePath = wd
-	} else {
-		basePath = parentDir
-	}
-
-	return path.ValidatePathInDirectory(toolsetPath, basePath)
 }
 
 func New(storagePath string) *ToolSet {

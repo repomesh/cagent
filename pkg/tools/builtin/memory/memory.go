@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/tools/toolsetpath"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/memory/database"
 	"github.com/docker/docker-agent/pkg/memory/database/sqlite"
-	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -52,7 +52,7 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 
 	if toolset.Path != "" {
 		var err error
-		validatedMemoryPath, err = resolveToolsetPath(toolset.Path, parentDir, runConfig)
+		validatedMemoryPath, err = toolsetpath.Resolve(toolset.Path, parentDir, runConfig)
 		if err != nil {
 			return nil, fmt.Errorf("invalid memory database path: %w", err)
 		}
@@ -73,21 +73,6 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 	}
 
 	return NewWithPath(db, validatedMemoryPath), nil
-}
-
-func resolveToolsetPath(toolsetPath, parentDir string, runConfig *config.RuntimeConfig) (string, error) {
-	toolsetPath = path.ExpandPath(toolsetPath)
-
-	var basePath string
-	if filepath.IsAbs(toolsetPath) {
-		basePath = ""
-	} else if wd := runConfig.WorkingDir; wd != "" {
-		basePath = wd
-	} else {
-		basePath = parentDir
-	}
-
-	return path.ValidatePathInDirectory(toolsetPath, basePath)
 }
 
 func New(manager DB) *ToolSet {
