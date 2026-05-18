@@ -11,16 +11,98 @@ import (
 	"iter"
 	"log/slog"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/gateway"
+	"github.com/docker/docker-agent/pkg/js"
+	"github.com/docker/docker-agent/pkg/toolinstall"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
+	"github.com/docker/docker-agent/pkg/tools/workingdir"
 )
+
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	envProvider := runConfig.EnvProvider()
+	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
+
+	if toolset.WorkingDir != "" && toolset.Ref == "" {
+		if err := workingdir.CheckDirExists(cwd, "mcp"); err != nil {
+			return nil, err
+		}
+	}
+
+	switch {
+	case toolset.Ref != "":
+		mcpServerName := gateway.ParseServerRef(toolset.Ref)
+		serverSpec, err := gateway.ServerSpec(ctx, mcpServerName)
+		if err != nil {
+			return nil, fmt.Errorf("fetching MCP server spec for %q: %w", mcpServerName, err)
+		}
+
+		if serverSpec.Type == "remote" {
+			if toolset.WorkingDir != "" {
+				return nil, fmt.Errorf("working_dir is not supported for MCP toolset %q: ref %q resolves to a remote server (no local subprocess)",
+					toolset.Name, toolset.Ref)
+			}
+			return NewRemoteToolset(toolset.Name, serverSpec.Remote.URL, serverSpec.Remote.TransportType, nil, nil, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
+		}
+
+		if toolset.WorkingDir != "" {
+			if err := workingdir.CheckDirExists(cwd, "mcp"); err != nil {
+				return nil, err
+			}
+		}
+
+		env, err := environment.ExpandAll(ctx, environment.ToValues(toolset.Env), envProvider)
+		if err != nil {
+			return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
+		}
+
+		envProvider := environment.NewMultiProvider(
+			environment.NewEnvListProvider(env),
+			envProvider,
+		)
+
+		return NewGatewayToolset(ctx, toolset.Name, mcpServerName, serverSpec.Secrets, toolset.Config, envProvider, cwd)
+
+	case toolset.Command != "":
+		resolvedCommand, err := toolinstall.EnsureCommand(ctx, toolset.Command, toolset.Version)
+		if err != nil {
+			slog.WarnContext(ctx, "MCP command not yet available, will retry on next turn",
+				"command", toolset.Command, "error", err)
+			resolvedCommand = toolset.Command
+		}
+
+		env, err := environment.ExpandAll(ctx, environment.ToValues(toolset.Env), envProvider)
+		if err != nil {
+			return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
+		}
+		env = append(env, os.Environ()...)
+		env = toolinstall.PrependBinDirToEnv(env)
+
+		return NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
+
+	case toolset.Remote.URL != "":
+		expander := js.NewJsExpander(envProvider)
+
+		headers := expander.ExpandMap(ctx, toolset.Remote.Headers)
+		remoteURL := expander.Expand(ctx, toolset.Remote.URL, nil)
+
+		return NewRemoteToolset(toolset.Name, remoteURL, toolset.Remote.TransportType, headers, toolset.Remote.OAuth, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
+
+	default:
+		return nil, errors.New("mcp toolset requires either ref, command, or remote configuration")
+	}
+}
 
 type mcpClient interface {
 	Initialize(ctx context.Context, request *mcp.InitializeRequest) (*mcp.InitializeResult, error)

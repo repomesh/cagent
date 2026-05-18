@@ -9,30 +9,29 @@ import (
 
 const ToolNameThink = "think"
 
-type Tool struct {
-	thoughts []string
+// CreateToolSet is used by the tools registry.
+func CreateToolSet() (tools.ToolSet, error) {
+	return New(), nil
 }
 
-// Verify interface compliance
-var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
-)
+type ToolSet struct {
+	thoughts []string
+}
 
 type Args struct {
 	Thought string `json:"thought" jsonschema:"The thought to think about"`
 }
 
-func (t *Tool) callTool(_ context.Context, params Args) (*tools.ToolCallResult, error) {
+func (t *ToolSet) callTool(_ context.Context, params Args) (*tools.ToolCallResult, error) {
 	t.thoughts = append(t.thoughts, params.Thought)
 	return tools.ResultSuccess("Thoughts:\n" + strings.Join(t.thoughts, "\n")), nil
 }
 
-func NewThinkTool() *Tool {
-	return &Tool{}
+func New() *ToolSet {
+	return &ToolSet{}
 }
 
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	return `## Think Tool
 
 Use the think tool as a scratchpad before acting. Think to:
@@ -42,7 +41,7 @@ Use the think tool as a scratchpad before acting. Think to:
 - Reason through complex multi-step problems`
 }
 
-func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
 			Name:         ToolNameThink,

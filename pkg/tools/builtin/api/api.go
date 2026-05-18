@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/js"
@@ -20,7 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
-type Tool struct {
+type ToolSet struct {
 	config   latest.APIToolConfig
 	expander *js.Expander
 
@@ -31,11 +32,11 @@ type Tool struct {
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
 )
 
-func (t *Tool) callTool(ctx context.Context, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
+func (t *ToolSet) callTool(ctx context.Context, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
 	client := httpclient.NewSafeClient(30*time.Second, t.unsafe)
 
 	endpoint := t.config.Endpoint
@@ -89,18 +90,31 @@ func (t *Tool) callTool(ctx context.Context, toolCall tools.ToolCall) (*tools.To
 	return tools.ResultSuccess(limitOutput(string(body))), nil
 }
 
-func NewAPITool(config latest.APIToolConfig, expander *js.Expander) *Tool {
-	return &Tool{
-		config:   config,
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	if toolset.APIConfig.Endpoint == "" {
+		return nil, errors.New("api tool requires an endpoint in api_config")
+	}
+
+	expander := js.NewJsExpander(runConfig.EnvProvider())
+	toolset.APIConfig.Endpoint = expander.Expand(ctx, toolset.APIConfig.Endpoint, nil)
+	toolset.APIConfig.Headers = expander.ExpandMap(ctx, toolset.APIConfig.Headers)
+
+	return New(toolset.APIConfig, expander), nil
+}
+
+func New(apiConfig latest.APIToolConfig, expander *js.Expander) *ToolSet {
+	return &ToolSet{
+		config:   apiConfig,
 		expander: expander,
 	}
 }
 
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	return t.config.Instruction
 }
 
-func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	inputSchema, err := tools.SchemaToMap(map[string]any{
 		"type":       "object",
 		"properties": t.config.Args,

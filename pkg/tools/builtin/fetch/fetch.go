@@ -16,7 +16,10 @@ import (
 	"github.com/k3a/html2text"
 	"github.com/temoto/robotstxt"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/useragent"
 )
@@ -25,14 +28,14 @@ const (
 	ToolNameFetch = "fetch"
 )
 
-type Tool struct {
+type ToolSet struct {
 	handler *fetchHandler
 }
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
 )
 
 type fetchHandler struct {
@@ -452,8 +455,30 @@ func htmlToText(html string) string {
 	return html2text.HTML2Text(html)
 }
 
-func NewFetchTool(options ...ToolOption) *Tool {
-	tool := &Tool{
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	expander := js.NewJsExpander(runConfig.EnvProvider())
+
+	var opts []ToolOption
+	if toolset.Timeout > 0 {
+		timeout := time.Duration(toolset.Timeout) * time.Second
+		opts = append(opts, WithTimeout(timeout))
+	}
+	if len(toolset.AllowedDomains) > 0 {
+		opts = append(opts, WithAllowedDomains(toolset.AllowedDomains))
+	}
+	if len(toolset.BlockedDomains) > 0 {
+		opts = append(opts, WithBlockedDomains(toolset.BlockedDomains))
+	}
+	if toolset.AllowPrivateIPs {
+		opts = append(opts, WithAllowPrivateIPs(true))
+	}
+	opts = append(opts, WithHeaders(expander.ExpandMap(ctx, toolset.Headers)))
+	return New(opts...), nil
+}
+
+func New(options ...ToolOption) *ToolSet {
+	tool := &ToolSet{
 		handler: &fetchHandler{
 			timeout: 30 * time.Second,
 		},
@@ -466,10 +491,10 @@ func NewFetchTool(options ...ToolOption) *Tool {
 	return tool
 }
 
-type ToolOption func(*Tool)
+type ToolOption func(*ToolSet)
 
 func WithTimeout(timeout time.Duration) ToolOption {
-	return func(t *Tool) {
+	return func(t *ToolSet) {
 		t.handler.timeout = timeout
 	}
 }
@@ -478,7 +503,7 @@ func WithTimeout(timeout time.Duration) ToolOption {
 // of the supplied domain patterns. See matchesDomain for matching rules.
 // An empty or nil slice disables the allow-list (every host is allowed).
 func WithAllowedDomains(domains []string) ToolOption {
-	return func(t *Tool) {
+	return func(t *ToolSet) {
 		t.handler.allowedDomains = domains
 	}
 }
@@ -487,7 +512,7 @@ func WithAllowedDomains(domains []string) ToolOption {
 // matches one of the supplied domain patterns. See matchesDomain for matching
 // rules. An empty or nil slice disables the deny-list.
 func WithBlockedDomains(domains []string) ToolOption {
-	return func(t *Tool) {
+	return func(t *ToolSet) {
 		t.handler.blockedDomains = domains
 	}
 }
@@ -499,7 +524,7 @@ func WithBlockedDomains(domains []string) ToolOption {
 // so DNS rebinding cannot bypass the check. Set to true only when an
 // agent legitimately needs to reach internal services.
 func WithAllowPrivateIPs(allow bool) ToolOption {
-	return func(t *Tool) {
+	return func(t *ToolSet) {
 		t.handler.allowPrivateIPs = allow
 	}
 }
@@ -509,12 +534,12 @@ func WithAllowPrivateIPs(allow bool) ToolOption {
 // These are applied last, so they override the default User-Agent and the
 // format-driven Accept header. An empty or nil map is a no-op.
 func WithHeaders(headers map[string]string) ToolOption {
-	return func(t *Tool) {
+	return func(t *ToolSet) {
 		t.handler.headers = headers
 	}
 }
 
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	var b strings.Builder
 	b.WriteString("## Fetch Tool\n\nFetch content from HTTP/HTTPS URLs. Supports multiple URLs per call, output format selection (text, markdown, html), and respects robots.txt.")
 	if d := t.handler.allowedDomains; len(d) > 0 {
@@ -526,7 +551,7 @@ func (t *Tool) Instructions() string {
 	return b.String()
 }
 
-func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
 			Name:        ToolNameFetch,

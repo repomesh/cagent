@@ -14,8 +14,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/toolsetpath"
 )
 
 const (
@@ -88,25 +91,43 @@ type taskStore struct {
 	Tasks map[string]Task `json:"tasks"`
 }
 
-type Tool struct {
+type ToolSet struct {
 	mu       sync.Mutex
 	filePath string
 	basePath string
 }
 
 var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
 )
 
-func NewTasksTool(storagePath string) *Tool {
-	return &Tool{
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	toolsetPath := toolset.Path
+	if toolsetPath == "" {
+		toolsetPath = "tasks.json"
+	}
+
+	validatedPath, err := toolsetpath.Resolve(toolsetPath, parentDir, runConfig)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tasks storage path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(validatedPath), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create tasks storage directory: %w", err)
+	}
+
+	return New(validatedPath), nil
+}
+
+func New(storagePath string) *ToolSet {
+	return &ToolSet{
 		filePath: storagePath,
 		basePath: filepath.Dir(storagePath),
 	}
 }
 
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	return `## Task Tools
 
 Persistent task management with priorities (critical > high > medium > low), statuses (pending, in_progress, done, blocked), and dependencies. Tasks persist across sessions.
@@ -114,7 +135,7 @@ Persistent task management with priorities (critical > high > medium > low), sta
 A task is automatically blocked if any dependency is not done. Use next_task to get the highest-priority actionable task.`
 }
 
-func (t *Tool) load() taskStore {
+func (t *ToolSet) load() taskStore {
 	data, err := os.ReadFile(t.filePath)
 	if err != nil {
 		return taskStore{Tasks: make(map[string]Task)}
@@ -129,7 +150,7 @@ func (t *Tool) load() taskStore {
 	return store
 }
 
-func (t *Tool) save(store taskStore) error {
+func (t *ToolSet) save(store taskStore) error {
 	if err := os.MkdirAll(filepath.Dir(t.filePath), 0o700); err != nil {
 		return fmt.Errorf("creating storage directory: %w", err)
 	}
@@ -178,7 +199,7 @@ func now() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-func (t *Tool) resolveDescription(description, filePath string) (string, error) {
+func (t *ToolSet) resolveDescription(description, filePath string) (string, error) {
 	if filePath != "" {
 		validatedPath, err := path.ValidatePathInDirectory(filePath, t.basePath)
 		if err != nil {
@@ -254,7 +275,7 @@ type RemoveDependencyArgs struct {
 
 // Tool handlers
 
-func (t *Tool) createTask(_ context.Context, params CreateTaskArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) createTask(_ context.Context, params CreateTaskArgs) (*tools.ToolCallResult, error) {
 	desc, err := t.resolveDescription(params.Description, params.Path)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
@@ -305,7 +326,7 @@ func (t *Tool) createTask(_ context.Context, params CreateTaskArgs) (*tools.Tool
 	return taskResult(task), nil
 }
 
-func (t *Tool) getTask(_ context.Context, params GetTaskArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) getTask(_ context.Context, params GetTaskArgs) (*tools.ToolCallResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -318,7 +339,7 @@ func (t *Tool) getTask(_ context.Context, params GetTaskArgs) (*tools.ToolCallRe
 	return taskWithEffectiveResult(task, store.Tasks), nil
 }
 
-func (t *Tool) updateTask(_ context.Context, params UpdateTaskArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) updateTask(_ context.Context, params UpdateTaskArgs) (*tools.ToolCallResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -372,7 +393,7 @@ func (t *Tool) updateTask(_ context.Context, params UpdateTaskArgs) (*tools.Tool
 	return taskResult(task), nil
 }
 
-func (t *Tool) deleteTask(_ context.Context, params DeleteTaskArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) deleteTask(_ context.Context, params DeleteTaskArgs) (*tools.ToolCallResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -401,7 +422,7 @@ func (t *Tool) deleteTask(_ context.Context, params DeleteTaskArgs) (*tools.Tool
 	return tools.ResultJSON(map[string]string{"deleted": params.ID}), nil
 }
 
-func (t *Tool) listTasks(_ context.Context, params ListTasksArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) listTasks(_ context.Context, params ListTasksArgs) (*tools.ToolCallResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -438,7 +459,7 @@ func (t *Tool) listTasks(_ context.Context, params ListTasksArgs) (*tools.ToolCa
 	return tools.ResultJSON(tasks), nil
 }
 
-func (t *Tool) nextTask(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+func (t *ToolSet) nextTask(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -461,7 +482,7 @@ func (t *Tool) nextTask(_ context.Context, _ tools.ToolCall) (*tools.ToolCallRes
 	return tools.ResultSuccess("No actionable tasks. Everything is either done or blocked."), nil
 }
 
-func (t *Tool) addDependency(_ context.Context, params AddDependencyArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) addDependency(_ context.Context, params AddDependencyArgs) (*tools.ToolCallResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -493,7 +514,7 @@ func (t *Tool) addDependency(_ context.Context, params AddDependencyArgs) (*tool
 	return taskResult(task), nil
 }
 
-func (t *Tool) removeDependency(_ context.Context, params RemoveDependencyArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) removeDependency(_ context.Context, params RemoveDependencyArgs) (*tools.ToolCallResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -531,7 +552,7 @@ func taskWithEffectiveResult(task Task, tasks map[string]Task) *tools.ToolCallRe
 	})
 }
 
-func (t *Tool) Tools(_ context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(_ context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
 			Name:        ToolNameCreateTask,

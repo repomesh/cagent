@@ -38,7 +38,7 @@ var defaultMaxTokens int64 = 32000
 type loadOptions struct {
 	modelOverrides  []string
 	promptFiles     []string
-	toolsetRegistry *ToolsetRegistry
+	toolsetRegistry ToolsetRegistry
 }
 
 type Opt func(*loadOptions) error
@@ -60,7 +60,7 @@ func WithPromptFiles(files []string) Opt {
 }
 
 // WithToolsetRegistry allows using a custom toolset registry instead of the default
-func WithToolsetRegistry(registry *ToolsetRegistry) Opt {
+func WithToolsetRegistry(registry ToolsetRegistry) Opt {
 	return func(opts *loadOptions) error {
 		opts.toolsetRegistry = registry
 		return nil
@@ -221,7 +221,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			loadedSkills := skills.Load(agentConfig.Skills.Sources)
 			loadedSkills = filterSkillsByName(loadedSkills, agentConfig.Skills.Include)
 			if len(loadedSkills) > 0 {
-				agentTools = append(agentTools, skillstool.NewSkillsToolset(loadedSkills, runConfig.WorkingDir))
+				agentTools = append(agentTools, skillstool.New(loadedSkills, runConfig.WorkingDir))
 			}
 		}
 
@@ -407,14 +407,14 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 // getToolsForAgent returns the tool definitions for an agent based on its
 // configuration. Toolset instructions support ${...} JavaScript placeholders
 // (e.g. ${env.X}); they are expanded here using the runtime env provider.
-func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir string, runConfig *config.RuntimeConfig, registry *ToolsetRegistry, configName string, expander *js.Expander) ([]tools.ToolSet, []string) {
+func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir string, runConfig *config.RuntimeConfig, registry ToolsetRegistry, configName string, expander *js.Expander) ([]tools.ToolSet, []string) {
 	var (
 		toolSets    []tools.ToolSet
 		warnings    []string
 		lspBackends []lsp.Backend
 	)
 
-	deferredToolset := deferred.NewDeferredToolset()
+	deferredToolset := deferred.New()
 
 	for i := range a.Toolsets {
 		toolset := a.Toolsets[i]
@@ -448,7 +448,7 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 		// Instead of adding them individually (which causes duplicate tool names),
 		// they are combined into a single Multiplexer after the loop.
 		if toolset.Type == "lsp" {
-			if lspTool, ok := tool.(*lsp.Tool); ok {
+			if lspTool, ok := tool.(*lsp.ToolSet); ok {
 				lspBackends = append(lspBackends, lsp.Backend{LSP: lspTool, Toolset: wrapped})
 				continue
 			}
@@ -472,10 +472,10 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	}
 
 	if len(a.SubAgents) > 0 {
-		toolSets = append(toolSets, transfertask.NewTransferTaskTool())
+		toolSets = append(toolSets, transfertask.New())
 	}
 	if len(a.Handoffs) > 0 {
-		toolSets = append(toolSets, handoff.NewHandoffTool())
+		toolSets = append(toolSets, handoff.New())
 	}
 
 	// Wrap all tools in a single Code Mode toolset.

@@ -20,8 +20,13 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/toolinstall"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
+	"github.com/docker/docker-agent/pkg/tools/workingdir"
 )
 
 const (
@@ -42,18 +47,18 @@ const (
 	ToolNameLSPInlayHints       = "lsp_inlay_hints"
 )
 
-// Tool implements tools.ToolSet for connecting to any LSP server.
+// ToolSet implements tools.ToolSet for connecting to any LSP server.
 // It provides stateless code intelligence tools that automatically manage
 // the LSP server lifecycle and document state.
-type Tool struct {
+type ToolSet struct {
 	handler *lspHandler
 }
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Startable    = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Startable    = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
 )
 
 type lspHandler struct {
@@ -339,13 +344,41 @@ type lspInlayHint struct {
 	PaddingRight bool        `json:"paddingRight,omitempty"`
 }
 
-// NewLSPTool creates a new LSP tool that connects to an LSP server.
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	resolvedCommand, err := toolinstall.EnsureCommand(ctx, toolset.Command, toolset.Version)
+	if err != nil {
+		return nil, fmt.Errorf("resolving command %q: %w", toolset.Command, err)
+	}
+
+	env, err := environment.ExpandAll(ctx, environment.ToValues(toolset.Env), runConfig.EnvProvider())
+	if err != nil {
+		return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
+	}
+	env = append(env, os.Environ()...)
+	env = toolinstall.PrependBinDirToEnv(env)
+
+	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
+	if toolset.WorkingDir != "" {
+		if err := workingdir.CheckDirExists(cwd, "lsp"); err != nil {
+			return nil, err
+		}
+	}
+
+	tool := New(resolvedCommand, toolset.Args, env, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle))
+	if len(toolset.FileTypes) > 0 {
+		tool.SetFileTypes(toolset.FileTypes)
+	}
+	return tool, nil
+}
+
+// New creates a new LSP toolset that connects to an LSP server.
 //
 // The optional policy lets callers tune restart/backoff behaviour. When
 // the zero value is passed the supervisor uses its built-in defaults
 // (RestartOnFailure, 5 attempts, 1s..32s backoff). Internal callbacks
 // (OnDisconnect, Logger) are always set by the constructor.
-func NewLSPTool(command string, args, env []string, workingDir string, policy ...lifecycle.Policy) *Tool {
+func New(command string, args, env []string, workingDir string, policy ...lifecycle.Policy) *ToolSet {
 	h := &lspHandler{
 		command:     command,
 		args:        args,
@@ -367,36 +400,36 @@ func NewLSPTool(command string, args, env []string, workingDir string, policy ..
 		h.diagnosticsMu.Unlock()
 	}
 	h.supervisor = lifecycle.New("lsp/"+command, &lspConnector{h: h}, base)
-	return &Tool{handler: h}
+	return &ToolSet{handler: h}
 }
 
 // SetFileTypes sets the file types (extensions) that this LSP server handles.
-func (t *Tool) SetFileTypes(fileTypes []string) {
+func (t *ToolSet) SetFileTypes(fileTypes []string) {
 	t.handler.fileTypes = fileTypes
 }
 
 // WorkingDir returns the working directory of the LSP server process.
 // This is intended for testing only.
-func (t *Tool) WorkingDir() string {
+func (t *ToolSet) WorkingDir() string {
 	return t.handler.workingDir
 }
 
 // HandlesFile checks if this LSP handles the given file based on its extension.
-func (t *Tool) HandlesFile(path string) bool {
+func (t *ToolSet) HandlesFile(path string) bool {
 	return t.handler.handlesFile(path)
 }
 
-func (t *Tool) Start(ctx context.Context) error {
+func (t *ToolSet) Start(ctx context.Context) error {
 	return t.handler.supervisor.Start(ctx)
 }
 
-func (t *Tool) Stop(ctx context.Context) error {
+func (t *ToolSet) Stop(ctx context.Context) error {
 	return t.handler.supervisor.Stop(ctx)
 }
 
 // State returns a snapshot of the underlying supervisor's lifecycle state,
 // suitable for the /tools dialog and lifecycle log messages.
-func (t *Tool) State() lifecycle.StateInfo {
+func (t *ToolSet) State() lifecycle.StateInfo {
 	return t.handler.supervisor.State()
 }
 
@@ -404,7 +437,7 @@ func (t *Tool) State() lifecycle.StateInfo {
 // Stopped supervisors are recovered via Start; otherwise the current
 // session is dropped and we wait for the supervisor to reconnect.
 // Blocks up to 35s (matching the MCP toolset).
-func (t *Tool) Restart(ctx context.Context) error {
+func (t *ToolSet) Restart(ctx context.Context) error {
 	if t.handler.supervisor.State().State.IsTerminal() {
 		return t.handler.supervisor.Start(ctx)
 	}
@@ -414,17 +447,17 @@ func (t *Tool) Restart(ctx context.Context) error {
 // Kind returns the user-facing classification of this toolset. Used by
 // status surfaces such as the /tools dialog so they can label the
 // toolset without leaking Go type names.
-func (t *Tool) Kind() string { return "LSP" }
+func (t *ToolSet) Kind() string { return "LSP" }
 
 // Name returns the basename of the configured command ("gopls",
 // "rust-analyzer", …). It's the most useful identifier in the absence
 // of a YAML name: field on LSP toolsets, and lets the /tools dialog
 // distinguish multiple language servers in the same agent.
-func (t *Tool) Name() string {
+func (t *ToolSet) Name() string {
 	return filepath.Base(t.handler.command)
 }
 
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	return `# LSP Code Intelligence Tools
 
 Stateless code intelligence tools via Language Server Protocol. Just provide file path and position.
@@ -473,7 +506,7 @@ func lspTool(name, title, description string, readOnly bool, params any, handler
 	}
 }
 
-func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	h := t.handler
 	all := allLSPTools(h)
 
@@ -499,7 +532,7 @@ func (h *lspHandler) snapshotCapabilities() *lspServerCapabilities {
 // supervisor reaches Ready and the server's capability matrix becomes
 // available. The runtime uses this to re-query Tools() and pick up the
 // capability-filtered list.
-func (t *Tool) SetToolsChangedHandler(handler func()) {
+func (t *ToolSet) SetToolsChangedHandler(handler func()) {
 	t.handler.mu.Lock()
 	t.handler.toolsChangedHandler = handler
 	t.handler.mu.Unlock()

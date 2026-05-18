@@ -9,16 +9,42 @@ import (
 	"log/slog"
 	"slices"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/rag"
 	ragtypes "github.com/docker/docker-agent/pkg/rag/types"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	if toolset.RAGConfig == nil {
+		return nil, errors.New("rag toolset requires either a rag_config block or a ref")
+	}
+
+	ragName := cmp.Or(toolset.Name, "rag")
+
+	mgr, err := rag.NewManager(ctx, ragName, toolset.RAGConfig, rag.ManagersBuildConfig{
+		ParentDir:     parentDir,
+		ModelsGateway: runConfig.ModelsGateway,
+		Env:           runConfig.EnvProvider(),
+		Models:        runConfig.Models,
+		Providers:     runConfig.Providers,
+		RuntimeConfig: runConfig,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RAG manager: %w", err)
+	}
+
+	toolName := cmp.Or(mgr.ToolName(), ragName)
+	return New(mgr, toolName), nil
+}
+
 // EventCallback is called to forward RAG manager events during initialization.
 type EventCallback func(event ragtypes.Event)
 
-// Tool provides document querying capabilities for a single RAG source.
-type Tool struct {
+// ToolSet provides document querying capabilities for a single RAG source.
+type ToolSet struct {
 	manager       *rag.Manager
 	toolName      string
 	eventCallback EventCallback
@@ -26,33 +52,33 @@ type Tool struct {
 
 // Verify interface compliance.
 var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
-	_ tools.Startable    = (*Tool)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
+	_ tools.Startable    = (*ToolSet)(nil)
 )
 
-// NewRAGTool creates a new RAG tool for a single RAG manager.
-func NewRAGTool(manager *rag.Manager, toolName string) *Tool {
-	return &Tool{
+// New creates a new RAG toolset for a single RAG manager.
+func New(manager *rag.Manager, toolName string) *ToolSet {
+	return &ToolSet{
 		manager:  manager,
 		toolName: toolName,
 	}
 }
 
 // Name returns the tool name for this RAG source.
-func (t *Tool) Name() string {
+func (t *ToolSet) Name() string {
 	return t.toolName
 }
 
 // SetEventCallback sets a callback to receive RAG manager events during
 // initialization. Must be called before Start().
-func (t *Tool) SetEventCallback(cb EventCallback) {
+func (t *ToolSet) SetEventCallback(cb EventCallback) {
 	t.eventCallback = cb
 }
 
 // Start initializes the RAG manager (indexes documents) and starts a
 // file watcher for incremental updates.
-func (t *Tool) Start(ctx context.Context) error {
+func (t *ToolSet) Start(ctx context.Context) error {
 	if t.manager == nil {
 		return nil
 	}
@@ -75,7 +101,7 @@ func (t *Tool) Start(ctx context.Context) error {
 }
 
 // Stop closes the RAG manager and releases resources.
-func (t *Tool) Stop(_ context.Context) error {
+func (t *ToolSet) Stop(_ context.Context) error {
 	if t.manager == nil {
 		return nil
 	}
@@ -83,7 +109,7 @@ func (t *Tool) Stop(_ context.Context) error {
 }
 
 // forwardEvents reads events from the RAG manager and forwards them via the callback.
-func (t *Tool) forwardEvents(ctx context.Context) {
+func (t *ToolSet) forwardEvents(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -97,7 +123,7 @@ func (t *Tool) forwardEvents(ctx context.Context) {
 	}
 }
 
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	if t.manager != nil {
 		if instruction := t.manager.ToolInstruction(); instruction != "" {
 			return instruction
@@ -118,7 +144,7 @@ type queryResult struct {
 	ChunkIndex int     `json:"chunk_index" jsonschema:"Index of the chunk within the source document"`
 }
 
-func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	var description string
 	if t.manager != nil {
 		description = t.manager.Description()
@@ -141,7 +167,7 @@ func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
 	}}, nil
 }
 
-func (t *Tool) handleQueryRAG(ctx context.Context, args queryRAGArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleQueryRAG(ctx context.Context, args queryRAGArgs) (*tools.ToolCallResult, error) {
 	if args.Query == "" {
 		return nil, errors.New("query cannot be empty")
 	}

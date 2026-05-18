@@ -2,9 +2,11 @@ package modelpicker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -13,15 +15,23 @@ const (
 	ToolNameRevertModel = "revert_model"
 )
 
-// Tool provides tools for dynamically switching the agent's model mid-conversation.
-type Tool struct {
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(toolset latest.Toolset) (tools.ToolSet, error) {
+	if len(toolset.Models) == 0 {
+		return nil, errors.New("model_picker toolset requires at least one model")
+	}
+	return New(toolset.Models), nil
+}
+
+// ToolSet provides tools for dynamically switching the agent's model mid-conversation.
+type ToolSet struct {
 	models []string // list of available model references
 }
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
 )
 
 // ChangeModelArgs are the arguments for the change_model tool.
@@ -29,13 +39,13 @@ type ChangeModelArgs struct {
 	Model string `json:"model" jsonschema:"The model to switch to. Must be one of the available models."`
 }
 
-// NewModelPickerTool creates a new Tool with the given list of allowed models.
-func NewModelPickerTool(models []string) *Tool {
-	return &Tool{models: models}
+// New creates a new ToolSet with the given list of allowed models.
+func New(models []string) *ToolSet {
+	return &ToolSet{models: models}
 }
 
 // Instructions returns guidance for the LLM on when and how to use the model picker tools.
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	return "## Model Switching\n\n" +
 		"Available models: " + strings.Join(t.models, ", ") + ".\n\n" +
 		"Use `" + ToolNameChangeModel + "` to switch to a model better suited for the current task " +
@@ -44,12 +54,12 @@ func (t *Tool) Instructions() string {
 }
 
 // AllowedModels returns the list of models this tool allows switching to.
-func (t *Tool) AllowedModels() []string {
+func (t *ToolSet) AllowedModels() []string {
 	return t.models
 }
 
 // Tools returns the change_model and revert_model tool definitions.
-func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
 			Name:     ToolNameChangeModel,

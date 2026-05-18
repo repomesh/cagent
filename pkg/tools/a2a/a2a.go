@@ -15,7 +15,10 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
@@ -36,6 +39,13 @@ var (
 	_ tools.Startable    = (*Toolset)(nil)
 	_ tools.Instructable = (*Toolset)(nil)
 )
+
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	expander := js.NewJsExpander(runConfig.EnvProvider())
+	headers := expander.ExpandMap(ctx, toolset.Headers)
+	return NewToolset(toolset.Name, toolset.URL, headers), nil
+}
 
 // NewToolset creates a new A2A toolset for the given URL.
 func NewToolset(name, url string, headers map[string]string) *Toolset {

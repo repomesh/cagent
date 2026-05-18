@@ -4,11 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/memory/database"
+	"github.com/docker/docker-agent/pkg/memory/database/sqlite"
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/toolsetpath"
 )
 
 const (
@@ -27,35 +34,64 @@ type DB interface {
 	UpdateMemory(ctx context.Context, memory database.UserMemory) error
 }
 
-type Tool struct {
+type ToolSet struct {
 	db   DB
 	path string
 }
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*Tool)(nil)
-	_ tools.Describer    = (*Tool)(nil)
-	_ tools.Instructable = (*Tool)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Describer    = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
 )
 
-func NewMemoryTool(manager DB) *Tool {
-	return &Tool{
+// CreateToolSet is used by the tools registry.
+func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
+	var validatedMemoryPath string
+
+	if toolset.Path != "" {
+		var err error
+		validatedMemoryPath, err = toolsetpath.Resolve(toolset.Path, parentDir, runConfig)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory database path: %w", err)
+		}
+	} else {
+		if configName == "" {
+			configName = "default"
+		}
+		validatedMemoryPath = filepath.Join(paths.GetDataDir(), "memory", configName, "memory.db")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(validatedMemoryPath), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create memory database directory: %w", err)
+	}
+
+	db, err := sqlite.NewMemoryDatabase(validatedMemoryPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create memory database: %w", err)
+	}
+
+	return NewWithPath(db, validatedMemoryPath), nil
+}
+
+func New(manager DB) *ToolSet {
+	return &ToolSet{
 		db: manager,
 	}
 }
 
-// NewMemoryToolWithPath creates a Tool and records the database path for
+// NewWithPath creates a ToolSet and records the database path for
 // user-visible identification in warnings and error messages.
-func NewMemoryToolWithPath(manager DB, dbPath string) *Tool {
-	return &Tool{
+func NewWithPath(manager DB, dbPath string) *ToolSet {
+	return &ToolSet{
 		db:   manager,
 		path: dbPath,
 	}
 }
 
 // Describe returns a short, user-visible description of this toolset instance.
-func (t *Tool) Describe() string {
+func (t *ToolSet) Describe() string {
 	if t.path != "" {
 		return "memory(path=" + t.path + ")"
 	}
@@ -82,7 +118,7 @@ type UpdateMemoryArgs struct {
 	Category string `json:"category,omitempty" jsonschema:"Optional new category for the memory"`
 }
 
-func (t *Tool) Instructions() string {
+func (t *ToolSet) Instructions() string {
 	return `## Memory Tools
 
 Check stored memories for relevant context before acting. Store useful information silently — never mention using this tool.
@@ -93,7 +129,7 @@ Check stored memories for relevant context before acting. Store useful informati
 - Organize with categories: "preference", "fact", "project", "decision"`
 }
 
-func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
 			Name:         ToolNameAddMemory,
@@ -154,7 +190,7 @@ func (t *Tool) Tools(context.Context) ([]tools.Tool, error) {
 	}, nil
 }
 
-func (t *Tool) handleAddMemory(ctx context.Context, args AddMemoryArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleAddMemory(ctx context.Context, args AddMemoryArgs) (*tools.ToolCallResult, error) {
 	memory := database.UserMemory{
 		ID:        strconv.FormatInt(time.Now().UnixNano(), 10),
 		CreatedAt: time.Now().Format(time.RFC3339),
@@ -169,7 +205,7 @@ func (t *Tool) handleAddMemory(ctx context.Context, args AddMemoryArgs) (*tools.
 	return tools.ResultSuccess("Memory added successfully with ID: " + memory.ID), nil
 }
 
-func (t *Tool) handleGetMemories(ctx context.Context, _ map[string]any) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleGetMemories(ctx context.Context, _ map[string]any) (*tools.ToolCallResult, error) {
 	memories, err := t.db.GetMemories(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get memories: %w", err)
@@ -183,7 +219,7 @@ func (t *Tool) handleGetMemories(ctx context.Context, _ map[string]any) (*tools.
 	return tools.ResultSuccess(string(result)), nil
 }
 
-func (t *Tool) handleDeleteMemory(ctx context.Context, args DeleteMemoryArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleDeleteMemory(ctx context.Context, args DeleteMemoryArgs) (*tools.ToolCallResult, error) {
 	memory := database.UserMemory{
 		ID: args.ID,
 	}
@@ -195,7 +231,7 @@ func (t *Tool) handleDeleteMemory(ctx context.Context, args DeleteMemoryArgs) (*
 	return tools.ResultSuccess(fmt.Sprintf("Memory with ID %s deleted successfully", args.ID)), nil
 }
 
-func (t *Tool) handleSearchMemories(ctx context.Context, args SearchMemoriesArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleSearchMemories(ctx context.Context, args SearchMemoriesArgs) (*tools.ToolCallResult, error) {
 	memories, err := t.db.SearchMemories(ctx, args.Query, args.Category)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search memories: %w", err)
@@ -209,7 +245,7 @@ func (t *Tool) handleSearchMemories(ctx context.Context, args SearchMemoriesArgs
 	return tools.ResultSuccess(string(result)), nil
 }
 
-func (t *Tool) handleUpdateMemory(ctx context.Context, args UpdateMemoryArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleUpdateMemory(ctx context.Context, args UpdateMemoryArgs) (*tools.ToolCallResult, error) {
 	memory := database.UserMemory{
 		ID:       args.ID,
 		Memory:   args.Memory,
