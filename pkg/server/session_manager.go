@@ -881,11 +881,10 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 	sess := rs.session
 
 	// Snapshot current state so we can roll back if persistence fails
-	// after we've already mutated the runtime + in-memory session.
+	// after we've already mutated the runtime.
 	var (
 		hadOverride     bool
 		prevOverride    string
-		prevCustomLen   int
 		hadOverridesMap bool
 	)
 	if sess != nil {
@@ -894,7 +893,6 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		if hadOverridesMap {
 			prevOverride, hadOverride = sess.AgentModelOverrides[agentName]
 		}
-		prevCustomLen = len(sess.CustomModelsUsed)
 		sm.mux.Unlock()
 	}
 
@@ -911,42 +909,56 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		return agentName, modelRef, nil
 	}
 
-	var appendedCustomUsed bool
-	sm.mux.Lock()
-	if modelRef == "" {
-		delete(sess.AgentModelOverrides, agentName)
-	} else {
-		if sess.AgentModelOverrides == nil {
-			sess.AgentModelOverrides = make(map[string]string)
-		}
-		sess.AgentModelOverrides[agentName] = modelRef
+	// Clone the session for the store write. We'll apply mutations to the
+	// clone, persist it, and only then update the live session. This ensures
+	// concurrent readers never observe a not-yet-persisted state.
+	updatedSess := &session.Session{
+		ID:                      sess.ID,
+		Title:                   sess.Title,
+		CreatedAt:               sess.CreatedAt,
+		WorkingDir:              sess.WorkingDir,
+		ToolsApproved:           sess.ToolsApproved,
+		Permissions:             sess.Permissions,
+		MaxIterations:           sess.MaxIterations,
+		MaxConsecutiveToolCalls: sess.MaxConsecutiveToolCalls,
+		MaxOldToolCallTokens:    sess.MaxOldToolCallTokens,
+		InputTokens:             sess.InputTokens,
+		OutputTokens:            sess.OutputTokens,
+		Cost:                    sess.Cost,
+		Starred:                 sess.Starred,
+	}
 
-		// Track inline provider/model references so they remain easy to
-		// re-select via the model picker (mirrors App.SetCurrentAgentModel).
-		if strings.Contains(modelRef, "/") && !slices.Contains(sess.CustomModelsUsed, modelRef) {
-			sess.CustomModelsUsed = append(sess.CustomModelsUsed, modelRef)
-			appendedCustomUsed = true
-		}
+	// Clone the maps/slices under sm.mux to avoid data races
+	sm.mux.Lock()
+	if sess.AgentModelOverrides != nil {
+		updatedSess.AgentModelOverrides = maps.Clone(sess.AgentModelOverrides)
+	}
+	if len(sess.CustomModelsUsed) > 0 {
+		updatedSess.CustomModelsUsed = append([]string(nil), sess.CustomModelsUsed...)
 	}
 	sm.mux.Unlock()
 
-	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		// Roll back in-memory under sm.mux first so concurrent readers
-		// (e.g. AvailableSessionModels) never see the half-applied state.
-		sm.mux.Lock()
-		if hadOverride {
-			sess.AgentModelOverrides[agentName] = prevOverride
-		} else {
-			delete(sess.AgentModelOverrides, agentName)
-			if !hadOverridesMap && len(sess.AgentModelOverrides) == 0 {
-				sess.AgentModelOverrides = nil
-			}
+	// Apply the mutations to the cloned session
+	var appendedCustomUsed bool
+	if modelRef == "" {
+		delete(updatedSess.AgentModelOverrides, agentName)
+	} else {
+		if updatedSess.AgentModelOverrides == nil {
+			updatedSess.AgentModelOverrides = make(map[string]string)
 		}
-		if appendedCustomUsed {
-			sess.CustomModelsUsed = sess.CustomModelsUsed[:prevCustomLen]
-		}
-		sm.mux.Unlock()
+		updatedSess.AgentModelOverrides[agentName] = modelRef
 
+		// Track inline provider/model references so they remain easy to
+		// re-select via the model picker (mirrors App.SetCurrentAgentModel).
+		if strings.Contains(modelRef, "/") && !slices.Contains(updatedSess.CustomModelsUsed, modelRef) {
+			updatedSess.CustomModelsUsed = append(updatedSess.CustomModelsUsed, modelRef)
+			appendedCustomUsed = true
+		}
+	}
+
+	// Persist the cloned session. If this fails, the live session is
+	// unchanged and we only need to roll back the runtime.
+	if err := sm.sessionStore.UpdateSession(ctx, updatedSess); err != nil {
 		rollback := prevOverride
 		if !hadOverride {
 			rollback = ""
@@ -956,6 +968,23 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		}
 		return "", "", fmt.Errorf("failed to persist model override: %w", err)
 	}
+
+	// Store write succeeded. Now apply the mutations to the live session
+	// under sm.mux so concurrent readers observe the change atomically.
+	sm.mux.Lock()
+	if modelRef == "" {
+		delete(sess.AgentModelOverrides, agentName)
+	} else {
+		if sess.AgentModelOverrides == nil {
+			sess.AgentModelOverrides = make(map[string]string)
+		}
+		sess.AgentModelOverrides[agentName] = modelRef
+
+		if appendedCustomUsed {
+			sess.CustomModelsUsed = append(sess.CustomModelsUsed, modelRef)
+		}
+	}
+	sm.mux.Unlock()
 
 	slog.DebugContext(ctx, "Updated session model override", "session_id", sessionID, "agent", agentName, "model", modelRef)
 	return agentName, modelRef, nil
