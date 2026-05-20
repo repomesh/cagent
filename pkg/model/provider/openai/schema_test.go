@@ -168,7 +168,10 @@ func TestMakeAllRequired_ArrayItems(t *testing.T) {
 }
 
 func TestMakeAllRequired_AdditionalProperties(t *testing.T) {
-	// Schema-form additionalProperties must be replaced with false.
+	// Schema-form additionalProperties (Notion-style) must be preserved so the
+	// model knows what dictionary values look like. The inner schema is still
+	// normalized: all its properties become required, newly-required ones are
+	// nullable, and inner object nodes get additionalProperties: false.
 	schema := shared.FunctionParameters{
 		"type": "object",
 		"properties": map[string]any{
@@ -189,9 +192,25 @@ func TestMakeAllRequired_AdditionalProperties(t *testing.T) {
 
 	updated := makeAllRequired(schema)
 
+	// Outer object: no additionalProperties was set, so it is forced to false.
 	assert.Equal(t, false, updated["additionalProperties"])
+
+	// `children` declares schema-form additionalProperties — left as-is.
 	children := updated["properties"].(map[string]any)["children"].(map[string]any)
-	assert.Equal(t, false, children["additionalProperties"])
+	additionalProps, ok := children["additionalProperties"].(map[string]any)
+	require.True(t, ok, "schema-form additionalProperties must be preserved")
+
+	// The inner schema is still normalized.
+	additionalRequired := additionalProps["required"].([]any)
+	assert.Len(t, additionalRequired, 2)
+	assert.Contains(t, additionalRequired, "bulleted_list_item")
+	assert.Contains(t, additionalRequired, "numbered_list_item")
+
+	numberedListItem := additionalProps["properties"].(map[string]any)["numbered_list_item"].(map[string]any)
+	assert.Equal(t, []string{"string", "null"}, numberedListItem["type"])
+
+	bulletedListItem := additionalProps["properties"].(map[string]any)["bulleted_list_item"].(map[string]any)
+	assert.Equal(t, "string", bulletedListItem["type"])
 }
 
 func TestMakeAllRequired_JiraEditIssueFields(t *testing.T) {
@@ -464,7 +483,9 @@ func TestIsStrictCompatible(t *testing.T) {
 func TestConvertParametersToSchema_NotionStylePreservesShape(t *testing.T) {
 	// Notion MCP tools declare schema-form additionalProperties so the model
 	// knows what dictionary values look like. We must not strip that, even
-	// though it forces non-strict mode.
+	// though it forces non-strict mode. The inner schema is still normalized
+	// (all properties become required) so the Chat Completions API receives a
+	// fully-populated schema.
 	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -493,6 +514,13 @@ func TestConvertParametersToSchema_NotionStylePreservesShape(t *testing.T) {
 	props := inner["properties"].(map[string]any)
 	assert.Contains(t, props, "bulleted_list_item")
 	assert.Contains(t, props, "numbered_list_item")
+
+	// makeAllRequired still runs: every inner property is required so the
+	// Chat Completions API gets a fully-populated schema.
+	innerRequired := inner["required"].([]any)
+	assert.Len(t, innerRequired, 2)
+	assert.Contains(t, innerRequired, "bulleted_list_item")
+	assert.Contains(t, innerRequired, "numbered_list_item")
 }
 
 func TestConvertParametersToSchema_AdditionalPropertiesMissingType(t *testing.T) {
