@@ -164,6 +164,7 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if d.isTextInputField() {
 			var cmd tea.Cmd
 			d.inputs[d.currentField], cmd = d.inputs[d.currentField].Update(msg)
+			d.ensureFocusVisible()
 			return d, cmd
 		}
 		return d, nil
@@ -263,6 +264,10 @@ func (d *ElicitationDialog) updateCurrentInput(msg tea.KeyPressMsg) (layout.Mode
 		delete(d.fieldErrors, d.currentField)
 		var cmd tea.Cmd
 		d.inputs[d.currentField], cmd = d.inputs[d.currentField].Update(msg)
+		// If the field was below the fold (e.g. the dialog opened scrolled to
+		// the top with a tall message), reveal it as soon as the user starts
+		// typing so they can see what they're entering.
+		d.ensureFocusVisible()
 		return d, cmd
 	}
 	return d, nil

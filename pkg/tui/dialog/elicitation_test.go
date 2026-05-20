@@ -667,6 +667,45 @@ func TestElicitationDialog_SmallContent_NoScrollbar(t *testing.T) {
 // opened elicitation dialog (e.g. user_prompt) starts scrolled all the way
 // up so the user can read the question/message from the start, even when
 // the focused option/field would otherwise pull the viewport down.
+// TestElicitationDialog_TypingRevealsBelowFoldField pins that when the user
+// starts typing into a text field that lives below the fold (because the
+// dialog opens scrolled to the top with a long message), the input is
+// scrolled into view so the user can see what they are entering.
+func TestElicitationDialog_TypingRevealsBelowFoldField(t *testing.T) {
+	t.Parallel()
+
+	longMessage := strings.Repeat("Long question line. ", 30)
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string", "title": "Name"},
+		},
+		"required": []any{"name"},
+	}
+
+	dialog := NewElicitationDialog(longMessage, schema, nil).(*ElicitationDialog)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	_ = dialog.View()
+
+	require.True(t, dialog.scrollview.NeedsScrollbar(), "long message + field must require scrolling")
+	require.Equal(t, 0, dialog.scrollview.ScrollOffset(), "dialog must open scrolled to the top")
+	require.Len(t, dialog.fieldStarts, 1)
+
+	// The text field's input line lives below the initial viewport.
+	inputLine := dialog.fieldStarts[0] + 1
+	require.Greater(t, inputLine, dialog.scrollview.VisibleHeight()-1,
+		"test setup: the text field must initially be below the fold")
+
+	// User types a character — this must scroll the input into view.
+	_, _ = dialog.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	_ = dialog.View()
+
+	offset := dialog.scrollview.ScrollOffset()
+	visEnd := offset + dialog.scrollview.VisibleHeight() - 1
+	assert.GreaterOrEqual(t, inputLine, offset, "input line must be at or below scroll offset after typing")
+	assert.LessOrEqual(t, inputLine, visEnd, "input line must be visible after typing")
+}
+
 func TestElicitationDialog_OpensScrolledToTop(t *testing.T) {
 	t.Parallel()
 
