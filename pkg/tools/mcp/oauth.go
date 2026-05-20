@@ -646,6 +646,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 
 	callbackServer.SetExpectedState(state)
 	verifier := GeneratePKCEVerifier()
+	resourceIndicator := cmp.Or(resourceMetadata.Resource, t.baseURL)
 
 	authURL := BuildAuthorizationURL(
 		authServerMetadata.AuthorizationEndpoint,
@@ -653,7 +654,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		redirectURI,
 		state,
 		oauth2.S256ChallengeFromVerifier(verifier),
-		t.baseURL,
+		resourceIndicator,
 		scopes,
 	)
 
@@ -687,7 +688,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	slog.DebugContext(ctx, "Exchanging authorization code for token")
-	token, err := ExchangeCodeForToken(
+	token, err := ExchangeCodeForTokenWithResource(
 		ctx,
 		authServerMetadata.TokenEndpoint,
 		code,
@@ -695,6 +696,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		clientID,
 		clientSecret,
 		redirectURI,
+		resourceIndicator,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to exchange code for token: %w", err)

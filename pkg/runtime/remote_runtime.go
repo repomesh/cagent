@@ -402,6 +402,13 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, req *Elicita
 		return fmt.Errorf("failed to unmarshal auth_server_metadata: %w", err)
 	}
 
+	resourceIndicator := serverURL
+	if resourceMetadata, ok := req.Meta["resource_metadata"].(map[string]any); ok {
+		if resource, ok := resourceMetadata["resource"].(string); ok && resource != "" {
+			resourceIndicator = resource
+		}
+	}
+
 	slog.DebugContext(ctx, "Authorization server metadata extracted", "issuer", authMetadata.Issuer)
 
 	oauthCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -464,7 +471,7 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, req *Elicita
 		redirectURI,
 		state,
 		oauth2.S256ChallengeFromVerifier(verifier),
-		serverURL,
+		resourceIndicator,
 		nil,
 	)
 
@@ -487,7 +494,7 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, req *Elicita
 
 	slog.DebugContext(ctx, "Authorization code received, exchanging for token")
 
-	token, err := mcp.ExchangeCodeForToken(
+	token, err := mcp.ExchangeCodeForTokenWithResource(
 		oauthCtx,
 		authMetadata.TokenEndpoint,
 		code,
@@ -495,6 +502,7 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, req *Elicita
 		clientID,
 		clientSecret,
 		redirectURI,
+		resourceIndicator,
 	)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to exchange code for token", "error", err)

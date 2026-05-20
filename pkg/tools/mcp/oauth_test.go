@@ -808,3 +808,36 @@ func TestExtractServerMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestExchangeCodeForTokenWithResourceSendsResource(t *testing.T) {
+	var gotResource string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		gotResource = r.FormValue("resource")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "at",
+			"token_type":   "Bearer",
+		})
+	}))
+	defer srv.Close()
+
+	_, err := ExchangeCodeForTokenWithResource(
+		t.Context(),
+		srv.URL,
+		"code",
+		"verifier",
+		"cid",
+		"",
+		"http://localhost/callback",
+		"https://mcp.example.com",
+	)
+	if err != nil {
+		t.Fatalf("ExchangeCodeForTokenWithResource: %v", err)
+	}
+	if gotResource != "https://mcp.example.com" {
+		t.Fatalf("resource = %q, want https://mcp.example.com", gotResource)
+	}
+}

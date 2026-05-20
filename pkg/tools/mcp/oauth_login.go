@@ -42,10 +42,16 @@ func PerformOAuthLogin(ctx context.Context, serverURL string) error {
 	defer resp.Body.Close()
 
 	authServer := baseURL
+	resourceIndicator := serverURL
 	if resp.StatusCode == http.StatusOK {
 		var resourceMetadata protectedResourceMetadata
-		if decErr := json.NewDecoder(resp.Body).Decode(&resourceMetadata); decErr == nil && len(resourceMetadata.AuthorizationServers) > 0 {
-			authServer = resourceMetadata.AuthorizationServers[0]
+		if decErr := json.NewDecoder(resp.Body).Decode(&resourceMetadata); decErr == nil {
+			if len(resourceMetadata.AuthorizationServers) > 0 {
+				authServer = resourceMetadata.AuthorizationServers[0]
+			}
+			if resourceMetadata.Resource != "" {
+				resourceIndicator = resourceMetadata.Resource
+			}
 		}
 	}
 
@@ -99,7 +105,7 @@ func PerformOAuthLogin(ctx context.Context, serverURL string) error {
 		redirectURI,
 		state,
 		oauth2.S256ChallengeFromVerifier(verifier),
-		serverURL,
+		resourceIndicator,
 		nil,
 	)
 
@@ -114,7 +120,7 @@ func PerformOAuthLogin(ctx context.Context, serverURL string) error {
 	}
 
 	// Exchange the code for a token.
-	token, err := ExchangeCodeForToken(ctx, authServerMetadata.TokenEndpoint, code, verifier, clientID, clientSecret, redirectURI)
+	token, err := ExchangeCodeForTokenWithResource(ctx, authServerMetadata.TokenEndpoint, code, verifier, clientID, clientSecret, redirectURI, resourceIndicator)
 	if err != nil {
 		return fmt.Errorf("failed to exchange code for token: %w", err)
 	}

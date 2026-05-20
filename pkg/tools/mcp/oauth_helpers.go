@@ -58,14 +58,27 @@ func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChall
 	return authEndpoint + "?" + params.Encode()
 }
 
-// ExchangeCodeForToken exchanges an authorization code for an access token
+// ExchangeCodeForToken exchanges an authorization code for an access token.
 func ExchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI string) (*OAuthToken, error) {
+	return exchangeCodeForToken(ctx, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, "")
+}
+
+// ExchangeCodeForTokenWithResource exchanges an authorization code and sends
+// the RFC 8707 resource indicator to token endpoints that require it.
+func ExchangeCodeForTokenWithResource(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL string) (*OAuthToken, error) {
+	return exchangeCodeForToken(ctx, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL)
+}
+
+func exchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL string) (*OAuthToken, error) {
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("client_id", clientID)
 	data.Set("code_verifier", codeVerifier)
+	if resourceURL != "" {
+		data.Set("resource", resourceURL)
+	}
 	if clientSecret != "" {
 		data.Set("client_secret", clientSecret)
 	}
