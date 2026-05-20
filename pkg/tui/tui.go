@@ -2383,10 +2383,16 @@ func (m *appModel) cleanupAll() {
 	// returns) against a deadline; if shutdown stalls past the deadline
 	// we restore the terminal and force-exit so the user isn't stuck with
 	// a wedged TUI.
+	//
+	// shutdownTimeout and exitFunc are package globals that tests mutate;
+	// snapshot them synchronously here so the safety-net goroutine can't
+	// race with t.Cleanup restoring the originals.
 	program := m.program
 	if program == nil {
 		return
 	}
+	timeout := shutdownTimeout
+	exit := exitFunc
 	go func() {
 		done := make(chan struct{})
 		go func() {
@@ -2397,10 +2403,15 @@ func (m *appModel) cleanupAll() {
 		select {
 		case <-done:
 			// Graceful shutdown completed; nothing to do.
-		case <-time.After(shutdownTimeout):
+		case <-time.After(timeout):
 			slog.Warn("Graceful shutdown timed out, forcing exit")
-			_ = program.ReleaseTerminal()
-			exitFunc(0)
+			// ReleaseTerminal acquires the renderer mutex which may be
+			// the very thing that's stuck (a wedged stdout write inside
+			// the ticker's flush goroutine), so run it in its own
+			// goroutine. We don't wait for it: best-effort terminal
+			// restore, then force-exit no matter what.
+			go func() { _ = program.ReleaseTerminal() }()
+			exit(0)
 		}
 	}()
 }
