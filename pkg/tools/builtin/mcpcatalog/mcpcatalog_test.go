@@ -97,13 +97,18 @@ func TestEnableDisableLifecycle(t *testing.T) {
 	var changes atomic.Int32
 	ts.SetToolsChangedHandler(func() { changes.Add(1) })
 
-	// Before enabling: only meta-tools.
+	// Before enabling: only the always-on meta-tools. Disable and reset are
+	// hidden until at least one server is enabled.
 	toolList, err := ts.Tools(ctx)
 	require.NoError(t, err)
 	names := toolNames(toolList)
 	assert.ElementsMatch(t, []string{
-		ToolNameSearch, ToolNameList, ToolNameEnable, ToolNameDisable, ToolNameResetAuth,
+		ToolNameSearch, ToolNameList, ToolNameEnable,
 	}, names)
+	assert.NotContains(t, names, ToolNameDisable,
+		"disable must not be exposed when no server is enabled")
+	assert.NotContains(t, names, ToolNameResetAuth,
+		"reset_auth must not be exposed when no server is enabled")
 
 	// Enable: a callback should fire and the underlying mcp.Toolset should
 	// be present in t.enabled. We deliberately do NOT exercise the network
@@ -499,8 +504,9 @@ func TestToolsExposesEnabledServerTools(t *testing.T) {
 	require.NoError(t, err)
 
 	names := toolNames(toolList)
-	// Meta-tools are always there.
-	for _, meta := range []string{ToolNameSearch, ToolNameList, ToolNameEnable, ToolNameDisable} {
+	// All five meta-tools must be visible once a server is enabled
+	// (disable / reset_auth are gated on len(enabled) > 0).
+	for _, meta := range []string{ToolNameSearch, ToolNameList, ToolNameEnable, ToolNameDisable, ToolNameResetAuth} {
 		assert.Contains(t, names, meta)
 	}
 	// And so is the tool exposed by the fake MCP server.
@@ -688,6 +694,56 @@ func TestResetAuthNotifiesEvenWhenKeyringFails(t *testing.T) {
 // server requiring OAuth that is probed in a non-interactive context
 // must not error out. Tools() returns the meta-surface only and the
 // server is silently retried on the next interactive turn.
+// TestDisableAndResetAuthGatedOnEnabledServers asserts the meta-surface
+// optimisation: disable_remote_mcp_server and reset_remote_mcp_server_auth
+// are hidden when no server is enabled (so the LLM sees only the actions
+// it can usefully perform), revealed once at least one server is enabled,
+// and hidden again after the last server is disabled.
+func TestDisableAndResetAuthGatedOnEnabledServers(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+	ctx := t.Context()
+
+	// No server enabled: only search / list / enable.
+	names := toolNames(mustTools(t, ts, ctx))
+	assert.ElementsMatch(t, []string{ToolNameSearch, ToolNameList, ToolNameEnable}, names)
+
+	// Pick the first OAuth server so handleEnable doesn't trip on missing
+	// api_key env vars. We never actually drive the network here — the inner
+	// toolset's Start() will fail, which Tools() swallows for OAuth servers
+	// (IsAuthorizationRequired) but still keeps the entry in t.enabled, so
+	// the gate flips on.
+	var oauthID string
+	for _, s := range ts.catalog.Servers {
+		if s.Auth.Type == "oauth" {
+			oauthID = s.ID
+			break
+		}
+	}
+	require.NotEmpty(t, oauthID)
+
+	_, err := ts.handleEnable(ctx, EnableArgs{ID: oauthID})
+	require.NoError(t, err)
+
+	names = toolNames(mustTools(t, ts, ctx))
+	assert.Contains(t, names, ToolNameDisable, "disable must appear once a server is enabled")
+	assert.Contains(t, names, ToolNameResetAuth, "reset_auth must appear once a server is enabled")
+
+	// Disable: gate flips back off.
+	_, err = ts.handleDisable(ctx, DisableArgs{ID: oauthID})
+	require.NoError(t, err)
+
+	names = toolNames(mustTools(t, ts, ctx))
+	assert.NotContains(t, names, ToolNameDisable, "disable must be hidden again once no server is enabled")
+	assert.NotContains(t, names, ToolNameResetAuth, "reset_auth must be hidden again once no server is enabled")
+}
+
+func mustTools(t *testing.T, ts *Toolset, ctx context.Context) []tools.Tool {
+	t.Helper()
+	list, err := ts.Tools(ctx)
+	require.NoError(t, err)
+	return list
+}
+
 func TestToolsAuthRequiredIsDeferred(t *testing.T) {
 	srv := newAuthRequiredMCPServer(t)
 	defer srv.Close()
