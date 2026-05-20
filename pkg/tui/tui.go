@@ -2376,15 +2376,32 @@ func (m *appModel) cleanupAll() {
 		ed.Cleanup()
 	}
 
-	// Safety net: force-exit if bubbletea's shutdown gets stuck.
-	// This can happen when the renderer's flush goroutine blocks on a
-	// stdout write (terminal buffer full) while holding the renderer
-	// mutex, preventing the event loop from completing the render call
-	// that follows tea.Quit.
+	// Safety net: bubbletea's renderer can deadlock during shutdown when
+	// stdout is wedged — the final flush after tea.Quit tries to
+	// re-acquire the renderer mutex that the still-blocked previous flush
+	// is holding. We race bubbletea's Wait() (which unblocks when Run()
+	// returns) against a deadline; if shutdown stalls past the deadline
+	// we restore the terminal and force-exit so the user isn't stuck with
+	// a wedged TUI.
+	program := m.program
+	if program == nil {
+		return
+	}
 	go func() {
-		time.Sleep(shutdownTimeout)
-		slog.Warn("Graceful shutdown timed out, forcing exit")
-		exitFunc(0)
+		done := make(chan struct{})
+		go func() {
+			program.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Graceful shutdown completed; nothing to do.
+		case <-time.After(shutdownTimeout):
+			slog.Warn("Graceful shutdown timed out, forcing exit")
+			_ = program.ReleaseTerminal()
+			exitFunc(0)
+		}
 	}()
 }
 
