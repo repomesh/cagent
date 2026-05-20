@@ -139,7 +139,10 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 			errMsg = fmt.Sprintf("%s: %s", errMsg, errDesc)
 		}
 
-		cs.deliver(callbackResult{err: fmt.Errorf("OAuth error: %s", errMsg)})
+		if !cs.deliver(callbackResult{err: fmt.Errorf("OAuth error: %s", errMsg)}) {
+			writeAlreadyProcessed(w)
+			return
+		}
 
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, `<!DOCTYPE html>
@@ -164,7 +167,10 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 	state := query.Get("state")
 
 	if code == "" {
-		cs.deliver(callbackResult{err: errors.New("no authorization code received")})
+		if !cs.deliver(callbackResult{err: errors.New("no authorization code received")}) {
+			writeAlreadyProcessed(w)
+			return
+		}
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, "No authorization code received")
 		return
@@ -178,13 +184,21 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 	cs.mu.Unlock()
 
 	if expectedState == "" || subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
+		// Don't leak whether a flow is in progress: respond identically
+		// regardless of whether deliver succeeded.
 		cs.deliver(callbackResult{err: errors.New("OAuth state mismatch (possible CSRF attempt or stale callback)")})
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, "Invalid state parameter")
 		return
 	}
 
-	cs.deliver(callbackResult{code: code, state: state})
+	if !cs.deliver(callbackResult{code: code, state: state}) {
+		// A previous callback already won the race. Tell the browser the
+		// flow is already complete instead of misleadingly claiming this
+		// stray request succeeded.
+		writeAlreadyProcessed(w)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `<!DOCTYPE html>
@@ -205,14 +219,40 @@ func (cs *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request)
 }
 
 // deliver attempts to publish r on resultCh without blocking. The first
-// callback wins; later callbacks (stale browser tabs, duplicate clicks,
-// any local process probing the loopback port) are dropped on the floor
-// instead of pinning the HTTP handler goroutine on a full channel.
-func (cs *CallbackServer) deliver(r callbackResult) {
+// callback wins (returns true); later callbacks (stale browser tabs,
+// duplicate clicks, any local process probing the loopback port) are
+// dropped on the floor (returns false) instead of pinning the HTTP
+// handler goroutine on a full channel.
+func (cs *CallbackServer) deliver(r callbackResult) bool {
 	select {
 	case cs.resultCh <- r:
+		return true
 	default:
+		return false
 	}
+}
+
+// writeAlreadyProcessed responds to a stray duplicate callback with HTTP
+// 409 Conflict and a short HTML page. Returning a distinct status code
+// rather than another "Authorization Successful!" page avoids misleading
+// the user who reloaded the browser tab while still completing the request
+// promptly so the handler goroutine doesn't linger.
+func writeAlreadyProcessed(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusConflict)
+	fmt.Fprint(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Authorization Already Processed</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Authorization Already Processed</h1>
+    <p>This authorization callback has already been handled.</p>
+    <p>You can close this window.</p>
+</body>
+</html>`)
 }
 
 func (cs *CallbackServer) WaitForCallback(ctx context.Context) (code, state string, err error) {

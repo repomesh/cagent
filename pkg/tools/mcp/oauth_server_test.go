@@ -97,7 +97,9 @@ func TestCallbackServer_DuplicateCallbacksDoNotBlock(t *testing.T) {
 
 	// Fire several callbacks back-to-back. Each one must complete (so the
 	// handler goroutine isn't stuck) regardless of whether anyone is
-	// reading from resultCh yet.
+	// reading from resultCh yet. The first one wins with HTTP 200; the
+	// rest must report HTTP 409 (Conflict) rather than misleadingly
+	// claiming success.
 	for i := range 5 {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, callbackURL, http.NoBody)
 		if err != nil {
@@ -108,8 +110,12 @@ func TestCallbackServer_DuplicateCallbacksDoNotBlock(t *testing.T) {
 			t.Fatalf("callback %d: %v", i, err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("callback %d: status = %d, want 200", i, resp.StatusCode)
+		wantStatus := http.StatusOK
+		if i > 0 {
+			wantStatus = http.StatusConflict
+		}
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("callback %d: status = %d, want %d", i, resp.StatusCode, wantStatus)
 		}
 	}
 
