@@ -107,42 +107,54 @@ func TestDiskCache_DifferentURLsGetDifferentDirs(t *testing.T) {
 	assert.NotEqual(t, dir1, dir2)
 }
 
-func TestParseCacheExpiry(t *testing.T) {
+func TestParseCacheControl(t *testing.T) {
 	now := time.Now()
 
 	t.Run("empty header uses default", func(t *testing.T) {
-		expiry := parseCacheExpiry("")
-		assert.WithinDuration(t, now.Add(1*time.Hour), expiry, 2*time.Second)
+		d := parseCacheControl("")
+		assert.False(t, d.noStore)
+		assert.False(t, d.noCache)
+		assert.WithinDuration(t, now.Add(1*time.Hour), d.expiresAt(), 2*time.Second)
 	})
 
 	t.Run("max-age=3600", func(t *testing.T) {
-		expiry := parseCacheExpiry("max-age=3600")
-		assert.WithinDuration(t, now.Add(3600*time.Second), expiry, 2*time.Second)
+		d := parseCacheControl("max-age=3600")
+		assert.True(t, d.hasMaxAge)
+		assert.WithinDuration(t, now.Add(3600*time.Second), d.expiresAt(), 2*time.Second)
 	})
 
 	t.Run("max-age=0", func(t *testing.T) {
-		expiry := parseCacheExpiry("max-age=0")
-		assert.WithinDuration(t, now, expiry, 2*time.Second)
+		d := parseCacheControl("max-age=0")
+		assert.True(t, d.hasMaxAge)
+		assert.WithinDuration(t, now, d.expiresAt(), 2*time.Second)
 	})
 
-	t.Run("no-store", func(t *testing.T) {
-		expiry := parseCacheExpiry("no-store")
-		assert.WithinDuration(t, now, expiry, 2*time.Second)
+	t.Run("no-store forces immediate expiry", func(t *testing.T) {
+		d := parseCacheControl("no-store")
+		assert.True(t, d.noStore)
+		assert.WithinDuration(t, now, d.expiresAt(), 2*time.Second)
 	})
 
-	t.Run("no-cache", func(t *testing.T) {
-		expiry := parseCacheExpiry("no-cache")
-		assert.WithinDuration(t, now, expiry, 2*time.Second)
+	t.Run("no-cache forces immediate expiry", func(t *testing.T) {
+		d := parseCacheControl("no-cache")
+		assert.True(t, d.noCache)
+		assert.WithinDuration(t, now, d.expiresAt(), 2*time.Second)
+	})
+
+	t.Run("no-cache wins over max-age", func(t *testing.T) {
+		d := parseCacheControl("max-age=3600, no-cache")
+		assert.True(t, d.noCache)
+		assert.WithinDuration(t, now, d.expiresAt(), 2*time.Second)
 	})
 
 	t.Run("multiple directives with max-age", func(t *testing.T) {
-		expiry := parseCacheExpiry("public, max-age=7200")
-		assert.WithinDuration(t, now.Add(7200*time.Second), expiry, 2*time.Second)
+		d := parseCacheControl("public, max-age=7200")
+		assert.WithinDuration(t, now.Add(7200*time.Second), d.expiresAt(), 2*time.Second)
 	})
 
 	t.Run("unknown directives use default", func(t *testing.T) {
-		expiry := parseCacheExpiry("public")
-		assert.WithinDuration(t, now.Add(1*time.Hour), expiry, 2*time.Second)
+		d := parseCacheControl("public")
+		assert.WithinDuration(t, now.Add(1*time.Hour), d.expiresAt(), 2*time.Second)
 	})
 }
 
@@ -155,4 +167,64 @@ func TestDiskCache_HTTPError(t *testing.T) {
 	_, err := cache.FetchAndStore(t.Context(), "https://example.com", "skill", "SKILL.md", srv.URL+"/notfound")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 404")
+}
+
+// TestDiskCache_NoStoreStoresButExpiresImmediately verifies that a
+// Cache-Control: no-store response is still written to disk (so the
+// in-process reader at pkg/tools/builtin/skills can consume it via
+// readFileContent(skill.FilePath)) but is marked expired so the next
+// Load() refetches instead of reusing the stored copy.
+//
+// We deliberately diverge from RFC 9111 §5.2.2.5 ("the cache MUST NOT
+// store any part of either the immediate request or response") because
+// the consumer reads files directly, not through diskCache.Get. Skipping
+// the write entirely would render no-store skills unreadable for the
+// rest of the process. A future refactor (in-memory cache shared with
+// the reader) can make this strictly RFC-compliant.
+func TestDiskCache_NoStoreStoresButExpiresImmediately(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		fmt.Fprint(w, "private content")
+	}))
+	defer srv.Close()
+
+	cache := newDiskCache(t.TempDir())
+
+	content, err := cache.FetchAndStore(t.Context(), "https://example.com", "skill", "SKILL.md", srv.URL+"/SKILL.md")
+	require.NoError(t, err)
+	assert.Equal(t, "private content", content)
+
+	// The reader reads skill.FilePath directly, so the file must exist.
+	filePath := filepath.Join(cache.cacheDir("https://example.com", "skill"), "SKILL.md")
+	data, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "private content", string(data))
+
+	// But Get() must report a miss so prefetchFiles will refetch on the
+	// next Load() cycle rather than reusing a stale entry.
+	_, ok := cache.Get("https://example.com", "skill", "SKILL.md")
+	assert.False(t, ok, "no-store must force a refetch on the next read")
+}
+
+// TestDiskCache_NoCacheStoresButExpiresImmediately verifies that no-cache
+// allows storage but forces revalidation: the entry is written so it can be
+// inspected, but Get() must report a miss so the next read refetches.
+func TestDiskCache_NoCacheStoresButExpiresImmediately(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		fmt.Fprint(w, "revalidate me")
+	}))
+	defer srv.Close()
+
+	cache := newDiskCache(t.TempDir())
+
+	_, err := cache.FetchAndStore(t.Context(), "https://example.com", "skill", "SKILL.md", srv.URL+"/SKILL.md")
+	require.NoError(t, err)
+
+	filePath := filepath.Join(cache.cacheDir("https://example.com", "skill"), "SKILL.md")
+	_, err = os.Stat(filePath)
+	require.NoError(t, err, "no-cache response should still be stored on disk")
+
+	_, ok := cache.Get("https://example.com", "skill", "SKILL.md")
+	assert.False(t, ok, "no-cache must force a refetch on the next read")
 }
