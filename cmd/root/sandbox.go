@@ -87,18 +87,22 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	}
 
 	printModelsGateway(cmd.OutOrStdout(), runConfig.ModelsGateway)
+	printToolInstallAllowance(cmd.OutOrStdout(), kitResult)
 
 	name, err := backend.Ensure(ctx, wd, extras, template, configDir)
 	if err != nil {
 		return err
 	}
 
-	// Sandbox templates ship with a default-deny network policy that
+	// Sandbox templates ship with a default-deny network proxy that
 	// allows the major model providers (api.anthropic.com, api.openai.com,
-	// ...) but blocks every *.docker.com host. When the agent is
-	// configured to talk to the Docker AI Gateway, allowlist that
-	// hostname for this sandbox so the inner can actually reach it.
-	allowGatewayHost(ctx, backend, name, runConfig.ModelsGateway)
+	// ...) but blocks every *.docker.com host as well as every
+	// package-registry / source-host the auto-installer reaches for.
+	// Open the minimum: the configured Docker AI gateway when set, and
+	// the package-host set only when the kit-build determined the
+	// agent has at least one MCP / LSP toolset that may auto-install.
+	needsToolInstall := kitResult != nil && kitResult.NeedsToolInstall
+	allowSandboxHosts(ctx, backend, name, runConfig.ModelsGateway, needsToolInstall)
 
 	// Resolve env vars the agent needs and forward them into the sandbox.
 	// Docker Desktop proxies well-known API keys automatically; this handles
@@ -190,29 +194,71 @@ func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string) []stri
 	return dockerAgentArgs
 }
 
-// allowGatewayHost extracts the host[:port] from gatewayURL and asks
-// the sandbox backend to add a per-sandbox allow-network rule for it.
-// The default sandbox proxy denies *.docker.com, so without this the
-// inner agent's first request to the gateway returns
-// "403 Blocked by network policy".
+// autoInstallHosts is the set of hostnames the toolinstall package
+// reaches for when fetching tools at runtime: the aqua registry data
+// (raw.githubusercontent.com), the GitHub API (latest release
+// resolution), GitHub releases themselves, the redirected release
+// asset host (objects.githubusercontent.com), and the Go module
+// proxy + checksum DB used by `go install`. We allowlist this whole
+// set whenever a sandbox is launched with the kit pipeline so that
+// auto-install — which is on by default for every lsp / mcp toolset
+// — can actually fetch what it needs. Without this, missing tools
+// (gopls, golangci-lint, ...) report a misleading "403 blocked by
+// network policy" from go install / curl instead of installing.
+var autoInstallHosts = []string{
+	"github.com",
+	"api.github.com",
+	"raw.githubusercontent.com",
+	"objects.githubusercontent.com",
+	"codeload.github.com",
+	"proxy.golang.org",
+	"sum.golang.org",
+	// `go install` downloads the Go toolchain from Google's blob
+	// storage when a module's go.mod pins a newer Go than the one
+	// already in the sandbox image.
+	"storage.googleapis.com",
+}
+
+// allowSandboxHosts adds per-sandbox allow-network rules for every
+// host the in-sandbox runtime is known to need: the configured
+// models gateway (when set) and the package hosts the auto-installer
+// reaches for (when needsToolInstall is true). The default sandbox
+// proxy denies all of them; without this, the inner agent's first
+// request returns a misleading "403 Blocked by network policy".
 //
-// Best-effort: a malformed URL or a backend that doesn't support
-// per-sandbox policies is logged at debug level and the run
+// Holes are punched only when the corresponding feature is in play:
+//   - the gateway host is added only when gatewayURL is non-empty;
+//   - the autoInstallHosts set is added only when needsToolInstall
+//     is true (i.e. the kit build saw at least one MCP / LSP
+//     toolset that might auto-install). Sandboxes that don't run
+//     auto-install keep the strict default-deny.
+//
+// Best-effort: a malformed gateway URL or a backend that doesn't
+// support per-sandbox policies is logged at debug level and the run
 // proceeds. The user will then see a network-policy 403 from the
 // inner and we surface that diagnostic verbatim.
-func allowGatewayHost(ctx context.Context, backend *sandbox.Backend, name, gatewayURL string) {
-	if gatewayURL == "" {
+func allowSandboxHosts(ctx context.Context, backend *sandbox.Backend, name, gatewayURL string, needsToolInstall bool) {
+	var hosts []string
+
+	if needsToolInstall {
+		hosts = append(hosts, autoInstallHosts...)
+	}
+
+	if gatewayURL != "" {
+		if h := gatewayHostPort(gatewayURL); h != "" {
+			hosts = append(hosts, h)
+		} else {
+			slog.DebugContext(ctx, "Could not extract host from models-gateway URL; not allowlisting",
+				"gateway", gatewayURL)
+		}
+	}
+
+	if len(hosts) == 0 {
 		return
 	}
-	host := gatewayHostPort(gatewayURL)
-	if host == "" {
-		slog.DebugContext(ctx, "Could not extract host from models-gateway URL; not allowlisting",
-			"gateway", gatewayURL)
-		return
-	}
-	if err := backend.AllowHosts(ctx, name, []string{host}); err != nil {
-		slog.WarnContext(ctx, "Failed to allowlist models-gateway host in sandbox; the inner agent may see HTTP 403",
-			"sandbox", name, "host", host, "error", err)
+	if err := backend.AllowHosts(ctx, name, hosts); err != nil {
+		slog.WarnContext(ctx, "Failed to allowlist sandbox hosts; the inner agent may see HTTP 403",
+			"sandbox", name, "hosts", hosts, "error", err)
 	}
 }
 
@@ -372,4 +418,17 @@ func printModelsGateway(w io.Writer, gateway string) {
 		return
 	}
 	fmt.Fprintf(w, "Models gateway: %s (allowlisting %s in the sandbox proxy)\n", display, host)
+}
+
+// printToolInstallAllowance prints a single line announcing whether
+// the package-host allowlist was opened for this sandbox, and why.
+// We surface this so the user sees what holes were punched in the
+// default-deny network policy. Silent when the kit isn't built or
+// when no auto-installable toolset was detected.
+func printToolInstallAllowance(w io.Writer, kitResult *kit.Result) {
+	if kitResult == nil || !kitResult.NeedsToolInstall {
+		return
+	}
+	fmt.Fprintf(w, "Tool install: agent has at least one MCP/LSP toolset, allowlisting %d package hosts in the sandbox proxy\n",
+		len(autoInstallHosts))
 }

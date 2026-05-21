@@ -101,6 +101,15 @@ type Result struct {
 	// on-disk copy under <HostDir>/manifest.json is sanitised so the
 	// sandbox cannot learn the host filesystem layout.
 	Manifest Manifest
+
+	// NeedsToolInstall reports whether the agent has at least one
+	// MCP / LSP toolset that the in-sandbox runtime might auto-install
+	// (the toolset has a Command set and Version isn't "false"/"off").
+	// Callers use this to decide whether to allowlist the package
+	// hosts the auto-installer reaches — we keep that gated so we
+	// don't open holes in the sandbox proxy when no agent could
+	// possibly need them.
+	NeedsToolInstall bool
 }
 
 // Manifest is the kit's table of contents.
@@ -225,7 +234,11 @@ func Build(ctx context.Context, opts Options) (*Result, error) {
 		"prompt_files", len(manifest.PromptFiles),
 		"redactions", len(manifest.Redactions))
 
-	return &Result{HostDir: finalDir, Manifest: manifest}, nil
+	return &Result{
+		HostDir:          finalDir,
+		Manifest:         manifest,
+		NeedsToolInstall: needsAutoInstall(cfg),
+	}, nil
 }
 
 // hashKey turns AgentRef into a short, filesystem-safe directory name.
@@ -776,4 +789,60 @@ func plural(n int, what string) string {
 		return "1 " + what
 	}
 	return fmt.Sprintf("%d %ss", n, what)
+}
+
+// needsAutoInstall reports whether cfg has at least one toolset that
+// the in-sandbox runtime would push through [toolinstall.EnsureCommand].
+// Today only MCP and LSP toolsets do; shell toolsets run a user-
+// supplied binary directly without auto-install.
+//
+// A toolset is a candidate when:
+//   - its type is "mcp" or "lsp" (top-level cfg.MCPs entries are
+//     also implicitly mcp);
+//   - it has a Command (no command means the in-sandbox runtime has
+//     nothing to look up on PATH);
+//   - its Version is not "false" / "off" (the per-toolset opt-out
+//     [toolinstall.EnsureCommand] honours).
+//
+// We deliberately don't try to predict whether the command will
+// actually be missing inside the sandbox image. We only know that on
+// the host. The sandbox image may already ship the binary, in which
+// case auto-install never fires and the allowlist we open is unused —
+// but unused allow rules are harmless, while a blocked auto-install
+// is an opaque "403 Blocked by network policy" that's hard to
+// diagnose. Erring on the side of allow keeps the failure mode loud
+// instead of mysterious.
+func needsAutoInstall(cfg *latestcfg.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, m := range cfg.MCPs {
+		if isAutoInstallable(m.Toolset) {
+			return true
+		}
+	}
+	for _, agent := range cfg.Agents {
+		if slices.ContainsFunc(agent.Toolsets, isAutoInstallable) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAutoInstallable returns true if ts is the kind of toolset
+// [toolinstall.EnsureCommand] would touch.
+func isAutoInstallable(ts latestcfg.Toolset) bool {
+	if ts.Command == "" {
+		return false
+	}
+	switch ts.Type {
+	case "mcp", "lsp":
+	default:
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(ts.Version)) {
+	case "false", "off":
+		return false
+	}
+	return true
 }

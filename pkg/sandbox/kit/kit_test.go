@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/skills"
 )
@@ -690,4 +691,75 @@ func TestPrintSummary_NilReceiver(t *testing.T) {
 	var buf strings.Builder
 	assert.NotPanics(t, func() { res.PrintSummary(&buf) })
 	assert.Empty(t, buf.String())
+}
+
+func TestNeedsAutoInstall(t *testing.T) {
+	t.Parallel()
+
+	mcpInstallable := latestcfg.Toolset{Type: "mcp", Command: "fzf"}
+	lspInstallable := latestcfg.Toolset{Type: "lsp", Command: "gopls"}
+	disabledByVersion := latestcfg.Toolset{Type: "mcp", Command: "fzf", Version: "off"}
+	noCommand := latestcfg.Toolset{Type: "mcp"}
+	wrongType := latestcfg.Toolset{Type: "shell", Command: "ls"}
+
+	cases := []struct {
+		name string
+		cfg  *latestcfg.Config
+		want bool
+	}{
+		{"nil cfg", nil, false},
+		{"empty cfg", &latestcfg.Config{}, false},
+		{
+			name: "agent has installable lsp",
+			cfg: &latestcfg.Config{
+				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{lspInstallable}}},
+			},
+			want: true,
+		},
+		{
+			name: "top-level mcps entry",
+			cfg: &latestcfg.Config{
+				MCPs: map[string]latestcfg.MCPToolset{
+					"x": {Toolset: mcpInstallable},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "auto-install disabled per toolset",
+			cfg: &latestcfg.Config{
+				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{disabledByVersion}}},
+			},
+			want: false,
+		},
+		{
+			name: "no command means nothing to look up",
+			cfg: &latestcfg.Config{
+				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{noCommand}}},
+			},
+			want: false,
+		},
+		{
+			name: "shell toolsets do not auto-install",
+			cfg: &latestcfg.Config{
+				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{wrongType}}},
+			},
+			want: false,
+		},
+		{
+			name: "case-insensitive disable",
+			cfg: &latestcfg.Config{
+				MCPs: map[string]latestcfg.MCPToolset{
+					"x": {Toolset: latestcfg.Toolset{Type: "mcp", Command: "fzf", Version: "FALSE"}},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, needsAutoInstall(tc.cfg))
+		})
+	}
 }

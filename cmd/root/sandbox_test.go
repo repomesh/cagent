@@ -188,3 +188,34 @@ func TestPrintModelsGateway(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoInstallHosts(t *testing.T) {
+	t.Parallel()
+
+	// Spot-check the static set: the package hosts the auto-installer
+	// reaches at runtime (Go module proxy, GitHub releases, the toolchain
+	// blob storage backing `go install`) must all be in the allowlist
+	// or the inner agent will see "403 Blocked by network policy" with
+	// no other diagnostic.
+	required := []string{
+		"github.com",
+		"api.github.com",
+		"raw.githubusercontent.com",
+		"objects.githubusercontent.com",
+		"proxy.golang.org",
+		"sum.golang.org",
+		"storage.googleapis.com",
+	}
+	for _, host := range required {
+		assert.Contains(t, autoInstallHosts, host,
+			"%s must be in autoInstallHosts so auto-install can reach it inside the sandbox", host)
+	}
+
+	// And the list itself must be commaless / spaceless: AllowHosts
+	// rejects entries that look like they could smuggle several rules
+	// past the policy engine.
+	for _, host := range autoInstallHosts {
+		assert.NotContains(t, host, ",", "%q must not contain a comma", host)
+		assert.NotContains(t, host, " ", "%q must not contain whitespace", host)
+	}
+}
