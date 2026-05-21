@@ -72,7 +72,10 @@ func TestBuild_StagesSkillsAndRedacts(t *testing.T) {
 	assert.Equal(t, skillDir, res.Manifest.Skills[0].Source)
 	assert.Equal(t, filepath.Join(skills.KitSkillsSubdir, "secret-keeper"), res.Manifest.Skills[0].Target)
 	require.Len(t, res.Manifest.Redactions, 1)
-	assert.Equal(t, filepath.Join(skillDir, "SKILL.md"), res.Manifest.Redactions[0].Source)
+	assert.Equal(t, filepath.Join(skillDir, "SKILL.md"), res.Manifest.Redactions[0].Source,
+		"redaction must record the host source path for caller-side debugging")
+	assert.Equal(t, filepath.Join(skills.KitSkillsSubdir, "secret-keeper", "SKILL.md"), res.Manifest.Redactions[0].Target,
+		"redaction Target must be kit-relative so it lines up with Entry.Target and never leaks the kit's absolute host path")
 
 	// Manifest is also written to disk for human inspection.
 	_, err = os.Stat(filepath.Join(res.HostDir, "manifest.json"))
@@ -423,4 +426,107 @@ func TestHashKey_EmptyDoesNotCollideWithDefault(t *testing.T) {
 	// fallback because the latter was rewritten to "default" before
 	// hashing. They now sit in different namespaces.
 	assert.NotEqual(t, hashKey(""), hashKey("default"))
+}
+
+func TestPrintSummary(t *testing.T) {
+	isolateEnv(t)
+	hostHome := t.TempDir()
+
+	// Two skills, one of which contains a secret and a helper script,
+	// plus a $HOME-rooted prompt file with a secret. This exercises
+	// every branch of PrintSummary: header, multi-file skill listing,
+	// per-file redaction marker, prompt-file section, summary line
+	// with secret count, and ~ collapsing of host paths.
+	withSecret := filepath.Join(hostHome, ".agents", "skills", "with-secret")
+	require.NoError(t, os.MkdirAll(withSecret, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(withSecret, "SKILL.md"),
+		[]byte("---\nname: with-secret\ndescription: leaks\n---\n\ntoken="+fakeGitHubToken+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(withSecret, "helper.sh"),
+		[]byte("#!/bin/sh\necho hi\n"), 0o755))
+
+	plain := filepath.Join(hostHome, ".agents", "skills", "plain")
+	require.NoError(t, os.MkdirAll(plain, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(plain, "SKILL.md"),
+		[]byte("---\nname: plain\ndescription: plain\n---\n"), 0o644))
+
+	agentsMD := filepath.Join(hostHome, "AGENTS.md")
+	require.NoError(t, os.WriteFile(agentsMD, []byte("token="+fakeGitHubToken+"\n"), 0o600))
+
+	workspace := t.TempDir()
+	agentYAML := []byte(`#!/usr/bin/env docker-agent
+agents:
+  root:
+    model: openai/gpt-5
+    description: tester
+    instruction: hello
+    add_prompt_files: ["AGENTS.md"]
+models:
+  openai/gpt-5:
+    provider: openai
+    model: gpt-5
+`)
+	yamlPath := filepath.Join(workspace, "agent.yaml")
+	require.NoError(t, os.WriteFile(yamlPath, agentYAML, 0o600))
+
+	t.Setenv("HOME", hostHome)
+	t.Chdir(workspace)
+
+	res, err := Build(t.Context(), Options{
+		AgentRef:  yamlPath,
+		HostHome:  hostHome,
+		HostCwd:   workspace,
+		Workspace: workspace,
+		CacheDir:  t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	var buf strings.Builder
+	res.PrintSummary(&buf)
+	out := buf.String()
+
+	// Header + skills section.
+	assert.Contains(t, out, "Preparing docker-agent kit at "+res.HostDir)
+	assert.Contains(t, out, "skills:")
+	assert.Contains(t, out, "plain (from ~/.agents/skills/plain)",
+		"$HOME prefix should collapse to ~ in printed paths")
+	assert.Contains(t, out, "with-secret (from ~/.agents/skills/with-secret)")
+
+	// Every staged file appears, and only the redacted one carries the marker.
+	assert.Contains(t, out, "SKILL.md (redacted)", "redacted skill file must be tagged")
+	assert.Contains(t, out, "helper.sh")
+	assert.NotContains(t, out, "helper.sh (redacted)",
+		"non-text / non-redacted files must not carry the marker")
+
+	// Prompt files section.
+	assert.Contains(t, out, "prompt files:")
+	assert.Contains(t, out, "AGENTS.md (from ~/AGENTS.md, redacted)")
+
+	// Summary line.
+	assert.Contains(t, out, "summary: 2 skills, 1 prompt file, 2 secrets redacted")
+
+	// And no host secret leaks into the printed output.
+	assert.NotContains(t, out, fakeGitHubToken)
+}
+
+func TestPrintSummary_Empty(t *testing.T) {
+	t.Parallel()
+
+	// A kit that ships nothing must print nothing — the caller is
+	// expected to handle the "no kit needed" case.
+	res := &Result{HostDir: "/tmp/empty"}
+
+	var buf strings.Builder
+	res.PrintSummary(&buf)
+	assert.Empty(t, buf.String())
+}
+
+func TestPrintSummary_NilReceiver(t *testing.T) {
+	t.Parallel()
+
+	// Defensive: callers may invoke PrintSummary on a nil result if the
+	// kit build failed; it must not panic.
+	var res *Result
+	var buf strings.Builder
+	assert.NotPanics(t, func() { res.PrintSummary(&buf) })
+	assert.Empty(t, buf.String())
 }

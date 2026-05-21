@@ -29,11 +29,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -257,20 +259,41 @@ func classifyRef(ref string) (tag, key string) {
 	return "ref", ref
 }
 
-// promote moves stagingDir into final atomically. If final already
-// exists, it is moved aside first so the rename can succeed, then the
-// old content is removed in the background. Best-effort: a leftover
-// "<final>.old-*" sibling is harmless and will be reaped on the next
-// successful build.
+// promote moves stagingDir into final atomically. The publish is
+// safe under concurrent calls for the same final dir: at most one
+// staging tree wins the rename, and the losers' staging dirs are
+// dropped by the caller's deferred cleanup. From the caller's
+// point of view, every concurrent Build sees a fully populated
+// finalDir on return.
+//
+// When finalDir already exists at promote time, it is moved aside
+// to a "<final>.old-<staging-base>" sibling first so the rename can
+// succeed; the old content is removed in the background. A leftover
+// .old-* sibling from a crashed run is harmless and will be reaped on
+// the next successful build.
 func promote(stagingDir, finalDir string) error {
+	// Move any existing finalDir aside. Concurrent winners can race
+	// here — the loser sees ENOENT, which is fine because the winner
+	// has already taken over.
 	if _, err := os.Stat(finalDir); err == nil {
 		retired := finalDir + ".old-" + filepath.Base(stagingDir)
-		if err := os.Rename(finalDir, retired); err != nil {
+		if err := os.Rename(finalDir, retired); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("retiring previous kit: %w", err)
 		}
 		defer func() { _ = os.RemoveAll(retired) }()
 	}
+
 	if err := os.Rename(stagingDir, finalDir); err != nil {
+		// A concurrent Build may have already promoted its own kit to
+		// finalDir between our Stat above and our Rename here. If
+		// finalDir is now a populated directory, we accept the other
+		// run as the winner: the caller will see a complete kit, and
+		// our staging tree will be cleaned up by Build's deferred
+		// rollback. We only swallow the ENOTEMPTY/EEXIST family of
+		// errors that signal exactly this situation.
+		if _, statErr := os.Stat(finalDir); statErr == nil {
+			return nil
+		}
 		return fmt.Errorf("renaming kit: %w", err)
 	}
 	return nil
@@ -301,7 +324,7 @@ func stageSkills(kitDir string) ([]Entry, []Redaction, error) {
 			continue
 		}
 		dst := filepath.Join(target, sanitise(skill.Name))
-		reds, err := copyTree(skill.BaseDir, dst)
+		reds, err := copyTree(kitDir, skill.BaseDir, dst)
 		if err != nil {
 			return nil, nil, fmt.Errorf("staging skill %q: %w", skill.Name, err)
 		}
@@ -344,7 +367,7 @@ func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, w
 				}
 				rel := filepath.Join(promptfiles.KitSubdir, name)
 				dst := filepath.Join(kitDir, rel)
-				red, err := copyFile(src, dst)
+				red, err := copyFile(kitDir, src, dst)
 				if err != nil {
 					return nil, nil, fmt.Errorf("staging prompt file %q: %w", src, err)
 				}
@@ -434,7 +457,11 @@ func sanitise(name string) string {
 // arbitrary host files (e.g. a symlink to ~/.aws/credentials) into
 // the kit. Directory symlinks are also skipped, which matches the
 // recursive skill loader's behaviour and avoids cycles.
-func copyTree(src, dst string) ([]Redaction, error) {
+//
+// kitRoot is the kit's staging directory; it is forwarded to
+// [copyFile] so [Redaction.Target] entries are recorded relative to
+// it (matching [Entry.Target]).
+func copyTree(kitRoot, src, dst string) ([]Redaction, error) {
 	root := resolveAbs(src)
 	if root == "" {
 		return nil, fmt.Errorf("resolving source: %s", src)
@@ -468,7 +495,7 @@ func copyTree(src, dst string) ([]Redaction, error) {
 			if sterr != nil || info.IsDir() {
 				return nil
 			}
-			red, copyErr := copyFile(realTarget, out)
+			red, copyErr := copyFile(kitRoot, realTarget, out)
 			if copyErr != nil {
 				return copyErr
 			}
@@ -477,7 +504,7 @@ func copyTree(src, dst string) ([]Redaction, error) {
 			}
 			return nil
 		default:
-			red, copyErr := copyFile(path, out)
+			red, copyErr := copyFile(kitRoot, path, out)
 			if copyErr != nil {
 				return copyErr
 			}
@@ -495,14 +522,17 @@ func copyTree(src, dst string) ([]Redaction, error) {
 
 // copyFile copies a regular file from src to dst, redacting via
 // [portcullis.Redact] when src is detected as text. Returns a non-nil
-// [Redaction] when at least one secret was scrubbed.
+// [Redaction] when at least one secret was scrubbed. The redaction's
+// Target is recorded relative to kitRoot so it stays consistent with
+// [Entry.Target] (and so the on-disk manifest never leaks the kit's
+// absolute host path).
 //
 // The destination inherits the source's permission bits (e.g. so an
 // executable helper script next to a SKILL.md keeps its +x), masked
 // to user-only since the kit is bind-mounted read-only into the
 // sandbox anyway and there's no reason to expose it to other users
 // on the host.
-func copyFile(src, dst string) (*Redaction, error) {
+func copyFile(kitRoot, src, dst string) (*Redaction, error) {
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		return nil, err
@@ -522,7 +552,11 @@ func copyFile(src, dst string) (*Redaction, error) {
 		scrubbed := portcullis.Redact(original)
 		if scrubbed != original {
 			out = []byte(scrubbed)
-			redaction = &Redaction{Source: src, Target: dst}
+			rel, relErr := filepath.Rel(kitRoot, dst)
+			if relErr != nil {
+				rel = dst // best effort; should never happen for staged files
+			}
+			redaction = &Redaction{Source: src, Target: rel}
 		}
 	}
 
@@ -564,4 +598,141 @@ func writeManifest(dir string, m Manifest) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, manifestFile), data, 0o600)
+}
+
+// PrintSummary writes a human-readable description of what was staged
+// to w. The output groups files by skill (one block per skill, listing
+// every file inside), then lists prompt files. Files whose host
+// content was scrubbed are tagged "(redacted)". A trailing summary
+// line counts skills, prompt files, and redactions.
+//
+// PrintSummary is silent when the kit shipped nothing — the caller is
+// expected to print its own "no kit needed" hint in that case.
+func (r *Result) PrintSummary(w io.Writer) {
+	if r == nil {
+		return
+	}
+
+	redacted := make(map[string]bool, len(r.Manifest.Redactions))
+	for _, red := range r.Manifest.Redactions {
+		redacted[red.Target] = true
+	}
+
+	skillFiles := r.skillFilesGrouped()
+	promptEntries := append([]Entry(nil), r.Manifest.PromptFiles...)
+	sort.Slice(promptEntries, func(i, j int) bool { return promptEntries[i].Target < promptEntries[j].Target })
+
+	if len(skillFiles) == 0 && len(promptEntries) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "Preparing docker-agent kit at %s\n", r.HostDir)
+
+	if len(skillFiles) > 0 {
+		fmt.Fprintln(w, "  skills:")
+		for _, group := range skillFiles {
+			fmt.Fprintf(w, "    %s\n", displaySkillHeader(group.entry))
+			for _, file := range group.files {
+				mark := ""
+				if redacted[file] {
+					mark = " (redacted)"
+				}
+				rel := strings.TrimPrefix(file, group.entry.Target+string(filepath.Separator))
+				fmt.Fprintf(w, "      %s%s\n", rel, mark)
+			}
+		}
+	}
+
+	if len(promptEntries) > 0 {
+		fmt.Fprintln(w, "  prompt files:")
+		for _, e := range promptEntries {
+			mark := ""
+			if redacted[e.Target] {
+				mark = ", redacted"
+			}
+			fmt.Fprintf(w, "    %s (from %s%s)\n", filepath.Base(e.Target), displayHostPath(e.Source), mark)
+		}
+	}
+
+	fmt.Fprintf(w, "  summary: %s\n", summaryCounts(len(skillFiles), len(promptEntries), len(r.Manifest.Redactions)))
+}
+
+// skillGroup pairs a skill manifest entry with the kit-relative paths
+// of every file staged under it (sorted).
+type skillGroup struct {
+	entry Entry
+	files []string
+}
+
+// skillFilesGrouped walks the staged skills directory and returns one
+// group per skill manifest entry, listing every file under the
+// skill's target path. The walk happens after staging is complete, so
+// it sees exactly what the sandbox will see.
+func (r *Result) skillFilesGrouped() []skillGroup {
+	entries := append([]Entry(nil), r.Manifest.Skills...)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Target < entries[j].Target })
+
+	groups := make([]skillGroup, 0, len(entries))
+	for _, e := range entries {
+		absRoot := filepath.Join(r.HostDir, e.Target)
+		var files []string
+		_ = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			rel, relErr := filepath.Rel(r.HostDir, path)
+			if relErr != nil {
+				return nil
+			}
+			files = append(files, rel)
+			return nil
+		})
+		sort.Strings(files)
+		groups = append(groups, skillGroup{entry: e, files: files})
+	}
+	return groups
+}
+
+// displaySkillHeader renders the "name (from /host/path)" line shown
+// at the top of each skill block.
+func displaySkillHeader(e Entry) string {
+	name := filepath.Base(e.Target)
+	if e.Source == "" {
+		return name
+	}
+	return fmt.Sprintf("%s (from %s)", name, displayHostPath(e.Source))
+}
+
+// displayHostPath replaces the user's $HOME prefix with "~" so the
+// printed paths stay short and don't reveal the local username when
+// shared in screenshots.
+func displayHostPath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if strings.HasPrefix(p, home+string(filepath.Separator)) {
+		return "~" + p[len(home):]
+	}
+	if p == home {
+		return "~"
+	}
+	return p
+}
+
+// summaryCounts formats the trailing line of PrintSummary.
+func summaryCounts(skillCount, promptCount, redactionCount int) string {
+	parts := []string{plural(skillCount, "skill")}
+	parts = append(parts, plural(promptCount, "prompt file"))
+	if redactionCount > 0 {
+		parts = append(parts, plural(redactionCount, "secret")+" redacted")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func plural(n int, what string) string {
+	if n == 1 {
+		return "1 " + what
+	}
+	return fmt.Sprintf("%d %ss", n, what)
 }

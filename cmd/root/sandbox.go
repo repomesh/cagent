@@ -69,6 +69,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		if err != nil {
 			slog.WarnContext(ctx, "docker-agent kit build failed; continuing without kit", "error", err)
 		} else {
+			kitResult.PrintSummary(cmd.OutOrStdout())
 			extras = append(extras, kitResult.HostDir)
 			defer func() {
 				if !kitKeep {
