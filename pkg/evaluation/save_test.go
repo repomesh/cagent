@@ -680,3 +680,16 @@ func TestSessionFromEventsWithSessionTitle(t *testing.T) {
 	// Title should be updated from the event
 	assert.Equal(t, "Auto-generated title", sess.Title)
 }
+
+func TestInputIDPassthrough(t *testing.T) {
+	t.Parallel()
+
+	const knownInputID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	sess := SessionFromEvents(nil, "title", []string{"q"})
+	sess.InputID = knownInputID
+
+	assert.Equal(t, knownInputID, sess.InputID)
+	assert.NotEmpty(t, sess.ID)
+	assert.NotEqual(t, knownInputID, sess.ID)
+}

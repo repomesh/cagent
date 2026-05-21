@@ -78,6 +78,11 @@ type Session struct {
 	// ID is the unique identifier for the session
 	ID string `json:"id"`
 
+	// InputID is an optional caller-supplied correlation ID read from the eval
+	// input file's "input_id" field. It is carried through to the output as-is
+	// and never used internally. The session's own "id" is always a fresh UUID.
+	InputID string `json:"input_id,omitempty"`
+
 	// Title is the title of the session, set by the runtime
 	Title string `json:"title"`
 
