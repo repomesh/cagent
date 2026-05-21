@@ -1,9 +1,11 @@
 package kit
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/docker/portcullis"
@@ -19,7 +21,17 @@ import (
 // actual credential.
 const fakeGitHubToken = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyz"
 
+// isolateEnv prevents a developer-exported DOCKER_AGENT_KIT_DIR from
+// flipping the in-process resolvers (notably skills.Load) into
+// kit-only mode mid-test, which would mask host paths the test
+// expects to see.
+func isolateEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(skills.KitDirEnv, "")
+}
+
 func TestBuild_StagesSkillsAndRedacts(t *testing.T) {
+	isolateEnv(t)
 	hostHome := t.TempDir()
 
 	// Stage one local skill on the host with a secret embedded.
@@ -68,6 +80,7 @@ func TestBuild_StagesSkillsAndRedacts(t *testing.T) {
 }
 
 func TestBuild_RebuildsCleanDir(t *testing.T) {
+	isolateEnv(t)
 	hostHome := t.TempDir()
 	t.Setenv("HOME", hostHome)
 	t.Chdir(t.TempDir())
@@ -99,6 +112,7 @@ func TestBuild_RebuildsCleanDir(t *testing.T) {
 }
 
 func TestBuild_PromptFilesCollectedAndScopedOutsideWorkspace(t *testing.T) {
+	isolateEnv(t)
 	hostHome := t.TempDir()
 	workspace := t.TempDir()
 
@@ -152,6 +166,7 @@ models:
 }
 
 func TestBuild_NoAgentRefLeavesPromptFilesEmpty(t *testing.T) {
+	isolateEnv(t)
 	// Without an AgentRef there is no team config to walk; the kit
 	// still builds (so the host-only skills lookup runs) but no
 	// prompt files are staged.
@@ -198,4 +213,214 @@ func TestSanitise(t *testing.T) {
 	assert.Equal(t, "abc", sanitise("abc"))
 	assert.Equal(t, "a_b", sanitise("a/b"))
 	assert.Equal(t, "a_b", sanitise("a..b"))
+}
+
+func TestBuild_DropsSymlinksEscapingSkillRoot(t *testing.T) {
+	isolateEnv(t)
+	hostHome := t.TempDir()
+
+	// A sensitive host file the user did NOT intend to ship.
+	secretsDir := t.TempDir()
+	secretFile := filepath.Join(secretsDir, "credentials")
+	require.NoError(t, os.WriteFile(secretFile, []byte("super-secret\n"), 0o600))
+
+	// A skill whose tree contains a symlink pointing at the secret.
+	// Without the escape check this content would land in the kit
+	// (and thus inside the sandbox).
+	skillDir := filepath.Join(hostHome, ".agents", "skills", "sneaky")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: sneaky\ndescription: tries to exfiltrate\n---\n"), 0o644))
+	require.NoError(t, os.Symlink(secretFile, filepath.Join(skillDir, "creds")))
+
+	t.Setenv("HOME", hostHome)
+	t.Chdir(t.TempDir())
+
+	res, err := Build(t.Context(), Options{
+		AgentRef: "default",
+		HostHome: hostHome,
+		HostCwd:  t.TempDir(),
+		CacheDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	// SKILL.md is staged.
+	stagedSkill := filepath.Join(res.HostDir, skills.KitSkillsSubdir, "sneaky", "SKILL.md")
+	_, err = os.Stat(stagedSkill)
+	require.NoError(t, err)
+
+	// The symlinked secret is NOT.
+	stagedCreds := filepath.Join(res.HostDir, skills.KitSkillsSubdir, "sneaky", "creds")
+	_, err = os.Stat(stagedCreds)
+	assert.True(t, os.IsNotExist(err), "escape symlink must not be followed into the kit")
+}
+
+func TestBuild_AllowsSymlinksWithinSkillRoot(t *testing.T) {
+	isolateEnv(t)
+	hostHome := t.TempDir()
+
+	skillDir := filepath.Join(hostHome, ".agents", "skills", "linked")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: linked\ndescription: legit\n---\n"), 0o644))
+	helper := filepath.Join(skillDir, "helper.txt")
+	require.NoError(t, os.WriteFile(helper, []byte("helper\n"), 0o644))
+	require.NoError(t, os.Symlink(helper, filepath.Join(skillDir, "alias.txt")))
+
+	t.Setenv("HOME", hostHome)
+	t.Chdir(t.TempDir())
+
+	res, err := Build(t.Context(), Options{
+		AgentRef: "default",
+		HostHome: hostHome,
+		HostCwd:  t.TempDir(),
+		CacheDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	staged := filepath.Join(res.HostDir, skills.KitSkillsSubdir, "linked", "alias.txt")
+	data, err := os.ReadFile(staged)
+	require.NoError(t, err)
+	assert.Equal(t, "helper\n", string(data),
+		"symlink whose target lives inside the skill root must be inlined")
+}
+
+func TestBuild_PreservesExecutableBit(t *testing.T) {
+	isolateEnv(t)
+	hostHome := t.TempDir()
+
+	skillDir := filepath.Join(hostHome, ".agents", "skills", "with-script")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: with-script\ndescription: includes a helper script\n---\n"), 0o644))
+	script := filepath.Join(skillDir, "run.sh")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o700))
+
+	t.Setenv("HOME", hostHome)
+	t.Chdir(t.TempDir())
+
+	res, err := Build(t.Context(), Options{
+		AgentRef: "default",
+		HostHome: hostHome,
+		HostCwd:  t.TempDir(),
+		CacheDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	staged := filepath.Join(res.HostDir, skills.KitSkillsSubdir, "with-script", "run.sh")
+	info, err := os.Stat(staged)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode().Perm()&0o100,
+		"staged script %s must keep its executable bit (got %v)", staged, info.Mode())
+}
+
+func TestBuild_OnDiskManifestOmitsHostPaths(t *testing.T) {
+	isolateEnv(t)
+	hostHome := t.TempDir()
+
+	skillDir := filepath.Join(hostHome, ".agents", "skills", "plain")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: plain\ndescription: plain\n---\n"), 0o644))
+
+	t.Setenv("HOME", hostHome)
+	t.Chdir(t.TempDir())
+
+	res, err := Build(t.Context(), Options{
+		AgentRef: "default",
+		HostHome: hostHome,
+		HostCwd:  t.TempDir(),
+		CacheDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(filepath.Join(res.HostDir, manifestFile))
+	require.NoError(t, err)
+
+	// The on-disk manifest is bind-mounted into the sandbox; it must
+	// not reveal the host filesystem layout. The in-memory Manifest
+	// keeps the source paths for caller-side debugging.
+	assert.NotContains(t, string(raw), hostHome,
+		"on-disk manifest must not leak host paths")
+
+	var onDisk Manifest
+	require.NoError(t, json.Unmarshal(raw, &onDisk))
+	for _, e := range onDisk.Skills {
+		assert.Empty(t, e.Source, "manifest entries must not include host source paths")
+	}
+
+	require.NotEmpty(t, res.Manifest.Skills)
+	assert.NotEmpty(t, res.Manifest.Skills[0].Source,
+		"in-memory manifest still carries the host source for callers")
+}
+
+func TestBuild_ConcurrentRunsForSameAgentAreSafe(t *testing.T) {
+	isolateEnv(t)
+	hostHome := t.TempDir()
+	skillDir := filepath.Join(hostHome, ".agents", "skills", "shared")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: shared\ndescription: shared skill\n---\n"), 0o644))
+
+	t.Setenv("HOME", hostHome)
+	t.Chdir(t.TempDir())
+
+	cacheDir := t.TempDir()
+	optsTemplate := Options{
+		AgentRef: "shared-ref",
+		HostHome: hostHome,
+		HostCwd:  t.TempDir(),
+		CacheDir: cacheDir,
+	}
+
+	const N = 6
+	var wg sync.WaitGroup
+	dirs := make([]string, N)
+	errs := make([]error, N)
+	for i := range N {
+		wg.Go(func() {
+			res, err := Build(t.Context(), optsTemplate)
+			errs[i] = err
+			if res != nil {
+				dirs[i] = res.HostDir
+			}
+		})
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoErrorf(t, err, "concurrent build %d", i)
+	}
+	// Every winner ends up with the same final dir.
+	for i := 1; i < N; i++ {
+		assert.Equal(t, dirs[0], dirs[i])
+	}
+	// And the final dir is fully populated.
+	_, err := os.Stat(filepath.Join(dirs[0], skills.KitSkillsSubdir, "shared", "SKILL.md"))
+	assert.NoError(t, err)
+}
+
+func TestHashKey_FileRefsCanonicalised(t *testing.T) {
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "agent.yaml")
+	require.NoError(t, os.WriteFile(agent, []byte("x"), 0o600))
+
+	t.Chdir(dir)
+
+	kAbs := hashKey(agent)
+	kRel := hashKey("./agent.yaml")
+	kBare := hashKey("agent.yaml")
+	assert.Equal(t, kAbs, kRel,
+		"./agent.yaml and the absolute path must share a kit")
+	assert.Equal(t, kAbs, kBare,
+		"agent.yaml and the absolute path must share a kit")
+}
+
+func TestHashKey_EmptyDoesNotCollideWithDefault(t *testing.T) {
+	t.Parallel()
+
+	// A literal ref of "default" used to share a hash with the empty
+	// fallback because the latter was rewritten to "default" before
+	// hashing. They now sit in different namespaces.
+	assert.NotEqual(t, hashKey(""), hashKey("default"))
 }

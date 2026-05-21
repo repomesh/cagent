@@ -54,13 +54,15 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		return fmt.Errorf("resolving workspace path: %w", err)
 	}
 
+	envProvider := environment.NewDefaultProvider()
+
 	extras := []string{sandbox.ExtraWorkspace(wd, agentRef)}
 
 	var kitResult *kit.Result
 	if !noKit && agentRef != "" {
 		kitResult, err = kit.Build(ctx, kit.Options{
 			AgentRef:    agentRef,
-			EnvProvider: environment.NewDefaultProvider(),
+			EnvProvider: envProvider,
 			HostCwd:     wd,
 			Workspace:   wd,
 		})
@@ -84,7 +86,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	// Resolve env vars the agent needs and forward them into the sandbox.
 	// Docker Desktop proxies well-known API keys automatically; this handles
 	// any additional vars (e.g. MCP tool secrets).
-	envFlags, envVars := sandbox.EnvForAgent(ctx, agentRef, environment.NewDefaultProvider())
+	envFlags, envVars := sandbox.EnvForAgent(ctx, agentRef, envProvider)
 
 	// Forward the gateway as an env var so docker sandbox exec sets it
 	// directly inside the sandbox.
@@ -92,10 +94,13 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		envFlags = append(envFlags, "-e", envModelsGateway+"="+gateway)
 	}
 
-	// Point the in-sandbox resolvers at the staged kit.
+	// Point the in-sandbox resolvers at the staged kit. We use the
+	// `-e KEY=VALUE` form so the value is set directly inside the
+	// container; we deliberately do not append it to envVars (which
+	// would set it on the host docker CLI process too — a path that
+	// only makes sense inside the sandbox).
 	if kitResult != nil {
 		envFlags = append(envFlags, "-e", skills.KitDirEnv+"="+kit.MountPath)
-		envVars = append(envVars, skills.KitDirEnv+"="+kit.MountPath)
 	}
 
 	dockerCmd := backend.BuildExecCmd(ctx, name, wd, dockerAgentArgs, envFlags, envVars)
@@ -112,11 +117,18 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 }
 
 func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string) []string {
+	skip := map[string]bool{
+		"sandbox":    true,
+		"sbx":        true,
+		"config-dir": true,
+		"no-kit":     true,
+		"kit-keep":   true,
+	}
+
 	var dockerAgentArgs []string
 	hasYolo := false
 	cmd.Flags().Visit(func(f *pflag.Flag) {
-		switch f.Name {
-		case "sandbox", "sbx", "config-dir", "no-kit", "kit-keep":
+		if skip[f.Name] {
 			return
 		}
 

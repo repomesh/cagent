@@ -88,30 +88,39 @@ func (b *Backend) ForWorkspace(ctx context.Context, wd string) *Existing {
 
 // Ensure makes sure a sandbox exists for the given workspace,
 // creating or recreating it as needed. extras is a list of additional
-// host directories to mount read-only (kit dir, agent yaml dir, ...);
-// duplicates and entries equal to wd are filtered out. When template
-// is non-empty it is passed to `docker sandbox create -t`. Returns
-// the sandbox name.
+// host directories to mount read-only (kit dir, agent yaml dir, ...).
+// Each entry is made absolute and cleaned; duplicates and entries that
+// resolve to wd are filtered out. When template is non-empty it is
+// passed to `docker sandbox create -t`. Returns the sandbox name.
 func (b *Backend) Ensure(ctx context.Context, wd string, extras []string, template, configDir string) (string, error) {
-	// Resolve wd to an absolute path so that it matches the absolute
-	// workspace paths returned by `docker sandbox ls --json`.
-	absWd, err := filepath.Abs(wd)
+	wd, err := absClean(wd)
 	if err != nil {
 		return "", fmt.Errorf("resolving workspace path: %w", err)
 	}
-	wd = absWd
+	absConfigDir, err := absClean(configDir)
+	if err != nil {
+		return "", fmt.Errorf("resolving config dir: %w", err)
+	}
+	configDir = absConfigDir
 
-	// Filter extras: drop empties, dedupe, and remove anything that
-	// would shadow wd (which is already mounted read-write).
-	dedup := make(map[string]bool, len(extras))
-	dedup[wd] = true
-	cleaned := extras[:0:0]
+	// Filter extras: drop empties, normalise (Abs+Clean), dedupe, and
+	// remove anything that resolves to wd — wd is already mounted
+	// read-write so a duplicate :ro mount would shadow it.
+	dedup := map[string]bool{wd: true}
+	cleaned := make([]string, 0, len(extras))
 	for _, e := range extras {
-		if e == "" || dedup[e] {
+		if e == "" {
 			continue
 		}
-		dedup[e] = true
-		cleaned = append(cleaned, e)
+		abs, err := absClean(e)
+		if err != nil {
+			return "", fmt.Errorf("resolving extra workspace %q: %w", e, err)
+		}
+		if dedup[abs] {
+			continue
+		}
+		dedup[abs] = true
+		cleaned = append(cleaned, abs)
 	}
 	extras = cleaned
 
@@ -165,6 +174,18 @@ func (b *Backend) Ensure(ctx context.Context, wd string, extras []string, templa
 	}
 
 	return created.Name, nil
+}
+
+// absClean normalises a path so that two textually different but
+// equivalent paths (e.g. "./foo" and "foo", "a//b" and "a/b") collapse
+// before reaching the workspace dedup / reuse comparisons. Returns an
+// error if filepath.Abs fails.
+func absClean(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 // hasAllWorkspaces reports whether every entry of extras is mounted

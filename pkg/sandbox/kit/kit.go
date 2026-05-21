@@ -51,6 +51,9 @@ import (
 // MountPath is the path at which the kit is bind-mounted inside the sandbox.
 const MountPath = "/agent-kit"
 
+// manifestFile is the on-disk name of the kit's table of contents.
+const manifestFile = "manifest.json"
+
 // Options describes a kit build.
 type Options struct {
 	// AgentRef is the user-facing reference to the agent (a YAML path,
@@ -91,12 +94,14 @@ type Result struct {
 	// resolvers find it.
 	HostDir string
 
-	// Manifest describes what was staged.
+	// Manifest describes what was staged. It contains absolute host
+	// source paths and is meant for caller-side inspection only — the
+	// on-disk copy under <HostDir>/manifest.json is sanitised so the
+	// sandbox cannot learn the host filesystem layout.
 	Manifest Manifest
 }
 
-// Manifest is the kit's table of contents. It is also written to
-// <HostDir>/manifest.json for debugging.
+// Manifest is the kit's table of contents.
 type Manifest struct {
 	AgentRef    string      `json:"agent_ref"`
 	BuiltAt     time.Time   `json:"built_at"`
@@ -107,8 +112,9 @@ type Manifest struct {
 
 // Entry records one staged file or directory.
 type Entry struct {
-	// Source is the original host path.
-	Source string `json:"source"`
+	// Source is the original host path. Omitted from the on-disk
+	// manifest so the sandbox cannot learn the host layout.
+	Source string `json:"-"`
 	// Target is the path relative to the kit root.
 	Target string `json:"target"`
 }
@@ -116,17 +122,22 @@ type Entry struct {
 // Redaction records that portcullis added at least one [portcullis.Marker]
 // to the staged copy of a file.
 type Redaction struct {
-	// Source is the host path of the original file.
-	Source string `json:"source"`
+	// Source is the host path of the original file. Omitted from the
+	// on-disk manifest for the same reason as [Entry.Source].
+	Source string `json:"-"`
 	// Target is the path relative to the kit root.
 	Target string `json:"target"`
 }
 
 // Build stages the kit and returns its location.
 //
-// The kit directory is reused across runs (deterministic path keyed by
-// AgentRef) but always rebuilt fresh, so callers do not need to invalidate
-// it manually when a skill or AGENTS.md changes on the host.
+// Each Build creates a temporary directory under CacheDir, populates it,
+// then atomically replaces the final per-agent directory. Concurrent
+// Builds for the same agent therefore never see a half-populated kit;
+// the last one to finish wins. The kit directory itself is reused
+// across runs (deterministic path keyed by AgentRef) so the sandbox VM
+// can be reused as long as nothing else in the workspace mount set
+// changed.
 func Build(ctx context.Context, opts Options) (*Result, error) {
 	hostHome := opts.HostHome
 	if hostHome == "" {
@@ -137,11 +148,26 @@ func Build(ctx context.Context, opts Options) (*Result, error) {
 	if cacheParent == "" {
 		cacheParent = filepath.Join(paths.GetCacheDir(), "sandbox-kits")
 	}
-
-	kitDir := filepath.Join(cacheParent, hashKey(opts.AgentRef))
-	if err := resetDir(kitDir); err != nil {
-		return nil, fmt.Errorf("preparing kit dir: %w", err)
+	if err := os.MkdirAll(cacheParent, 0o750); err != nil {
+		return nil, fmt.Errorf("preparing kit cache: %w", err)
 	}
+
+	finalDir := filepath.Join(cacheParent, hashKey(opts.AgentRef))
+
+	// Stage to a temp sibling first so concurrent builds and
+	// crashed runs cannot leave behind a half-populated final dir
+	// that a later sandbox would mount.
+	stagingDir, err := os.MkdirTemp(cacheParent, ".tmp-")
+	if err != nil {
+		return nil, fmt.Errorf("preparing kit staging dir: %w", err)
+	}
+	// On any error past this point, drop the staging dir.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
 
 	manifest := Manifest{
 		AgentRef: opts.AgentRef,
@@ -158,51 +184,96 @@ func Build(ctx context.Context, opts Options) (*Result, error) {
 		cfg = &latestcfg.Config{}
 	}
 
-	skillsEntries, redactions, err := stageSkills(kitDir)
+	skillsEntries, redactions, err := stageSkills(stagingDir)
 	if err != nil {
 		return nil, err
 	}
 	manifest.Skills = skillsEntries
 	manifest.Redactions = append(manifest.Redactions, redactions...)
 
-	promptEntries, redactions, err := stagePromptFiles(kitDir, cfg, opts.HostCwd, hostHome, opts.Workspace)
+	promptEntries, redactions, err := stagePromptFiles(stagingDir, cfg, opts.HostCwd, hostHome, opts.Workspace)
 	if err != nil {
 		return nil, err
 	}
 	manifest.PromptFiles = promptEntries
 	manifest.Redactions = append(manifest.Redactions, redactions...)
 
-	if err := writeManifest(kitDir, manifest); err != nil {
+	if err := writeManifest(stagingDir, manifest); err != nil {
 		return nil, err
 	}
 
+	if err := promote(stagingDir, finalDir); err != nil {
+		return nil, fmt.Errorf("publishing kit: %w", err)
+	}
+	committed = true
+
 	slog.DebugContext(ctx, "kit: built",
-		"dir", kitDir,
+		"dir", finalDir,
 		"skills", len(manifest.Skills),
 		"prompt_files", len(manifest.PromptFiles),
 		"redactions", len(manifest.Redactions))
 
-	return &Result{HostDir: kitDir, Manifest: manifest}, nil
+	return &Result{HostDir: finalDir, Manifest: manifest}, nil
 }
 
 // hashKey turns AgentRef into a short, filesystem-safe directory name.
-// We hash rather than sanitise the ref so OCI refs (which contain ":"
-// and "/") and absolute paths share the same encoding.
+//
+// File-system refs are canonicalised (Abs + EvalSymlinks) so that
+// "./agent.yaml" and "/abs/path/agent.yaml" share a kit when they
+// resolve to the same file. Non-file refs (OCI, URL, builtin name) are
+// hashed verbatim.
+//
+// The ref is type-tagged before hashing so that, for instance, an OCI
+// ref named "default" and the empty/builtin "default" cannot collide.
+//
+// We truncate to 8 bytes (16 hex chars) of SHA-256 because the entire
+// keyspace here is the agents the user runs locally — a handful at
+// most — so 2^64 buckets is comically large for the use case while
+// keeping kit directory names short and readable.
 func hashKey(ref string) string {
-	if ref == "" {
-		ref = "default"
-	}
-	sum := sha256.Sum256([]byte(ref))
+	tag, key := classifyRef(ref)
+	sum := sha256.Sum256([]byte(tag + "\x00" + key))
 	return hex.EncodeToString(sum[:8])
 }
 
-// resetDir ensures dir exists and is empty. Used at the start of every
-// Build so a previous run's stale entries cannot leak in.
-func resetDir(dir string) error {
-	if err := os.RemoveAll(dir); err != nil {
-		return err
+// classifyRef returns a tag identifying the kind of ref and a
+// canonicalised key for hashing. File refs that resolve on disk are
+// returned as ("file", absolute-real-path); everything else falls
+// through as ("ref", ref) — including the empty string, which becomes
+// ("empty", "") so it cannot collide with a literal ref of "default".
+func classifyRef(ref string) (tag, key string) {
+	if ref == "" {
+		return "empty", ""
 	}
-	return os.MkdirAll(dir, 0o750)
+	abs, err := filepath.Abs(ref)
+	if err != nil {
+		return "ref", ref
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
+			return "file", resolved
+		}
+	}
+	return "ref", ref
+}
+
+// promote moves stagingDir into final atomically. If final already
+// exists, it is moved aside first so the rename can succeed, then the
+// old content is removed in the background. Best-effort: a leftover
+// "<final>.old-*" sibling is harmless and will be reaped on the next
+// successful build.
+func promote(stagingDir, finalDir string) error {
+	if _, err := os.Stat(finalDir); err == nil {
+		retired := finalDir + ".old-" + filepath.Base(stagingDir)
+		if err := os.Rename(finalDir, retired); err != nil {
+			return fmt.Errorf("retiring previous kit: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(retired) }()
+	}
+	if err := os.Rename(stagingDir, finalDir); err != nil {
+		return fmt.Errorf("renaming kit: %w", err)
+	}
+	return nil
 }
 
 func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
@@ -281,8 +352,11 @@ func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, w
 				if red != nil {
 					redactions = append(redactions, *red)
 				}
-				// Only ship the closest match; a second one would
-				// overwrite the kit copy without distinguishing them.
+				// Only one copy per name. promptfiles.Paths returns the
+				// closest workdir match first followed by the home/kit
+				// fallback; we ship whichever survives the workspace
+				// filter and stop, since later candidates would just
+				// overwrite this one.
 				break
 			}
 		}
@@ -290,26 +364,57 @@ func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, w
 	return entries, redactions, nil
 }
 
-// isUnder reports whether path is contained within base. Both paths are
-// resolved to absolute form before comparison so that "../foo" and
-// symlinked traversals don't escape detection.
+// isUnder reports whether path is contained within base. Both paths
+// are made absolute and have their symlinks resolved, so a symlink
+// from outside-workspace into the workspace (or vice versa) cannot
+// trick the check. When EvalSymlinks fails (e.g. dangling links) the
+// best-effort absolute paths are used instead, which is still strict
+// enough to defeat the textual "../" escape.
 func isUnder(path, base string) bool {
 	if base == "" {
 		return false
 	}
-	absBase, err := filepath.Abs(base)
-	if err != nil {
+	resolvedBase := resolveAbs(base)
+	resolvedPath := resolveAbs(path)
+	if resolvedBase == "" || resolvedPath == "" {
 		return false
 	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(absBase, absPath)
+	rel, err := filepath.Rel(resolvedBase, resolvedPath)
 	if err != nil {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveAbs returns p resolved to an absolute, symlink-free path. If
+// p itself doesn't exist, the deepest existing ancestor is resolved
+// and the remaining (non-existent) tail is appended to it. This
+// matters on systems whose temp dir is itself a symlink (e.g. macOS
+// /var → /private/var): an existing base resolves to /private/var
+// while a not-yet-created child of it would otherwise resolve to
+// /var/..., causing isUnder to wrongly report that they're unrelated.
+func resolveAbs(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	// Walk up until we find an existing ancestor we can resolve.
+	tail := ""
+	current := abs
+	for {
+		parent := filepath.Dir(current)
+		tail = filepath.Join(filepath.Base(current), tail)
+		if parent == current {
+			return abs // hit the root without finding anything resolvable
+		}
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+		current = parent
+	}
 }
 
 // sanitise replaces filesystem-unfriendly characters in a skill name so
@@ -322,11 +427,19 @@ func sanitise(name string) string {
 }
 
 // copyTree copies the directory rooted at src to dst recursively,
-// applying [portcullis.Redact] to every text file. Symlinks inside the
-// tree are followed for files (the contents are inlined into the kit)
-// but not for directories — a symlink-to-directory is skipped to avoid
-// staging arbitrary host content the user did not ask for.
+// applying [portcullis.Redact] to every text file. Symlinks inside
+// the tree are followed only when their resolved target stays within
+// src (resolved); links pointing outside src are silently skipped to
+// prevent a hostile or careless skill author from exfiltrating
+// arbitrary host files (e.g. a symlink to ~/.aws/credentials) into
+// the kit. Directory symlinks are also skipped, which matches the
+// recursive skill loader's behaviour and avoids cycles.
 func copyTree(src, dst string) ([]Redaction, error) {
+	root := resolveAbs(src)
+	if root == "" {
+		return nil, fmt.Errorf("resolving source: %s", src)
+	}
+
 	var redactions []Redaction
 	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -342,17 +455,20 @@ func copyTree(src, dst string) ([]Redaction, error) {
 		case d.IsDir():
 			return os.MkdirAll(out, 0o750)
 		case d.Type()&fs.ModeSymlink != 0:
-			// Resolve the symlink. Skip if it points outside src to
-			// avoid staging arbitrary host content.
-			target, terr := filepath.EvalSymlinks(path)
+			realTarget, terr := filepath.EvalSymlinks(path)
 			if terr != nil {
 				return nil
 			}
-			info, sterr := os.Stat(target)
+			if !isUnder(realTarget, root) {
+				slog.Warn("kit: skipping symlink that escapes skill root",
+					"link", path, "target", realTarget, "root", root)
+				return nil
+			}
+			info, sterr := os.Stat(realTarget)
 			if sterr != nil || info.IsDir() {
 				return nil
 			}
-			red, copyErr := copyFile(target, out)
+			red, copyErr := copyFile(realTarget, out)
 			if copyErr != nil {
 				return copyErr
 			}
@@ -380,7 +496,17 @@ func copyTree(src, dst string) ([]Redaction, error) {
 // copyFile copies a regular file from src to dst, redacting via
 // [portcullis.Redact] when src is detected as text. Returns a non-nil
 // [Redaction] when at least one secret was scrubbed.
+//
+// The destination inherits the source's permission bits (e.g. so an
+// executable helper script next to a SKILL.md keeps its +x), masked
+// to user-only since the kit is bind-mounted read-only into the
+// sandbox anyway and there's no reason to expose it to other users
+// on the host.
 func copyFile(src, dst string) (*Redaction, error) {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return nil, err
@@ -400,7 +526,11 @@ func copyFile(src, dst string) (*Redaction, error) {
 		}
 	}
 
-	if err := os.WriteFile(dst, out, 0o600); err != nil {
+	mode := srcInfo.Mode().Perm() & 0o700
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := os.WriteFile(dst, out, mode); err != nil {
 		return nil, err
 	}
 	return redaction, nil
@@ -424,13 +554,14 @@ func isText(b []byte) bool {
 	return utf8.Valid(b)
 }
 
-// writeManifest serialises the manifest as pretty-printed JSON. The
-// kit directory is meant to be inspected by humans during debugging,
-// so readability beats compactness.
+// writeManifest serialises the manifest as pretty-printed JSON. Source
+// host paths are stripped (Entry.Source / Redaction.Source carry
+// json:"-") so the sandbox-visible manifest cannot be used to map the
+// host filesystem.
 func writeManifest(dir string, m Manifest) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "manifest.json"), data, 0o600)
+	return os.WriteFile(filepath.Join(dir, manifestFile), data, 0o600)
 }
