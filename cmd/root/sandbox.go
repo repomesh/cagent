@@ -25,7 +25,7 @@ import (
 // runInSandbox delegates the current command to a Docker sandbox.
 // It ensures a sandbox exists (creating or recreating as needed), then
 // executes docker agent inside it via the sandbox exec command.
-func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runConfig *config.RuntimeConfig, template string, preferSbx, noKit, kitKeep bool) error {
+func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runConfig *config.RuntimeConfig, template string, preferSbx, noKit bool) error {
 	if environment.InSandbox() {
 		return fmt.Errorf("already running inside a Docker sandbox (VM %s)", os.Getenv("SANDBOX_VM_ID"))
 	}
@@ -71,11 +71,14 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		} else {
 			kitResult.PrintSummary(cmd.OutOrStdout())
 			extras = append(extras, kitResult.HostDir)
-			defer func() {
-				if !kitKeep {
-					_ = os.RemoveAll(kitResult.HostDir)
-				}
-			}()
+			// We deliberately keep the kit on disk between runs:
+			// the docker sandbox we reuse across runs holds a hard
+			// reference to the kit's bind-mount path — deleting the
+			// dir would leave the sandbox un-startable. The kit lives
+			// in the cache dir keyed on a content hash, so the next
+			// run for the same agent overwrites it in place; disk
+			// usage is bounded by the number of distinct agents the
+			// user has run.
 		}
 	}
 
@@ -93,6 +96,18 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	// directly inside the sandbox.
 	if gateway := runConfig.ModelsGateway; gateway != "" {
 		envFlags = append(envFlags, "-e", envModelsGateway+"="+gateway)
+
+		// Forward the Docker Desktop token directly as -e DOCKER_TOKEN=<value>.
+		// The host-side SandboxTokenWriter writes a file under configDir for
+		// long-running sessions to pick up refreshed tokens, but the inner's
+		// startup check (config.CheckRequiredEnvVars) runs before the file
+		// path resolves correctly under --config-dir, so we also seed the
+		// initial value as an env var. The token rotates roughly once per
+		// hour; sessions longer than that will still pick up the refreshed
+		// value from the file as long as the inner can reach it.
+		if token, ok := envProvider.Get(ctx, environment.DockerDesktopTokenEnv); ok && token != "" {
+			envFlags = append(envFlags, "-e", environment.DockerDesktopTokenEnv+"="+token)
+		}
 	}
 
 	// Point the in-sandbox resolvers at the staged kit. We use the
@@ -123,7 +138,6 @@ func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string) []stri
 		"sbx":        true,
 		"config-dir": true,
 		"no-kit":     true,
-		"kit-keep":   true,
 	}
 
 	var dockerAgentArgs []string
