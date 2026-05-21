@@ -60,7 +60,7 @@ func Load(ctx context.Context, source Source) (*latest.Config, error) {
 		return nil, err
 	}
 
-	warnExpansionMismatches(ctx, &config)
+	warnExpansionMismatches(ctx, slog.Default(), &config)
 
 	return &config, nil
 }
