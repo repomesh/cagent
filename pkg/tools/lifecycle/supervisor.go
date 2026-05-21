@@ -140,6 +140,10 @@ type Supervisor struct {
 	// fresh channel by Start when transitioning out of a terminal state.
 	done chan struct{}
 
+	// watchDone is closed by the current watcher goroutine. Stop waits on it
+	// after closing the session so no transport goroutines are left behind.
+	watchDone chan struct{}
+
 	// randFloat is the jitter source; tests may override.
 	randFloat func() float64
 }
@@ -214,6 +218,9 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	}
 	s.session = sess
 	spawnWatcher := !s.watcherAlive
+	if spawnWatcher {
+		s.watchDone = make(chan struct{})
+	}
 	s.watcherAlive = true
 	// Recovering from a terminal state (Failed → Start, or a watcher
 	// that previously exited): refresh `done` so RestartAndWait callers
@@ -244,24 +251,40 @@ func (s *Supervisor) Start(ctx context.Context) error {
 func (s *Supervisor) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	if s.stopping {
+		watchDone := s.watchDone
 		s.mu.Unlock()
-		return nil
+		return waitForWatcher(ctx, watchDone)
 	}
 	s.stopping = true
 	sess := s.session
 	s.session = nil
+	watchDone := s.watchDone
 	s.mu.Unlock()
 
 	s.tracker.Set(StateStopped)
 	s.signalDone()
 
-	if sess == nil {
+	var closeErr error
+	if sess != nil {
+		closeErr = sess.Close(context.WithoutCancel(ctx))
+	}
+	waitErr := waitForWatcher(ctx, watchDone)
+	if closeErr != nil && ctx.Err() == nil {
+		return closeErr
+	}
+	return waitErr
+}
+
+func waitForWatcher(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
 		return nil
 	}
-	if err := sess.Close(context.WithoutCancel(ctx)); err != nil && ctx.Err() == nil {
-		return err
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 // RestartAndWait closes the current session (if any) so the watcher
@@ -326,7 +349,12 @@ func (s *Supervisor) watch(ctx context.Context) {
 	defer func() {
 		s.mu.Lock()
 		s.watcherAlive = false
+		watchDone := s.watchDone
+		s.watchDone = nil
 		s.mu.Unlock()
+		if watchDone != nil {
+			close(watchDone)
+		}
 	}()
 
 	log := s.policy.logger()
