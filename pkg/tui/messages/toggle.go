@@ -32,6 +32,10 @@ type (
 	// the tool catalogue grouped by category.
 	ShowToolsDialogMsg struct{}
 
+	// ShowSkillsDialogMsg shows the skills dialog: the list of skills
+	// available to the current agent.
+	ShowSkillsDialogMsg struct{}
+
 	// RestartToolsetMsg asks the runtime to restart the named toolset by
 	// triggering its supervisor's RestartAndWait.
 	RestartToolsetMsg struct{ Name string }

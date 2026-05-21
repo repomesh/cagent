@@ -1,0 +1,78 @@
+package dialog
+
+import (
+	"fmt"
+	"strings"
+
+	"charm.land/lipgloss/v2"
+
+	"github.com/docker/docker-agent/pkg/skills"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+)
+
+type skillsDialog struct {
+	readOnlyScrollDialog
+
+	skills []skills.Skill
+}
+
+// NewSkillsDialog creates the /skills dialog showing every skill exposed
+// to the current agent.
+func NewSkillsDialog(skillList []skills.Skill) Dialog {
+	d := &skillsDialog{
+		skills: skillList,
+	}
+	d.readOnlyScrollDialog = newReadOnlyScrollDialog(
+		readOnlyScrollDialogSize{widthPercent: 70, minWidth: 60, maxWidth: 100, heightPercent: 80, heightMax: 40},
+		d.renderLines,
+	)
+	return d
+}
+
+func (d *skillsDialog) renderLines(contentWidth, _ int) []string {
+	title := fmt.Sprintf("Skills (%d)", len(d.skills))
+	lines := []string{
+		RenderTitle(title, contentWidth, styles.DialogTitleStyle),
+		RenderSeparator(contentWidth),
+		"",
+	}
+
+	if len(d.skills) == 0 {
+		lines = append(lines, "  "+styles.MutedStyle.Render("No skills available."), "")
+		return lines
+	}
+
+	for i := range d.skills {
+		lines = append(lines, formatSkill(&d.skills[i], contentWidth)...)
+	}
+
+	return lines
+}
+
+func formatSkill(s *skills.Skill, contentWidth int) []string {
+	name := lipgloss.NewStyle().Foreground(styles.Highlight).Render("  " + s.Name)
+	name += " " + skillSourceBadge(s)
+	if s.IsFork() {
+		name += " " + styles.MutedStyle.Render("[fork]")
+	}
+
+	out := []string{name}
+
+	if desc, _, _ := strings.Cut(s.Description, "\n"); desc != "" {
+		indent := "    "
+		availableWidth := contentWidth - lipgloss.Width(indent)
+		if availableWidth > 0 {
+			out = append(out, indent+styles.MutedStyle.Render(toolcommon.TruncateText(desc, availableWidth)))
+		}
+	}
+	out = append(out, "")
+	return out
+}
+
+func skillSourceBadge(s *skills.Skill) string {
+	if s.Local {
+		return styles.SuccessStyle.Render("[local]")
+	}
+	return styles.WarningStyle.Render("[remote]")
+}

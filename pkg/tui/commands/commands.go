@@ -285,6 +285,17 @@ func builtInSessionCommands() []Item {
 			},
 		},
 		{
+			ID:           "session.skills",
+			Label:        "Skills",
+			SlashCommand: "/skills",
+			Description:  "List skills available to the current agent",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(string) tea.Cmd {
+				return core.CmdHandler(messages.ShowSkillsDialogMsg{})
+			},
+		},
+		{
 			ID:           "session.toolset.restart",
 			Label:        "Restart Toolset",
 			SlashCommand: "/toolset-restart",

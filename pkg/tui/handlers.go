@@ -446,6 +446,12 @@ func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
 	})
 }
 
+func (m *appModel) handleShowSkillsDialog() (tea.Model, tea.Cmd) {
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
+		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills()),
+	})
+}
+
 // handleRestartToolset asks the runtime to restart the named toolset.
 // The actual call can block for up to ~35s (the supervisor's
 // reconnect timeout), so we run it inside a tea.Cmd goroutine and
