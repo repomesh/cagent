@@ -73,8 +73,11 @@ type FunctionCall struct {
 // MediaContent represents base64-encoded binary data (image, audio, etc.)
 // returned by a tool.
 type MediaContent struct {
-	// Data is the base64-encoded payload.
-	Data string `json:"data"`
+	// Data is the base64-encoded payload. It is kept only for small media; large
+	// MCP payloads are spooled to FilePath to avoid retaining duplicate base64.
+	Data string `json:"data,omitempty"`
+	// FilePath is an optional local file containing the decoded media payload.
+	FilePath string `json:"filePath,omitempty"`
 	// MimeType identifies the content type (e.g. "image/png", "audio/wav").
 	MimeType string `json:"mimeType"`
 }

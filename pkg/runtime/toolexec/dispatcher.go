@@ -724,13 +724,21 @@ func buildMultiContent(text string, images []tools.MediaContent) []chat.MessageP
 	parts := make([]chat.MessagePart, 0, 1+len(images))
 	parts = append(parts, chat.MessagePart{Type: chat.MessagePartTypeText, Text: text})
 	for _, img := range images {
-		parts = append(parts, chat.MessagePart{
-			Type: chat.MessagePartTypeImageURL,
-			ImageURL: &chat.MessageImageURL{
-				URL:    "data:" + img.MimeType + ";base64," + img.Data,
-				Detail: chat.ImageURLDetailAuto,
-			},
-		})
+		switch {
+		case img.FilePath != "":
+			parts = append(parts, chat.MessagePart{
+				Type: chat.MessagePartTypeText,
+				Text: fmt.Sprintf("[image saved to %s (%s)]", img.FilePath, img.MimeType),
+			})
+		case img.Data != "":
+			parts = append(parts, chat.MessagePart{
+				Type: chat.MessagePartTypeImageURL,
+				ImageURL: &chat.MessageImageURL{
+					URL:    "data:" + img.MimeType + ";base64," + img.Data,
+					Detail: chat.ImageURLDetailAuto,
+				},
+			})
+		}
 	}
 	return parts
 }
