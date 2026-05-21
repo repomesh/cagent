@@ -188,7 +188,7 @@ func TestSchemaForAnthropic(t *testing.T) {
 // OpenAI and LM Studio accept.
 // See https://github.com/docker/docker-agent/issues/278
 func TestEmptyMapSchemaForOpenai(t *testing.T) {
-	schema, err := openai.ConvertParametersToSchema(map[string]any{})
+	schema, _, err := openai.ConvertParametersToSchema(map[string]any{})
 	require.NoError(t, err)
 
 	schemaJSON, err := json.Marshal(schema)
@@ -197,7 +197,7 @@ func TestEmptyMapSchemaForOpenai(t *testing.T) {
 }
 
 func TestNilSchemaForOpenai(t *testing.T) {
-	schema, err := openai.ConvertParametersToSchema(nil)
+	schema, _, err := openai.ConvertParametersToSchema(nil)
 	require.NoError(t, err)
 
 	schemaJSON, err := json.Marshal(schema)
@@ -208,7 +208,7 @@ func TestNilSchemaForOpenai(t *testing.T) {
 func TestSchemaForOpenai(t *testing.T) {
 	parameters := parseFunctionParameters(t, schemaJSON)
 
-	schema, err := openai.ConvertParametersToSchema(parameters)
+	schema, _, err := openai.ConvertParametersToSchema(parameters)
 	require.NoError(t, err)
 
 	schemaJSON, err := json.Marshal(schema)

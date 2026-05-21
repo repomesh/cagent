@@ -9,14 +9,79 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// ConvertParametersToSchema converts parameters to OpenAI Schema format
-func ConvertParametersToSchema(params any) (shared.FunctionParameters, error) {
+// ConvertParametersToSchema converts parameters to OpenAI Schema format and
+// reports whether the resulting schema is compatible with OpenAI strict mode.
+//
+// The same normalization pipeline runs in both cases — strict-incompatible
+// schemas (e.g. Notion MCP tools that declare schema-form additionalProperties)
+// still need fully-populated `required` arrays for the Chat Completions API,
+// which has no per-tool strict flag. The strict flag is only consumed by the
+// Responses API caller.
+func ConvertParametersToSchema(params any) (shared.FunctionParameters, bool, error) {
 	p, err := tools.SchemaToMap(params)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	return fixSchemaArrayItems(removeFormatFields(ensureTypeFields(makeAllRequired(p)))), nil
+	strict := isStrictCompatible(p)
+	return fixSchemaArrayItems(removeFormatFields(ensureTypeFields(makeAllRequired(p)))), strict, nil
+}
+
+// isStrictCompatible reports whether the schema can use OpenAI strict mode.
+// Strict mode requires every object node to have additionalProperties: false.
+// Schema-form additionalProperties (a map) and additionalProperties: true are
+// both incompatible.
+//
+// The decision is per-tool and all-or-nothing: a single non-compliant node
+// anywhere in the schema disables strict mode for the whole tool. The walk
+// stops at the first incompatible node.
+func isStrictCompatible(schema map[string]any) bool {
+	return !hasIncompatibleNode(schema)
+}
+
+func hasIncompatibleNode(node map[string]any) bool {
+	if v, ok := node["additionalProperties"]; ok {
+		switch t := v.(type) {
+		case map[string]any:
+			return true
+		case bool:
+			if t {
+				return true
+			}
+		}
+	}
+
+	if properties, ok := node["properties"].(map[string]any); ok {
+		for _, v := range properties {
+			if sub, ok := v.(map[string]any); ok && hasIncompatibleNode(sub) {
+				return true
+			}
+		}
+	}
+
+	for _, keyword := range []string{"anyOf", "oneOf", "allOf"} {
+		if variants, ok := node[keyword].([]any); ok {
+			for _, v := range variants {
+				if sub, ok := v.(map[string]any); ok && hasIncompatibleNode(sub) {
+					return true
+				}
+			}
+		}
+	}
+
+	if items, ok := node["items"].(map[string]any); ok && hasIncompatibleNode(items) {
+		return true
+	}
+
+	if prefixItems, ok := node["prefixItems"].([]any); ok {
+		for _, v := range prefixItems {
+			if sub, ok := v.(map[string]any); ok && hasIncompatibleNode(sub) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // walkSchema calls fn on the given schema node, then recursively walks into
@@ -46,23 +111,31 @@ func walkSchema(schema map[string]any, fn func(map[string]any)) {
 		walkSchema(items, fn)
 	}
 
+	if prefixItems, ok := schema["prefixItems"].([]any); ok {
+		for _, v := range prefixItems {
+			if sub, ok := v.(map[string]any); ok {
+				walkSchema(sub, fn)
+			}
+		}
+	}
+
 	// additionalProperties can be a boolean or an object schema
 	if additionalProps, ok := schema["additionalProperties"].(map[string]any); ok {
 		walkSchema(additionalProps, fn)
 	}
 }
 
-// makeAllRequired makes all object properties "required" throughout the schema,
-// because that's what the OpenAI Response API demands.
-// Properties that were not originally required are made nullable.
-// Also ensures all object-type schemas have additionalProperties: false.
+// makeAllRequired makes every object property `required` (newly-required ones
+// are made nullable) and ensures every object node has `additionalProperties`
+// set. It runs on every schema regardless of strict-mode compatibility, so
+// schema-form additionalProperties (e.g. Notion's dictionary value shape) is
+// preserved — only missing/true/nil values are forced to `false`.
 func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters {
 	if schema == nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
 
 	walkSchema(schema, func(node map[string]any) {
-		// Check if this node is an object type (either "object" or ["object", ...])
 		isObject := false
 		if typeVal, ok := node["type"]; ok {
 			switch t := typeVal.(type) {
@@ -80,17 +153,15 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 			}
 		}
 
-		// All object types must have additionalProperties: false for OpenAI Responses API strict mode
-		// But only set it if additionalProperties is not already defined as an object schema
+		// Only force additionalProperties: false when it isn't already a
+		// schema. Schema-form additionalProperties carries information the
+		// model needs (Notion-style dictionaries) and would be lost otherwise.
 		if isObject {
 			if addProps, exists := node["additionalProperties"]; !exists || addProps == nil || addProps == true {
 				node["additionalProperties"] = false
 			}
-			// If additionalProperties is already set to false or is an object schema (map[string]any),
-			// leave it as is - the object schema case will be walked separately
 		}
 
-		// If the node has explicit properties, make them all required
 		properties, ok := node["properties"].(map[string]any)
 		if !ok {
 			return
@@ -106,8 +177,6 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 		newRequired := []any{}
 		for _, propName := range slices.Sorted(maps.Keys(properties)) {
 			newRequired = append(newRequired, propName)
-
-			// Make newly-required properties nullable
 			if !originallyRequired[propName] {
 				if propMap, ok := properties[propName].(map[string]any); ok {
 					if t, ok := propMap["type"].(string); ok {

@@ -258,7 +258,7 @@ func (c *Client) CreateChatCompletionStream(
 		slog.DebugContext(ctx, "Adding tools to OpenAI request", "tool_count", len(requestTools))
 		toolsParam := make([]openai.ChatCompletionToolUnionParam, len(requestTools))
 		for i, tool := range requestTools {
-			parameters, err := ConvertParametersToSchema(tool.Parameters)
+			parameters, _, err := ConvertParametersToSchema(tool.Parameters)
 			if err != nil {
 				slog.DebugContext(ctx, "Failed to convert tool parameters to OpenAI schema", "tool_name", tool.Name, "error", err)
 				return nil, err
@@ -397,7 +397,7 @@ func (c *Client) CreateResponseStream(
 		slog.DebugContext(ctx, "Adding tools to OpenAI responses request", "tool_count", len(requestTools))
 		toolsParam := make([]responses.ToolUnionParam, len(requestTools))
 		for i, tool := range requestTools {
-			parameters, err := ConvertParametersToSchema(tool.Parameters)
+			parameters, strict, err := ConvertParametersToSchema(tool.Parameters)
 			if err != nil {
 				slog.DebugContext(ctx, "Failed to convert tool parameters to OpenAI schema", "tool_name", tool.Name, "error", err)
 				return nil, err
@@ -408,8 +408,12 @@ func (c *Client) CreateResponseStream(
 					Name:        tool.Name,
 					Description: param.NewOpt(tool.Description),
 					Parameters:  parameters,
-					Strict:      param.NewOpt(true),
+					Strict:      param.NewOpt(strict),
 				},
+			}
+
+			if !strict {
+				slog.DebugContext(ctx, "Tool not compatible with OpenAI strict mode, falling back", "tool_name", tool.Name)
 			}
 
 			slog.DebugContext(ctx, "Added tool to OpenAI responses request", "tool_name", tool.Name)
