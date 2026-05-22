@@ -1172,3 +1172,68 @@ func TestGetAuthorizationServerMetadata_AppendFormStillWorks(t *testing.T) {
 	assert.Equal(t, srv.URL+"/tenant/authorize", md.AuthorizationEndpoint)
 	assert.Equal(t, srv.URL+"/tenant/token", md.TokenEndpoint)
 }
+
+// TestGetAuthorizationServerMetadata_NonFatalCandidateStatus asserts that
+// a non-200/non-404 response on one candidate (e.g. a server that
+// answers 403 on the path-aware variant it doesn't implement) does NOT
+// abort the probe — the next candidate is still tried, and a 200 there
+// wins. Without this, RFC 8414 §3.1 ordering regresses servers whose
+// path-aware endpoint returns anything other than 404.
+func TestGetAuthorizationServerMetadata_NonFatalCandidateStatus(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// First candidate: path-aware variant returns 403 (some gateways do this).
+	mux.HandleFunc("/.well-known/oauth-authorization-server/tenant", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	// Second candidate: legacy append form returns valid metadata.
+	mux.HandleFunc("/tenant/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 srv.URL + "/tenant",
+			"authorization_endpoint": srv.URL + "/tenant/authorize",
+			"token_endpoint":         srv.URL + "/tenant/token",
+		})
+	})
+
+	o := &oauth{metadataClient: srv.Client()}
+	md, err := o.getAuthorizationServerMetadata(t.Context(), srv.URL+"/tenant")
+	require.NoError(t, err, "a 403 on a speculative candidate must not abort the probe")
+	assert.Equal(t, srv.URL+"/tenant/authorize", md.AuthorizationEndpoint)
+}
+
+// TestGetAuthorizationServerMetadata_AllUnreachableSurfacesError asserts
+// that when every candidate fails with a non-404 status (i.e. nothing
+// 404'd through to the "discovery is just absent" interpretation), the
+// probe surfaces an error instead of silently returning fabricated
+// default metadata that will fail later in the OAuth handshake.
+func TestGetAuthorizationServerMetadata_AllUnreachableSurfacesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	o := &oauth{metadataClient: srv.Client()}
+	_, err := o.getAuthorizationServerMetadata(t.Context(), srv.URL+"/tenant")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+// TestGetAuthorizationServerMetadata_All404FallsBackToDefaults asserts
+// the legacy behaviour: a 404 from every candidate means "this server
+// doesn't expose discovery metadata", which is OK and we should fall
+// back to fabricated defaults rather than erroring out.
+func TestGetAuthorizationServerMetadata_All404FallsBackToDefaults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	}))
+	defer srv.Close()
+
+	o := &oauth{metadataClient: srv.Client()}
+	md, err := o.getAuthorizationServerMetadata(t.Context(), srv.URL+"/tenant")
+	require.NoError(t, err)
+	assert.Equal(t, srv.URL+"/tenant/authorize", md.AuthorizationEndpoint,
+		"defaults must be derived from the issuer URL")
+}

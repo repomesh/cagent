@@ -68,27 +68,52 @@ func (o *oauth) getAuthorizationServerMetadata(ctx context.Context, authServerUR
 	// Walk the candidate list in order. Spec-compliant URLs (RFC 8414 §3.1)
 	// come first; the legacy "append the well-known suffix to the full
 	// issuer URL" forms come after for compatibility with the many auth
-	// servers that ship that way. A 200 wins; 404s flow through to the next
-	// candidate; anything else is a hard error so we don't paper over a
-	// misconfigured auth server.
-	var lastStatus int
-	var lastURL string
+	// servers that ship that way.
+	//
+	// A 200 with a decodable body wins. The candidates are best-effort
+	// guesses about where metadata might live, so a non-200 on any one of
+	// them must not short-circuit the probe — we keep trying. Only after
+	// every candidate has failed do we decide what to do: if everyone
+	// 404'd we fall back to default metadata (matching the legacy
+	// behaviour); if at least one candidate returned a non-404 status or a
+	// transport/decode error, we surface that so a misconfigured auth
+	// server doesn't get papered over.
+	var (
+		notableErr    error
+		notableStatus int
+		notableURL    string
+	)
 	for _, u := range candidates {
 		metadata, status, err := o.fetchAuthorizationServerMetadata(ctx, u)
-		if err != nil {
-			return nil, err
-		}
 		if metadata != nil {
 			return validateAndFillDefaults(metadata, authServerURL), nil
 		}
-		lastStatus, lastURL = status, u
-		if status != http.StatusNotFound {
-			return nil, fmt.Errorf("unexpected status %d from %s", status, u)
+		switch {
+		case err != nil:
+			slog.DebugContext(ctx, "Metadata discovery candidate failed, trying next",
+				"url", u, "error", err)
+			if notableErr == nil && notableStatus == 0 {
+				notableErr, notableURL = err, u
+			}
+		case status != http.StatusNotFound:
+			slog.DebugContext(ctx, "Metadata discovery candidate returned unexpected status, trying next",
+				"url", u, "status", status)
+			if notableStatus == 0 {
+				notableStatus, notableURL = status, u
+				notableErr = nil
+			}
 		}
 	}
 
+	switch {
+	case notableErr != nil:
+		return nil, fmt.Errorf("failed to fetch authorization server metadata from %s: %w", notableURL, notableErr)
+	case notableStatus != 0:
+		return nil, fmt.Errorf("unexpected status %d from %s", notableStatus, notableURL)
+	}
+
 	slog.DebugContext(ctx, "All metadata discovery URLs returned 404, returning default metadata",
-		"authServerURL", authServerURL, "lastURL", lastURL, "lastStatus", lastStatus)
+		"authServerURL", authServerURL)
 	return createDefaultMetadata(authServerURL), nil
 }
 
@@ -110,6 +135,10 @@ func (o *oauth) fetchAuthorizationServerMetadata(ctx context.Context, metadataUR
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// Drain the body so net/http can reuse the TCP connection for
+		// the next candidate probe (we may try up to four URLs per
+		// handshake).
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, resp.StatusCode, nil
 	}
 
