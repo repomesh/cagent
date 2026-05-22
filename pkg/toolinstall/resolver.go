@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/fatih/color"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -118,6 +119,7 @@ func doInstall(ctx context.Context, command, versionRef string) (string, error) 
 
 	pkgName := pkg.RepoOwner + "/" + pkg.RepoName
 	slog.InfoContext(ctx, "Installing tool", "command", command, "package", pkgName, "version", version)
+	announceInstall(command, pkgName, version)
 
 	binaryPath, err := registry.Install(ctx, pkg, version)
 	if err != nil {
@@ -128,6 +130,19 @@ func doInstall(ctx context.Context, command, versionRef string) (string, error) 
 		"command", command, "package", fmt.Sprintf("%s@%s", pkgName, version), "path", binaryPath)
 
 	return binaryPath, nil
+}
+
+// announceInstall prints a single user-visible line to stderr right
+// before downloading a tool, so the user understands what the
+// upcoming `go install` / GitHub-release chatter is about. fatih/color
+// auto-disables when stderr isn't a TTY, so logs and CI output stay
+// plain. We intentionally avoid stdout so this never gets piped into
+// the agent's prompt or programmatic output.
+func announceInstall(command, pkgName, version string) {
+	bold := color.New(color.Bold).SprintFunc()
+	faint := color.New(color.Faint).SprintFunc()
+	fmt.Fprintf(os.Stderr, "Installing %s %s\n",
+		bold(command), faint(fmt.Sprintf("(%s@%s)", pkgName, version)))
 }
 
 // lookupPackage resolves the aqua package for a command.
