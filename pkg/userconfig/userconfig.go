@@ -387,10 +387,27 @@ func Get() *Settings {
 // commas downstream and a single value containing one of those
 // would silently smuggle several distinct rules into the engine.
 //
+// All entries are validated before any mutation: a malformed value
+// in the batch leaves c.SandboxAllowlist unchanged so callers that
+// reuse the *Config after a failed call still observe a consistent
+// in-memory view.
+//
 // Returns the list of hosts that were actually added (i.e. not
 // already present), so callers can report "already allowed" without
 // re-walking the slice.
 func (c *Config) AddSandboxHosts(hosts ...string) ([]string, error) {
+	cleaned := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if strings.ContainsAny(h, ", \t") {
+			return nil, fmt.Errorf("refusing to allowlist host %q: contains comma or whitespace", h)
+		}
+		cleaned = append(cleaned, h)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -400,14 +417,7 @@ func (c *Config) AddSandboxHosts(hosts ...string) ([]string, error) {
 	}
 
 	var added []string
-	for _, h := range hosts {
-		h = strings.TrimSpace(h)
-		if h == "" {
-			continue
-		}
-		if strings.ContainsAny(h, ", \t") {
-			return nil, fmt.Errorf("refusing to allowlist host %q: contains comma or whitespace", h)
-		}
+	for _, h := range cleaned {
 		if _, ok := existing[h]; ok {
 			continue
 		}

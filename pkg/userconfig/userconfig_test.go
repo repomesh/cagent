@@ -965,6 +965,21 @@ func TestConfig_AddSandboxHosts(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A failed batch must leave SandboxAllowlist untouched: a valid
+// host followed by a malformed one used to mutate the slice for the
+// valid entry before bailing out, leaving the in-memory *Config
+// inconsistent with what would have been persisted.
+func TestConfig_AddSandboxHosts_AllOrNothing(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{SandboxAllowlist: []string{"existing.example.com"}}
+
+	_, err := cfg.AddSandboxHosts("valid.example.com", "bad,host.example.com")
+	require.Error(t, err)
+	assert.Equal(t, []string{"existing.example.com"}, cfg.SandboxAllowlist,
+		"a malformed entry must not partially mutate the allowlist")
+}
+
 func TestConfig_RemoveSandboxHost(t *testing.T) {
 	t.Parallel()
 
