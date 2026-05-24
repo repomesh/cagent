@@ -127,6 +127,10 @@ func (b *localBackend) Spawner(rt runtime.Runtime) tui.SessionSpawner {
 }
 
 func (b *localBackend) Close() error {
+	// Ensure any in-progress sessionStore initialization is observed
+	// before reading b.store. If sessionStore was never called, the Do
+	// runs an empty closure and b.store stays nil.
+	b.storeOnce.Do(func() {})
 	if b.store == nil {
 		return nil
 	}
