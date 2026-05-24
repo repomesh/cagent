@@ -117,6 +117,30 @@ whitespace are rejected to keep a single entry from smuggling several
 rules into the policy engine. The runner prints the resulting allowlist
 before launch so you can audit exactly which hosts the run opens up.
 
+### Persist your own allowlist
+
+For hosts you keep needing across agents (a corporate proxy, a
+self-hosted registry, ...) `docker agent sandbox allow` writes the
+entry into `~/.config/cagent/config.yaml` once and unions it with the
+inferred and agent-declared sets on every subsequent `--sandbox` run:
+
+```bash
+# I just got a `Blocked by network policy` 403 on api.example.com.
+docker agent sandbox allow api.example.com
+
+# See what's currently persisted.
+docker agent sandbox list
+
+# Drop a host you no longer need.
+docker agent sandbox deny api.example.com
+```
+
+When the kit's per-toolset host resolver fails (the `! using fallback
+host set` line in the launch summary), the runner now prints a hint
+pointing at this command so you can turn the missing host into a
+one-line, persistent fix instead of relying on the wider conservative
+fallback host set.
+
 ## Example
 
 ```yaml

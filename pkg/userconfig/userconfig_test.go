@@ -936,3 +936,60 @@ func TestConfig_PermissionsRoundTrip(t *testing.T) {
 	assert.Equal(t, original.Settings.Permissions.Deny, loaded.Settings.Permissions.Deny)
 	assert.Equal(t, original.Settings.Permissions.Ask, loaded.Settings.Permissions.Ask)
 }
+
+func TestConfig_AddSandboxHosts(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+
+	added, err := cfg.AddSandboxHosts("api.example.com", "registry.npmjs.org:443")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api.example.com", "registry.npmjs.org:443"}, added)
+	assert.Equal(t, []string{"api.example.com", "registry.npmjs.org:443"}, cfg.SandboxAllowlist)
+
+	// Adding an existing host is a no-op and does not duplicate it.
+	added, err = cfg.AddSandboxHosts("api.example.com", "new.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new.example.com"}, added)
+	assert.Equal(t, []string{"api.example.com", "registry.npmjs.org:443", "new.example.com"}, cfg.SandboxAllowlist)
+
+	// Whitespace is trimmed; embedded whitespace and commas are rejected.
+	added, err = cfg.AddSandboxHosts("  trimmed.example.com  ")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"trimmed.example.com"}, added)
+
+	_, err = cfg.AddSandboxHosts("a.example.com,b.example.com")
+	require.Error(t, err)
+
+	_, err = cfg.AddSandboxHosts("has space.example.com")
+	require.Error(t, err)
+}
+
+func TestConfig_RemoveSandboxHost(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{SandboxAllowlist: []string{"a.example.com", "b.example.com"}}
+
+	assert.True(t, cfg.RemoveSandboxHost("a.example.com"))
+	assert.Equal(t, []string{"b.example.com"}, cfg.SandboxAllowlist)
+
+	assert.False(t, cfg.RemoveSandboxHost("missing.example.com"))
+	assert.False(t, cfg.RemoveSandboxHost(""))
+}
+
+func TestConfig_SandboxAllowlistRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	original := &Config{
+		Aliases:          make(map[string]*Alias),
+		SandboxAllowlist: []string{"api.example.com", "registry.npmjs.org:443"},
+	}
+	require.NoError(t, original.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, original.SandboxAllowlist, loaded.SandboxAllowlist)
+}

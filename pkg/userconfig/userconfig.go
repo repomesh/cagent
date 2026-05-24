@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/goccy/go-yaml"
@@ -156,6 +157,14 @@ type Config struct {
 	Settings *Settings `yaml:"settings,omitempty"`
 	// CredentialHelper configures an external command to retrieve Docker credentials
 	CredentialHelper *CredentialHelper `yaml:"credential_helper,omitempty"`
+	// SandboxAllowlist is the persistent list of hosts the user has
+	// taught docker-agent to open in the sandbox proxy on every run
+	// (in addition to the gateway, the kit-resolved tool install
+	// hosts, and the agent-declared runtime.network_allowlist).
+	// Managed via `docker agent sandbox allow/deny/list`. Each entry
+	// is a hostname with an optional ":port" suffix; commas and
+	// whitespace are rejected at write time.
+	SandboxAllowlist []string `yaml:"sandbox_allowlist,omitempty"`
 }
 
 // Path returns the path to the config file
@@ -369,4 +378,60 @@ func Get() *Settings {
 		return &Settings{}
 	}
 	return cfg.GetSettings()
+}
+
+// AddSandboxHosts appends host(s) to SandboxAllowlist, preserving
+// insertion order and skipping duplicates. Each entry is trimmed of
+// surrounding whitespace; commas and embedded whitespace are
+// rejected because the sandbox network policy joins entries with
+// commas downstream and a single value containing one of those
+// would silently smuggle several distinct rules into the engine.
+//
+// Returns the list of hosts that were actually added (i.e. not
+// already present), so callers can report "already allowed" without
+// re-walking the slice.
+func (c *Config) AddSandboxHosts(hosts ...string) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	existing := make(map[string]struct{}, len(c.SandboxAllowlist))
+	for _, h := range c.SandboxAllowlist {
+		existing[h] = struct{}{}
+	}
+
+	var added []string
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if strings.ContainsAny(h, ", \t") {
+			return nil, fmt.Errorf("refusing to allowlist host %q: contains comma or whitespace", h)
+		}
+		if _, ok := existing[h]; ok {
+			continue
+		}
+		existing[h] = struct{}{}
+		c.SandboxAllowlist = append(c.SandboxAllowlist, h)
+		added = append(added, h)
+	}
+	return added, nil
+}
+
+// RemoveSandboxHost drops host from SandboxAllowlist. Returns true
+// when the host was present.
+func (c *Config) RemoveSandboxHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, h := range c.SandboxAllowlist {
+		if h == host {
+			c.SandboxAllowlist = append(c.SandboxAllowlist[:i], c.SandboxAllowlist[i+1:]...)
+			return true
+		}
+	}
+	return false
 }

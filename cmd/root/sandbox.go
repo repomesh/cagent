@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/sandbox"
 	"github.com/docker/docker-agent/pkg/sandbox/kit"
 	"github.com/docker/docker-agent/pkg/skills"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // peekAgentSandbox returns true when the agent referenced by
@@ -64,6 +65,19 @@ func loadAgentConfig(ctx context.Context, agentRef string) *latestcfg.Config {
 		return nil
 	}
 	return cfg
+}
+
+// userSandboxAllowlist returns the persistent host list the user has
+// taught docker-agent to open via `docker agent sandbox allow`.
+// Best-effort: a missing or unreadable user config returns nil so
+// the sandbox falls back to the inferred set only.
+func userSandboxAllowlist(ctx context.Context) []string {
+	cfg, err := userconfig.Load()
+	if err != nil {
+		slog.DebugContext(ctx, "Failed to load user config; skipping persistent sandbox allowlist", "error", err)
+		return nil
+	}
+	return cfg.SandboxAllowlist
 }
 
 // runInSandbox delegates the current command to a Docker sandbox.
@@ -127,10 +141,12 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	}
 
 	agentHosts := agentNetworkAllowlist(ctx, agentRef)
+	userHosts := userSandboxAllowlist(ctx)
 
 	printModelsGateway(cmd.OutOrStdout(), runConfig.ModelsGateway)
 	printToolInstallAllowance(cmd.OutOrStdout(), kitResult)
 	printAgentNetworkAllowlist(cmd.OutOrStdout(), agentHosts)
+	printUserSandboxAllowlist(cmd.OutOrStdout(), userHosts)
 
 	name, err := backend.Ensure(ctx, wd, extras, template, configDir)
 	if err != nil {
@@ -150,7 +166,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	if kitResult != nil {
 		toolHosts = kitResult.ToolInstallHosts
 	}
-	allowSandboxHosts(ctx, backend, name, runConfig.ModelsGateway, toolHosts, agentHosts)
+	allowSandboxHosts(ctx, backend, name, runConfig.ModelsGateway, toolHosts, agentHosts, userHosts)
 
 	// Resolve env vars the agent needs and forward them into the sandbox.
 	// Docker Desktop proxies well-known API keys automatically; this handles
@@ -251,10 +267,11 @@ func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string) []stri
 // support per-sandbox policies is logged at debug level and the run
 // proceeds. The user will then see a network-policy 403 from the
 // inner and we surface that diagnostic verbatim.
-func allowSandboxHosts(ctx context.Context, backend *sandbox.Backend, name, gatewayURL string, toolInstallHosts, agentHosts []string) {
+func allowSandboxHosts(ctx context.Context, backend *sandbox.Backend, name, gatewayURL string, toolInstallHosts, agentHosts, userHosts []string) {
 	var hosts []string
 	hosts = append(hosts, toolInstallHosts...)
 	hosts = append(hosts, agentHosts...)
+	hosts = append(hosts, userHosts...)
 
 	if gatewayURL != "" {
 		if h := gatewayHostPort(gatewayURL); h != "" {
@@ -455,6 +472,9 @@ func printToolInstallAllowance(w io.Writer, kitResult *kit.Result) {
 	for _, e := range kitResult.ToolInstallHostsResolutionErr {
 		fmt.Fprintf(w, "  ! %s (using fallback host set)\n", e.Error())
 	}
+	if len(kitResult.ToolInstallHostsResolutionErr) > 0 {
+		fmt.Fprintln(w, "  hint: persist a missing host with `docker agent sandbox allow <host>`")
+	}
 }
 
 // printAgentNetworkAllowlist prints the host(s) the agent's config
@@ -467,6 +487,20 @@ func printAgentNetworkAllowlist(w io.Writer, hosts []string) {
 		return
 	}
 	fmt.Fprintf(w, "Agent network allowlist: allowlisting %d host(s) declared in runtime.network_allowlist:\n", len(hosts))
+	for _, h := range hosts {
+		fmt.Fprintf(w, "  - %s\n", h)
+	}
+}
+
+// printUserSandboxAllowlist prints the host(s) the user has added
+// via `docker agent sandbox allow`. Kept on its own line (separate
+// from the agent-declared list) so it's clear which hosts persist
+// across runs vs which travel with the agent config.
+func printUserSandboxAllowlist(w io.Writer, hosts []string) {
+	if len(hosts) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "User sandbox allowlist: allowlisting %d host(s) from `docker agent sandbox allow`:\n", len(hosts))
 	for _, h := range hosts {
 		fmt.Fprintf(w, "  - %s\n", h)
 	}

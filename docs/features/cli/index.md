@@ -391,6 +391,26 @@ Run an alias with: docker agent run <alias>
 
 </div>
 
+### `docker agent sandbox`
+
+Manage settings shared by every [`--sandbox`]({{ '/configuration/sandbox/' | relative_url }}) run — today, the persistent network allowlist that turns a `Blocked by network policy` 403 into a one-line, durable fix:
+
+```bash
+# Allow a host on every subsequent --sandbox run.
+$ docker agent sandbox allow api.example.com
+
+# Or several at once.
+$ docker agent sandbox allow api.example.com registry.npmjs.org:443
+
+# See what's persisted in ~/.config/cagent/config.yaml.
+$ docker agent sandbox list
+
+# Drop a host you no longer need.
+$ docker agent sandbox deny api.example.com
+```
+
+Entries are unioned with the gateway, the kit-resolved tool install hosts, and any `runtime.network_allowlist` declared by the agent. The launch summary lists every source separately so you can see which holes were punched by which layer.
+
 ## Global Flags
 
 These flags are available on every `docker agent` command:
