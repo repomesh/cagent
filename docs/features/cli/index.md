@@ -347,6 +347,7 @@ $ docker agent alias add other ociReference
 # Add an alias with runtime options
 $ docker agent alias add yolo-coder agentcatalog/coder --yolo
 $ docker agent alias add fast-coder agentcatalog/coder --model openai/gpt-4o-mini
+$ docker agent alias add safe-coder agentcatalog/coder --sandbox
 $ docker agent alias add turbo agentcatalog/coder --yolo --model anthropic/claude-sonnet-4-5
 
 # Use an alias
@@ -359,6 +360,7 @@ $ docker agent run yolo-coder
 - `--yolo` — Auto-approve all tool calls when running the alias
 - `--model &lt;ref&gt;` — Override the model for the alias
 - `--hide-tool-results` — Hide tool call results in the TUI when running the alias
+- `--sandbox` — Always run the alias inside a [Docker sandbox]({{ '/configuration/sandbox/' | relative_url }})
 
 When listing aliases, options are shown in brackets:
 

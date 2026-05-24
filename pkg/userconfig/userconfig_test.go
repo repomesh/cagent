@@ -607,7 +607,8 @@ func TestAlias_HasOptions(t *testing.T) {
 		{"yolo only", &Alias{Path: "test", Yolo: true}, true},
 		{"model only", &Alias{Path: "test", Model: "openai/gpt-4o"}, true},
 		{"hide_tool_results only", &Alias{Path: "test", HideToolResults: true}, true},
-		{"all options", &Alias{Path: "test", Yolo: true, Model: "openai/gpt-4o", HideToolResults: true}, true},
+		{"sandbox only", &Alias{Path: "test", Sandbox: true}, true},
+		{"all options", &Alias{Path: "test", Yolo: true, Model: "openai/gpt-4o", HideToolResults: true, Sandbox: true}, true},
 	}
 
 	for _, tt := range tests {

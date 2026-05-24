@@ -30,11 +30,13 @@ type Alias struct {
 	Model string `yaml:"model,omitempty"`
 	// HideToolResults hides tool call results in the TUI
 	HideToolResults bool `yaml:"hide_tool_results,omitempty"`
+	// Sandbox runs the agent inside a Docker sandbox by default.
+	Sandbox bool `yaml:"sandbox,omitempty"`
 }
 
 // HasOptions returns true if the alias has any runtime options set
 func (a *Alias) HasOptions() bool {
-	return a != nil && (a.Yolo || a.Model != "" || a.HideToolResults)
+	return a != nil && (a.Yolo || a.Model != "" || a.HideToolResults || a.Sandbox)
 }
 
 // Settings represents global user settings

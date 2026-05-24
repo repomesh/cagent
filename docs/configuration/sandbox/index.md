@@ -51,6 +51,19 @@ docker agent run --sandbox --sbx=false agent.yaml
 docker agent run --sandbox --no-kit agent.yaml
 ```
 
+### Always sandbox a given agent
+
+Add `--sandbox` to an [alias]({{ '/features/cli/' | relative_url }}#aliases) so the
+sandbox path is taken automatically whenever that alias is invoked:
+
+```bash
+docker agent alias add safe-coder agentcatalog/coder --sandbox
+docker agent run safe-coder
+```
+
+An explicit `--sandbox=false` on the command line still wins, so you can opt
+out of the sandbox for a single run without touching the alias.
+
 ## Example
 
 ```yaml

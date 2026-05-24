@@ -170,6 +170,15 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		}()
 	}
 
+	// Resolve alias-driven sandbox opt-in before dispatch so aliases
+	// like `docker-agent run scary-agent` (where the alias declares
+	// sandbox: true) take the sandbox path without an explicit flag.
+	if !f.sandbox && len(args) > 0 {
+		if alias := config.ResolveAlias(args[0]); alias != nil && alias.Sandbox {
+			f.sandbox = true
+		}
+	}
+
 	if f.sandbox {
 		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sandboxTemplate, f.sbx, f.noKit)
 	}
@@ -218,7 +227,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	// Apply alias options if this is an alias reference
 	// Alias options only apply if the flag wasn't explicitly set by the user
 	if alias := config.ResolveAlias(agentFileName); alias != nil {
-		slog.DebugContext(ctx, "Applying alias options", "yolo", alias.Yolo, "model", alias.Model, "hide_tool_results", alias.HideToolResults)
+		slog.DebugContext(ctx, "Applying alias options", "yolo", alias.Yolo, "model", alias.Model, "hide_tool_results", alias.HideToolResults, "sandbox", alias.Sandbox)
 		if alias.Yolo && !f.autoApprove {
 			f.autoApprove = true
 		}
@@ -227,6 +236,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		}
 		if alias.HideToolResults && !f.hideToolResults {
 			f.hideToolResults = true
+		}
+		if alias.Sandbox && !f.sandbox {
+			f.sandbox = true
 		}
 	}
 
