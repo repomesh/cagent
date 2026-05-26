@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -896,5 +901,208 @@ func writeJSONRPC(t *testing.T, w http.ResponseWriter, id json.RawMessage, resul
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		t.Fatalf("encode response: %v", err)
+	}
+}
+
+// TestCatalogOAuthDiscoveryLive probes every oauth server in the
+// embedded catalog and asserts the structural prerequisites for the
+// docker-agent OAuth flow:
+//
+//   - the MCP endpoint challenges with 401 + WWW-Authenticate (or at
+//     least surfaces a reachable origin),
+//   - <baseURL>/.well-known/oauth-protected-resource is reachable (200
+//     or 404 — either is fine, the WWW-Authenticate fallback covers 404),
+//   - the authorization-server metadata advertises an HTTPS
+//     `registration_endpoint` (Dynamic Client Registration is REQUIRED
+//     by pkg/tools/mcp/oauth_login.go: without it docker-agent cannot
+//     bootstrap a client),
+//   - and `code_challenge_methods_supported` includes "S256".
+//
+// This test is SKIPPED by default because:
+//   - it makes real HTTPS calls to ~17 third-party servers,
+//   - results depend on the external services' availability, and
+//   - it is unsuitable for `task test` / CI without explicit opt-in.
+//
+// Run it explicitly with:
+//
+//	MCP_CATALOG_OAUTH_LIVE=1 go test -run TestCatalogOAuthDiscoveryLive \
+//	    -v -count=1 -timeout=120s ./pkg/tools/builtin/mcpcatalog
+func TestCatalogOAuthDiscoveryLive(t *testing.T) {
+	if os.Getenv("MCP_CATALOG_OAUTH_LIVE") == "" {
+		t.Skip("skipping live OAuth discovery probe: makes real HTTPS calls " +
+			"to every oauth server in the embedded catalog. " +
+			"Set MCP_CATALOG_OAUTH_LIVE=1 to run.")
+	}
+
+	cat, err := Load()
+	require.NoError(t, err)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	type result struct {
+		id, url, authServer string
+		mcpStatus           int
+		hasWWWAuth          bool
+		prStatus            int
+		hasDCR              bool
+		hasS256             bool
+		notes               []string
+	}
+
+	var (
+		oauthServers []Server
+		results      []result
+	)
+	for _, s := range cat.Servers {
+		if s.Auth.Type == "oauth" {
+			oauthServers = append(oauthServers, s)
+		}
+	}
+	require.NotEmpty(t, oauthServers, "expected at least one oauth server in catalog")
+
+	for _, s := range oauthServers {
+		t.Run(s.ID, func(t *testing.T) {
+			r := result{id: s.ID, url: s.URL}
+
+			// 1. Unauthenticated MCP request -> expect a 401 challenge.
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, s.URL,
+				strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			resp, err := client.Do(req)
+			if err != nil {
+				r.notes = append(r.notes, "MCP request error: "+err.Error())
+				results = append(results, r)
+				t.Errorf("MCP request failed: %v", err)
+				return
+			}
+			r.mcpStatus = resp.StatusCode
+			r.hasWWWAuth = resp.Header.Get("WWW-Authenticate") != ""
+			resp.Body.Close()
+
+			// 2. Protected-resource metadata at the origin.
+			parsed, err := url.Parse(s.URL)
+			require.NoError(t, err)
+			base := parsed.Scheme + "://" + parsed.Host
+
+			prReq, _ := http.NewRequestWithContext(t.Context(), http.MethodGet,
+				base+"/.well-known/oauth-protected-resource", http.NoBody)
+			prResp, err := client.Do(prReq)
+			if err != nil {
+				r.notes = append(r.notes, "protected-resource request error: "+err.Error())
+			} else {
+				r.prStatus = prResp.StatusCode
+				if prResp.StatusCode == http.StatusOK {
+					var pr struct {
+						AuthorizationServers []string `json:"authorization_servers"`
+					}
+					_ = json.NewDecoder(prResp.Body).Decode(&pr)
+					if len(pr.AuthorizationServers) > 0 {
+						r.authServer = pr.AuthorizationServers[0]
+					}
+				}
+				prResp.Body.Close()
+			}
+			if r.authServer == "" {
+				// Fallback: many providers omit /oauth-protected-resource and
+				// expect the auth-server metadata to live at the origin.
+				r.authServer = base
+			}
+
+			// 3. Authorization-server metadata + DCR + PKCE S256.
+			// Walk the same set of candidate metadata URLs that
+			// pkg/tools/mcp/oauth.go now tries: spec-compliant RFC 8414 §3.1
+			// path-aware variant first, then the legacy "append to issuer"
+			// form, then OIDC fallbacks. Accepting any 200 mirrors what the
+			// runtime would do; the live probe must not be more strict than
+			// the discovery code itself.
+			candidates := authServerMetadataCandidates(r.authServer)
+			var (
+				asResp     *http.Response
+				lastStatus int
+				lastURL    string
+			)
+			for _, u := range candidates {
+				req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, u, http.NoBody)
+				resp, err := client.Do(req)
+				if err != nil {
+					r.notes = append(r.notes, "auth-server metadata error at "+u+": "+err.Error())
+					continue
+				}
+				lastStatus, lastURL = resp.StatusCode, u
+				if resp.StatusCode == http.StatusOK {
+					asResp = resp
+					break
+				}
+				resp.Body.Close()
+			}
+			if asResp == nil {
+				r.notes = append(r.notes, fmt.Sprintf("no candidate returned 200 (last %d at %s)", lastStatus, lastURL))
+				results = append(results, r)
+				t.Errorf("auth-server metadata unreachable")
+				return
+			}
+			defer asResp.Body.Close()
+			var asm struct {
+				RegistrationEndpoint          string   `json:"registration_endpoint"`
+				CodeChallengeMethodsSupported []string `json:"code_challenge_methods_supported"`
+			}
+			require.NoError(t, json.NewDecoder(asResp.Body).Decode(&asm))
+			r.hasDCR = strings.HasPrefix(asm.RegistrationEndpoint, "https://")
+			r.hasS256 = slices.Contains(asm.CodeChallengeMethodsSupported, "S256")
+
+			results = append(results, r)
+
+			// Soft assertions: log everything, fail only on the must-haves.
+			t.Logf("mcp=%d www-auth=%v pr=%d auth-server=%s dcr=%v s256=%v",
+				r.mcpStatus, r.hasWWWAuth, r.prStatus, r.authServer, r.hasDCR, r.hasS256)
+			assert.True(t, r.hasDCR,
+				"server %s: authorization server must support Dynamic Client Registration "+
+					"(registration_endpoint missing or non-HTTPS) — docker-agent cannot OAuth without it",
+				s.ID)
+			assert.True(t, r.hasS256,
+				"server %s: authorization server must advertise PKCE S256 in "+
+					"code_challenge_methods_supported", s.ID)
+		})
+	}
+
+	// Pretty summary so a single CI run gives a readable report.
+	t.Cleanup(func() {
+		t.Log("== MCP catalog OAuth discovery summary ==")
+		for _, r := range results {
+			t.Logf("%-30s mcp=%d www-auth=%v pr=%d dcr=%v s256=%v %s",
+				r.id, r.mcpStatus, r.hasWWWAuth, r.prStatus, r.hasDCR, r.hasS256,
+				strings.Join(r.notes, "; "))
+		}
+	})
+}
+
+// authServerMetadataCandidates mirrors the candidate URL list built by
+// pkg/tools/mcp/oauth.go's metadataDiscoveryURLs for use by the live
+// probe. Kept duplicated here on purpose: the probe is a black-box
+// audit, and copying the small piece of URL math keeps it independent
+// of any future refactor in the discovery code path.
+func authServerMetadataCandidates(authServerURL string) []string {
+	if strings.Contains(authServerURL, "/.well-known/") {
+		return []string{authServerURL}
+	}
+	parsed, err := url.Parse(authServerURL)
+	if err != nil {
+		return []string{authServerURL}
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	path := strings.TrimSuffix(parsed.Path, "/")
+	if path == "" {
+		return []string{
+			origin + "/.well-known/oauth-authorization-server",
+			origin + "/.well-known/openid-configuration",
+		}
+	}
+	return []string{
+		origin + "/.well-known/oauth-authorization-server" + path,
+		origin + path + "/.well-known/oauth-authorization-server",
+		origin + "/.well-known/openid-configuration" + path,
+		origin + path + "/.well-known/openid-configuration",
 	}
 }
