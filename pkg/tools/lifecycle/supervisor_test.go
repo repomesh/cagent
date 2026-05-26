@@ -17,18 +17,39 @@ import (
 // fakeSession is a controllable session: its Wait blocks until either
 // Close is called or fail is invoked.
 type fakeSession struct {
-	mu     sync.Mutex
-	closed bool
-	failCh chan error
+	mu       sync.Mutex
+	closed   bool
+	waitDone atomic.Bool   // set true after Wait returns
+	waiting  chan struct{} // closed once Wait has parked on failCh
+	waitOnce sync.Once
+	failCh   chan error
 }
 
 func newFakeSession() *fakeSession {
-	return &fakeSession{failCh: make(chan error, 1)}
+	return &fakeSession{
+		waiting: make(chan struct{}),
+		failCh:  make(chan error, 1),
+	}
 }
 
 func (f *fakeSession) Wait() error {
+	f.waitOnce.Do(func() { close(f.waiting) })
 	err := <-f.failCh
+	f.waitDone.Store(true)
 	return err
+}
+
+// waitParked blocks until the watcher goroutine has entered sess.Wait().
+// Used by tests that need to exercise Stop against an actively-blocking
+// watcher rather than the racy connect-then-stop path where the watcher
+// could exit before parking.
+func (f *fakeSession) waitParked(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.waiting:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not enter Wait()")
+	}
 }
 
 func (f *fakeSession) Close(context.Context) error {
@@ -457,4 +478,55 @@ func TestBackoff_Jitter(t *testing.T) {
 	// random ≈ 0 → -50% offset
 	d = lifecycle.ExportedBackoffDelay(b, 0, func() float64 { return 0 })
 	assert.Check(t, d == 50*time.Millisecond)
+}
+
+func TestSupervisor_StopWaitsForWatcher(t *testing.T) {
+	t.Parallel()
+
+	sess := newFakeSession()
+	c := newScriptedConnector(scriptStep{session: sess})
+	s := lifecycle.New("test", c, lifecycle.Policy{})
+
+	assert.NilError(t, s.Start(t.Context()))
+	sess.waitParked(t)
+
+	assert.NilError(t, s.Stop(t.Context()))
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateStopped))
+
+	// Stop must not return until the watcher has observed Wait() unblock.
+	assert.Check(t, sess.waitDone.Load(), "Stop returned before watcher's Wait() completed")
+}
+
+// TestSupervisor_StopConcurrent exercises the s.stopping guard: several
+// goroutines call Stop concurrently while the watcher is live in
+// sess.Wait(). All calls must return without error and observe a
+// fully-shut-down supervisor.
+func TestSupervisor_StopConcurrent(t *testing.T) {
+	t.Parallel()
+
+	sess := newFakeSession()
+	c := newScriptedConnector(scriptStep{session: sess})
+	s := lifecycle.New("test", c, lifecycle.Policy{})
+
+	assert.NilError(t, s.Start(t.Context()))
+	sess.waitParked(t)
+
+	const n = 4
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			errs <- s.Stop(t.Context())
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		assert.NilError(t, err)
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateStopped))
+	assert.Check(t, sess.waitDone.Load(), "a Stop returned before watcher's Wait() completed")
 }
