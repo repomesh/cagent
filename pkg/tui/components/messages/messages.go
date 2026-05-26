@@ -1184,6 +1184,21 @@ func (m *model) invalidateAllItems() {
 	m.renderDirty = true
 }
 
+// finalizePreviousMessageView releases per-message render state on the most
+// recent message.Model view (if any) before a new top-level entry is
+// appended. The renderCache and IncrementalRenderer are pure caches — dropping
+// them prevents long sessions from accumulating O(N) retained render state
+// for messages that are no longer streaming, while View() lazily rebuilds
+// them if the message is ever re-rendered.
+func (m *model) finalizePreviousMessageView() {
+	if len(m.views) == 0 {
+		return
+	}
+	if mv, ok := m.views[len(m.views)-1].(message.Model); ok {
+		mv.Finalize()
+	}
+}
+
 // Message management methods
 func (m *model) AddUserMessage(content string) tea.Cmd {
 	return m.addMessage(types.User(content))
@@ -1226,6 +1241,7 @@ func (m *model) AddAssistantMessage() tea.Cmd {
 }
 
 func (m *model) AddCancelledMessage() tea.Cmd {
+	m.finalizePreviousMessageView()
 	msg := types.Cancelled()
 	m.messages = append(m.messages, msg)
 	view := m.createMessageView(msg)
@@ -1250,6 +1266,7 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	m.clearSelection()
 	shouldAutoScroll := !m.userHasScrolled
 
+	m.finalizePreviousMessageView()
 	m.messages = append(m.messages, msg)
 	view := m.createMessageView(msg)
 	m.sessionState.SetPreviousMessage(msg)
@@ -1410,6 +1427,16 @@ func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
 		cmds = append(cmds, view.Init())
 	}
 
+	// Finalize all but the last message.Model view: historical assistant
+	// messages will only ever be re-rendered on demand, so there is no need
+	// to keep their renderCache or IncrementalRenderer state resident. The
+	// most recent view is left untouched in case streaming continues into it.
+	for i := range len(m.views) - 1 {
+		if mv, ok := m.views[i].(message.Model); ok {
+			mv.Finalize()
+		}
+	}
+
 	cmds = append(cmds, m.ScrollToBottom())
 	return tea.Batch(cmds...)
 }
@@ -1460,6 +1487,7 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 	}
 
 	// Otherwise create a standalone tool call message
+	m.finalizePreviousMessageView()
 	msg := types.ToolCallMessage(agentName, toolCall, toolDef, status)
 	m.messages = append(m.messages, msg)
 	view := m.createToolCallView(msg)
@@ -1546,6 +1574,14 @@ func (m *model) AppendReasoning(agentName, content string) tea.Cmd {
 }
 
 // addReasoningBlock creates a new reasoning block message.
+//
+// Reasoning blocks routinely interleave with an actively streaming assistant
+// turn (the LLM emits a thought, then resumes content). Finalizing the
+// previous view here would drop the renderCache and IncrementalRenderer of
+// a message the user is still watching, and the very next chunk would have
+// to rebuild them from scratch via the transient renderer path. The next
+// non-reasoning entry (user message, tool call, error) will finalize via
+// addMessage when the streaming turn actually ends.
 func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	m.clearSelection()
 	shouldAutoScroll := !m.userHasScrolled
@@ -1670,7 +1706,20 @@ func (m *model) removeSpinner() {
 			m.views = m.views[:lastIdx]
 		}
 		m.messages = m.messages[:lastIdx]
-		m.invalidateAllItems()
+		// The spinner is always at the tail, so other indices are unchanged
+		// and their cached entries remain valid. Only the joined renderedLines
+		// references the now-removed spinner, so we drop it and force a rejoin
+		// on the next render. The LRU itself never held a spinner entry
+		// (shouldCacheMessage returns false for spinner-driven types).
+		// Avoiding invalidateAllItems here is essential for long sessions:
+		// it would otherwise wipe up to 500 cached renderings once per
+		// assistant turn, forcing every previous message to be re-parsed
+		// from markdown on the next render.
+		m.renderedLines = nil
+		m.lineOffsets = nil
+		m.totalHeight = 0
+		m.urlSpans.clear()
+		m.renderDirty = true
 	}
 }
 

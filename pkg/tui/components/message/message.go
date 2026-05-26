@@ -27,6 +27,16 @@ type Model interface {
 	SetSelected(selected bool)
 	SetHovered(hovered bool)
 	CodeBlocks() []markdown.CodeBlock
+	// Finalize releases per-message render state that is only needed while the
+	// message is actively streaming. The message content and code-block metadata
+	// are preserved; calling View() afterwards still produces correct output
+	// without retaining a per-view render cache or IncrementalRenderer.
+	Finalize()
+	// HasLiveRenderState reports whether this view currently retains a
+	// populated renderCache or an IncrementalRenderer instance. Used by tests
+	// to assert that finalized views have actually released their per-message
+	// render state without reaching into unexported fields via reflection.
+	HasLiveRenderState() bool
 }
 
 // messageModel implements Model
@@ -59,6 +69,14 @@ type messageModel struct {
 	// streamed-in chunks only re-render the trailing block instead of the whole
 	// accumulated markdown each time.
 	mdRenderer *markdown.IncrementalRenderer
+
+	// finalized is set by Finalize() once the message is no longer the active
+	// streaming view. After it is set, Render() still produces correct output,
+	// but does not store anything in renderCache and does not retain an
+	// IncrementalRenderer between calls — both are pure caches whose memory
+	// dominates a long session, and they are not worth keeping for messages
+	// that are unlikely to be re-rendered hot.
+	finalized bool
 }
 
 // renderCache stores the most recent Render result keyed by the inputs that
@@ -99,6 +117,11 @@ func (mv *messageModel) Init() tea.Cmd {
 }
 
 func (mv *messageModel) SetMessage(msg *types.Message) {
+	// Un-finalize when the underlying message is changed (e.g. streaming
+	// resumes into this view). Finalize is meant for views that have
+	// permanently lost their actively-streaming status; mutating the message
+	// re-arms the per-message caches so subsequent renders are fast again.
+	mv.finalized = false
 	// If the new content is not an extension of the previous one (different
 	// message, or the message was edited), drop the IncrementalRenderer's
 	// cached prefix so its memory is released immediately rather than on the
@@ -177,7 +200,11 @@ func (mv *messageModel) Render(width int) string {
 	// MessageTypeAssistant placeholder) animate on every tick, so the result is
 	// not cacheable. Everything else is a pure function of the inputs tracked in
 	// renderCache below.
-	cacheable := !mv.isSpinnerDriven()
+	// Spinner-driven messages animate every tick and are not cacheable.
+	// Finalized messages skip writing into renderCache so the per-view
+	// retained ANSI string does not pile up across long sessions; the chat
+	// list's bounded LRU still memoizes their rendered output.
+	cacheable := !mv.isSpinnerDriven() && !mv.finalized
 	if cacheable {
 		c := &mv.renderCache
 		if c.valid &&
@@ -376,10 +403,22 @@ func (mv *messageModel) render(width int) string {
 // so each new chunk only re-parses the trailing region. The first render at a
 // given width is equivalent to a fresh full render.
 //
+// For finalized messages we use a transient renderer that is discarded after
+// each call. Finalized messages are no longer streamed, so the prefix-cache
+// inside an IncrementalRenderer is not earning its keep — keeping it resident
+// across the lifetime of every historical message in a session is the
+// dominant source of retained memory in long sessions. The parent message
+// list's bounded rendered-item LRU can still memoize finalized message output
+// without storing an additional per-view copy.
+//
 // It also returns the list of fenced code blocks emitted by the renderer so
 // that callers can map clicks on the per-block copy affordance back to the
 // underlying raw code.
 func (mv *messageModel) renderAssistantMarkdown(content string, width int) (string, []markdown.CodeBlock, error) {
+	if mv.finalized {
+		r := markdown.NewIncrementalRenderer(width)
+		return r.RenderWithCodeBlocks(content)
+	}
 	if mv.mdRenderer == nil {
 		mv.mdRenderer = markdown.NewIncrementalRenderer(width)
 	} else {
@@ -440,6 +479,54 @@ func (mv *messageModel) StopAnimation() {
 	if mv.message.Type == types.MessageTypeSpinner || mv.message.Type == types.MessageTypeLoading {
 		mv.spinner.Stop()
 	}
+}
+
+// Finalize releases per-message render state that no longer needs to be kept
+// resident once the message is no longer the actively streaming view. This is
+// called by the parent message list when a new top-level message arrives, and
+// for every historical view loaded from a session.
+//
+// Finalize is a no-op for non-assistant message types: only assistant views
+// allocate an IncrementalRenderer and accumulate large rendered ANSI strings
+// during streaming, so user messages, tool calls, error/welcome banners and
+// the like have nothing to release. Setting `finalized = true` on those views
+// would only have the side-effect of permanently disabling renderCache for
+// selected/hovered states (which bypass the parent's bounded LRU), forcing a
+// fresh re-render on every animation tick. Restricting the disable to
+// assistant views keeps the leak fix scoped to the type that actually leaks.
+//
+// The retained payload of an assistant view is dominated by the renderCache
+// (a copy of the rendered ANSI string) and the IncrementalRenderer's internal
+// caches (last rendered prefix, glamour AST state). Both are pure render
+// state — they can be regenerated from mv.message on demand. We deliberately
+// leave mv.message, mv.codeBlocks and the spinner untouched so that View()
+// keeps returning correct output, click-targeting on code blocks still works,
+// and the spinner-driven types continue to animate.
+//
+// Finalize is idempotent and durable: subsequent renders do not re-populate
+// renderCache or store an IncrementalRenderer on the struct. This is
+// important because the parent message list invalidates its own LRU on
+// several events (spinner removal, theme change, window resize) and would
+// otherwise re-render every previously finalized view, putting the per-
+// message render state right back where it was.
+func (mv *messageModel) Finalize() {
+	if mv.message == nil || mv.message.Type != types.MessageTypeAssistant {
+		return
+	}
+	mv.renderCache = renderCache{}
+	if mv.mdRenderer != nil {
+		mv.mdRenderer.Reset()
+		mv.mdRenderer = nil
+	}
+	mv.finalized = true
+}
+
+// HasLiveRenderState reports whether this view still retains per-message
+// render state — either a populated renderCache or an IncrementalRenderer
+// instance. Used as a structural assertion in regression tests that verify
+// Finalize() actually released what it was supposed to release.
+func (mv *messageModel) HasLiveRenderState() bool {
+	return mv.renderCache.result != "" || mv.mdRenderer != nil
 }
 
 // SetSize sets the dimensions of the message view
