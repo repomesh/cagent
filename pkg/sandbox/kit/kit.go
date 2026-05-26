@@ -36,11 +36,13 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/docker/portcullis"
+	"github.com/fatih/color"
 
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
@@ -50,6 +52,17 @@ import (
 	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/toolinstall"
+)
+
+// Output styles for PrintSummary. fatih/color auto-disables when
+// stdout is not a TTY, so unit tests and piped output stay plain.
+var (
+	styleSection  = color.New(color.Bold).SprintFunc()
+	styleName     = color.New(color.Bold).SprintFunc()
+	styleHostPath = color.New(color.FgCyan).SprintFunc()
+	styleNote     = color.New(color.Faint).SprintFunc()
+	styleRedacted = color.New(color.FgYellow).SprintFunc()
+	styleCount    = color.New(color.Bold).SprintFunc()
 )
 
 // manifestFile is the on-disk name of the kit's table of contents.
@@ -220,16 +233,16 @@ func Build(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	// Load the team config so we know which prompt files / skills the
-	// agent will request. A failure here is non-fatal: we still want
-	// to ship local skills since they're discovered from $HOME, not
-	// from the config. We log and continue with an empty config.
+	// agent will request. A failure here is non-fatal: we ship an empty
+	// kit (no prompt files, no skills) so the sandbox still boots, but
+	// the agent will fall back to its in-sandbox defaults.
 	cfg, err := loadConfig(ctx, opts)
 	if err != nil {
-		slog.DebugContext(ctx, "kit: agent config unavailable; skipping prompt-file collection", "err", err)
+		slog.DebugContext(ctx, "kit: agent config unavailable; shipping an empty kit", "err", err)
 		cfg = &latestcfg.Config{}
 	}
 
-	skillsEntries, redactions, err := stageSkills(stagingDir)
+	skillsEntries, redactions, err := stageSkills(stagingDir, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -358,12 +371,24 @@ func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
 	return config.Load(ctx, source)
 }
 
-// stageSkills copies every local skill discovered on the host into
+// stageSkills copies every local skill the agent config enables into
 // <kit>/skills/<skill-name>/, redacting text files in place.
-func stageSkills(kitDir string) ([]Entry, []Redaction, error) {
+//
+// Only skills the agent will actually load are staged: if no agent in
+// cfg enables local skills the kit ships nothing, and if every agent
+// that enables local skills also restricts them via an `include`
+// filter, only the union of those filters is staged. An agent that
+// enables local skills without a filter is the wide case — every local
+// skill is staged.
+func stageSkills(kitDir string, cfg *latestcfg.Config) ([]Entry, []Redaction, error) {
 	target := filepath.Join(kitDir, skills.KitSkillsSubdir)
 	if err := os.MkdirAll(target, 0o750); err != nil {
 		return nil, nil, fmt.Errorf("creating kit skills dir: %w", err)
+	}
+
+	include, ok := localSkillFilter(cfg)
+	if !ok {
+		return nil, nil, nil
 	}
 
 	var (
@@ -372,6 +397,9 @@ func stageSkills(kitDir string) ([]Entry, []Redaction, error) {
 	)
 	for _, skill := range skills.Load([]string{"local"}) {
 		if skill.BaseDir == "" {
+			continue
+		}
+		if include != nil && !include[skill.Name] {
 			continue
 		}
 		dst := filepath.Join(target, sanitise(skill.Name))
@@ -386,6 +414,41 @@ func stageSkills(kitDir string) ([]Entry, []Redaction, error) {
 		redactions = append(redactions, reds...)
 	}
 	return entries, redactions, nil
+}
+
+// localSkillFilter inspects every agent in cfg and reports the local
+// skill subset the kit should stage.
+//
+// Returns:
+//   - (nil, false) when no agent enables local skills — the kit ships
+//     nothing.
+//   - (nil, true)  when at least one agent enables local skills without
+//     an `include` filter — every local skill is staged.
+//   - (set, true)  when every agent that enables local skills also
+//     restricts them — only skills whose name is in the union of
+//     `include` lists are staged.
+func localSkillFilter(cfg *latestcfg.Config) (map[string]bool, bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	include := make(map[string]bool)
+	anyLocal := false
+	for _, agent := range cfg.Agents {
+		if !agent.Skills.HasLocal() {
+			continue
+		}
+		anyLocal = true
+		if len(agent.Skills.Include) == 0 {
+			return nil, true
+		}
+		for _, name := range agent.Skills.Include {
+			include[name] = true
+		}
+	}
+	if !anyLocal {
+		return nil, false
+	}
+	return include, true
 }
 
 // stagePromptFiles walks every agent in cfg, records every
@@ -695,38 +758,47 @@ func (r *Result) PrintSummary(w io.Writer) {
 		return
 	}
 
-	fmt.Fprintf(w, "Preparing docker-agent kit at %s\n", r.HostDir)
+	fmt.Fprintf(w, "Preparing docker-agent kit at %s\n", styleHostPath(pathx.ShortenHome(r.HostDir)))
 
 	if len(skillFiles) > 0 {
-		fmt.Fprintln(w, "  skills:")
+		fmt.Fprintf(w, "  %s\n", styleSection("skills:"))
 		for _, group := range skillFiles {
 			fmt.Fprintf(w, "    %s\n", displaySkillHeader(group.entry))
 			for _, file := range group.files {
-				mark := ""
-				if redacted[file] {
-					mark = " (redacted)"
-				}
 				rel := strings.TrimPrefix(file, group.entry.Target+string(filepath.Separator))
-				fmt.Fprintf(w, "      %s%s\n", rel, mark)
+				if redacted[file] {
+					fmt.Fprintf(w, "      %s %s\n", rel, styleRedacted("(redacted)"))
+				} else {
+					fmt.Fprintf(w, "      %s\n", rel)
+				}
 			}
 		}
 	}
 
 	if len(promptEntries) > 0 {
-		fmt.Fprintln(w, "  prompt files:")
+		fmt.Fprintf(w, "  %s\n", styleSection("prompt files:"))
 		for _, e := range promptEntries {
 			name := promptFileName(e)
 			notes := []string{"from " + pathx.ShortenHome(e.Source)}
+			isRedacted := false
 			if !e.IsStaged() {
 				notes = append(notes, "workspace mount")
 			} else if redacted[e.Target] {
 				notes = append(notes, "redacted")
+				isRedacted = true
 			}
-			fmt.Fprintf(w, "    %s (%s)\n", name, strings.Join(notes, ", "))
+			joined := strings.Join(notes, ", ")
+			paren := fmt.Sprintf("(%s)", joined)
+			if isRedacted {
+				paren = styleRedacted(paren)
+			} else {
+				paren = styleNote(paren)
+			}
+			fmt.Fprintf(w, "    %s %s\n", styleName(name), paren)
 		}
 	}
 
-	fmt.Fprintf(w, "  summary: %s\n", summaryCounts(len(skillFiles), len(promptEntries), len(r.Manifest.Redactions)))
+	fmt.Fprintf(w, "  %s %s\n", styleSection("summary:"), summaryCounts(len(skillFiles), len(promptEntries), len(r.Manifest.Redactions)))
 }
 
 // promptFileName returns the user-visible name for a prompt-file
@@ -780,9 +852,9 @@ func (r *Result) skillFilesGrouped() []skillGroup {
 func displaySkillHeader(e Entry) string {
 	name := filepath.Base(e.Target)
 	if e.Source == "" {
-		return name
+		return styleName(name)
 	}
-	return fmt.Sprintf("%s (from %s)", name, pathx.ShortenHome(e.Source))
+	return fmt.Sprintf("%s %s", styleName(name), styleNote(fmt.Sprintf("(from %s)", pathx.ShortenHome(e.Source))))
 }
 
 // summaryCounts formats the trailing line of PrintSummary.
@@ -790,16 +862,16 @@ func summaryCounts(skillCount, promptCount, redactionCount int) string {
 	parts := []string{plural(skillCount, "skill")}
 	parts = append(parts, plural(promptCount, "prompt file"))
 	if redactionCount > 0 {
-		parts = append(parts, plural(redactionCount, "secret")+" redacted")
+		parts = append(parts, styleRedacted(plural(redactionCount, "secret")+" redacted"))
 	}
 	return strings.Join(parts, ", ")
 }
 
 func plural(n int, what string) string {
 	if n == 1 {
-		return "1 " + what
+		return styleCount("1") + " " + what
 	}
-	return fmt.Sprintf("%d %ss", n, what)
+	return fmt.Sprintf("%s %ss", styleCount(strconv.Itoa(n)), what)
 }
 
 // needsAutoInstall reports whether cfg has at least one toolset that
