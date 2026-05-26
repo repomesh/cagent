@@ -534,6 +534,24 @@ func TestResolveAlias_WithBothOptions(t *testing.T) {
 	assert.Equal(t, "anthropic/claude-sonnet-4-0", alias.Model)
 }
 
+func TestResolveAlias_WithSandboxOption(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg, err := userconfig.Load()
+	require.NoError(t, err)
+	require.NoError(t, cfg.SetAlias("safe-coder", &userconfig.Alias{
+		Path:    "agentcatalog/coder",
+		Sandbox: true,
+	}))
+	require.NoError(t, cfg.Save())
+
+	alias := ResolveAlias("safe-coder")
+	require.NotNil(t, alias)
+	assert.True(t, alias.Sandbox)
+	assert.False(t, alias.Yolo)
+}
+
 func TestResolveAlias_NoOptions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

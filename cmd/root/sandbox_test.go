@@ -2,6 +2,8 @@ package root
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -235,7 +237,8 @@ func TestPrintToolInstallAllowance(t *testing.T) {
 			},
 			want: "Tool install: agent has at least one MCP/LSP toolset, allowlisting 1 package host(s) in the sandbox proxy:\n" +
 				"  - api.github.com\n" +
-				"  ! resolving install hosts for \"gopls\"@\"golang/tools@v0.21.0\": boom (using fallback host set)\n",
+				"  ! resolving install hosts for \"gopls\"@\"golang/tools@v0.21.0\": boom (using fallback host set)\n" +
+				"  hint: persist a missing host with `docker agent sandbox allow <host>`\n",
 			wantNot: []string{},
 		},
 	}
@@ -248,6 +251,160 @@ func TestPrintToolInstallAllowance(t *testing.T) {
 			for _, ne := range tt.wantNot {
 				assert.NotContains(t, buf.String(), ne)
 			}
+		})
+	}
+}
+
+func TestResolveSandboxDefault(t *testing.T) {
+	dir := t.TempDir()
+	sbxPath := filepath.Join(dir, "runtime-sandbox.yaml")
+	require.NoError(t, os.WriteFile(sbxPath,
+		[]byte("runtime:\n  sandbox: true\nagents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n"),
+		0o600))
+	plainPath := filepath.Join(dir, "plain.yaml")
+	require.NoError(t, os.WriteFile(plainPath,
+		[]byte("agents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n"),
+		0o600))
+
+	tests := []struct {
+		name     string
+		agentRef string
+		current  bool
+		want     bool
+		wantCfg  bool
+	}{
+		{"empty ref, flag false", "", false, false, false},
+		{"empty ref, flag already true", "", true, true, false},
+		{"runtime.sandbox: true picked up", sbxPath, false, true, true},
+		{"plain agent stays false", plainPath, false, false, true},
+		{"current=true short-circuits the decision", plainPath, true, true, true},
+		{"unresolvable ref stays false", filepath.Join(dir, "missing.yaml"), false, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, cfg := resolveSandboxDefault(t.Context(), tt.agentRef, tt.current)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantCfg, cfg != nil)
+		})
+	}
+}
+
+func TestPeekAgentSandbox(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "runtime sandbox true",
+			yaml: "runtime:\n  sandbox: true\nagents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n",
+			want: true,
+		},
+		{
+			name: "runtime sandbox false",
+			yaml: "runtime:\n  sandbox: false\nagents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n",
+			want: false,
+		},
+		{
+			name: "runtime block absent",
+			yaml: "agents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "agent.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tt.yaml), 0o600))
+
+			cfg := loadAgentConfig(t.Context(), path)
+			got := cfg != nil && cfg.Runtime != nil && cfg.Runtime.Sandbox
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("empty ref", func(t *testing.T) {
+		assert.Nil(t, loadAgentConfig(t.Context(), ""))
+	})
+
+	t.Run("unresolvable ref", func(t *testing.T) {
+		assert.Nil(t, loadAgentConfig(t.Context(), "/nonexistent/agent.yaml"))
+	})
+}
+
+func TestAgentNetworkAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	yamlBody := "runtime:\n" +
+		"  network_allowlist:\n" +
+		"    - api.example.com\n" +
+		"    - registry.npmjs.org:443\n" +
+		"agents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n"
+	require.NoError(t, os.WriteFile(path, []byte(yamlBody), 0o600))
+
+	cfg := loadAgentConfig(t.Context(), path)
+	require.NotNil(t, cfg)
+	assert.Equal(t, []string{"api.example.com", "registry.npmjs.org:443"},
+		agentNetworkAllowlist(t.Context(), cfg))
+}
+
+func TestAgentNetworkAllowlist_FiltersMalformed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.yaml")
+	// A YAML where two hosts were typed as one comma-separated string
+	// must not feed a single bogus rule into the proxy policy.
+	yamlBody := "runtime:\n" +
+		"  network_allowlist:\n" +
+		"    - api.example.com\n" +
+		"    - \"bad.example.com, also.bad.com\"\n" +
+		"    - \"has space.example.com\"\n" +
+		"    - registry.npmjs.org:443\n" +
+		"agents:\n  root:\n    model: openai/gpt-4o\n    description: t\n    instruction: t\n"
+	require.NoError(t, os.WriteFile(path, []byte(yamlBody), 0o600))
+
+	cfg := loadAgentConfig(t.Context(), path)
+	require.NotNil(t, cfg)
+	assert.Equal(t, []string{"api.example.com", "registry.npmjs.org:443"},
+		agentNetworkAllowlist(t.Context(), cfg))
+}
+
+func TestAgentNetworkAllowlist_NilCfg(t *testing.T) {
+	assert.Nil(t, agentNetworkAllowlist(t.Context(), nil))
+}
+
+func TestPrintAgentNetworkAllowlist(t *testing.T) {
+	tests := []struct {
+		name  string
+		hosts []string
+		want  string
+	}{
+		{
+			name:  "empty",
+			hosts: nil,
+			want:  "",
+		},
+		{
+			name:  "single host",
+			hosts: []string{"api.example.com"},
+			want: "Agent network allowlist: allowlisting 1 host(s) declared in runtime.network_allowlist:\n" +
+				"  - api.example.com\n",
+		},
+		{
+			name:  "multiple",
+			hosts: []string{"a.example.com", "b.example.com"},
+			want: "Agent network allowlist: allowlisting 2 host(s) declared in runtime.network_allowlist:\n" +
+				"  - a.example.com\n" +
+				"  - b.example.com\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			printAgentNetworkAllowlist(&buf, tt.hosts)
+			assert.Equal(t, tt.want, buf.String())
 		})
 	}
 }
