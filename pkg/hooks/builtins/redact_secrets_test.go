@@ -9,8 +9,13 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+func fakeGitHubPAT() string {
+	return portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")
+}
 
 // TestRedactSecretsScrubsTopLevelStringValue: a recognised secret in
 // a top-level string argument is replaced and ONLY the rewritten key
@@ -21,7 +26,7 @@ import (
 func TestRedactSecretsScrubsTopLevelStringValue(t *testing.T) {
 	t.Parallel()
 
-	const secret = "ghp_cxLeRrvbJfmYdUtr70xnNE3Q7Gvli43s19PD"
+	secret := fakeGitHubPAT()
 
 	in := &hooks.Input{
 		HookEventName: hooks.EventPreToolUse,
@@ -133,7 +138,7 @@ func TestRedactSecretsIsRegistered(t *testing.T) {
 	handler, ok := reg.LookupBuiltin(RedactSecrets)
 	require.Truef(t, ok, "builtin %q must be registered", RedactSecrets)
 
-	const secret = "ghp_cxLeRrvbJfmYdUtr70xnNE3Q7Gvli43s19PD"
+	secret := fakeGitHubPAT()
 	out, err := handler(t.Context(), &hooks.Input{
 		HookEventName: hooks.EventPreToolUse,
 		ToolName:      "shell",
@@ -187,7 +192,7 @@ func TestApplyAgentDefaultsInjectsRedactSecrets(t *testing.T) {
 func TestRedactSecretsScrubsOutgoingMessages(t *testing.T) {
 	t.Parallel()
 
-	const secret = "ghp_cxLeRrvbJfmYdUtr70xnNE3Q7Gvli43s19PD"
+	secret := fakeGitHubPAT()
 	in := &hooks.Input{
 		HookEventName: hooks.EventBeforeLLMCall,
 		Messages: []chat.Message{
@@ -236,7 +241,7 @@ func TestRedactSecretsBeforeLLMCallNoOpOnCleanMessages(t *testing.T) {
 func TestRedactSecretsBeforeLLMCallScrubsToolCallArguments(t *testing.T) {
 	t.Parallel()
 
-	const secret = "ghp_cxLeRrvbJfmYdUtr70xnNE3Q7Gvli43s19PD"
+	secret := fakeGitHubPAT()
 	in := &hooks.Input{
 		HookEventName: hooks.EventBeforeLLMCall,
 		Messages: []chat.Message{
@@ -275,7 +280,7 @@ func TestRedactSecretsBeforeLLMCallScrubsToolCallArguments(t *testing.T) {
 func TestRedactSecretsScrubsToolOutput(t *testing.T) {
 	t.Parallel()
 
-	const secret = "ghp_cxLeRrvbJfmYdUtr70xnNE3Q7Gvli43s19PD"
+	secret := fakeGitHubPAT()
 	in := &hooks.Input{
 		HookEventName: hooks.EventToolResponseTransform,
 		ToolName:      "shell",
