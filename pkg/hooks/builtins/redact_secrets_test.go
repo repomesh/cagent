@@ -1,7 +1,6 @@
 package builtins
 
 import (
-	"hash/crc32"
 	"testing"
 
 	"github.com/docker/portcullis"
@@ -10,23 +9,12 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// fakeGitHubPAT returns a synthetic GitHub PAT with a body that
-// passes portcullis' CRC32 checksum validation. The full token is
-// never written as a source literal so GitHub's secret-scanning push
-// protection doesn't flag this file.
 func fakeGitHubPAT() string {
-	const body = "cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4"
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	var suffix [6]byte
-	checksum := uint64(crc32.ChecksumIEEE([]byte(body)))
-	for i := len(suffix) - 1; i >= 0; i-- {
-		suffix[i] = alphabet[checksum%62]
-		checksum /= 62
-	}
-	return "ghp_" + body + string(suffix[:])
+	return portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")
 }
 
 // TestRedactSecretsScrubsTopLevelStringValue: a recognised secret in

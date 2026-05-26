@@ -2,7 +2,6 @@ package kit
 
 import (
 	"encoding/json"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,25 +14,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/skills"
 )
 
-// fakeGitHubToken returns a synthetic GitHub PAT that triggers
-// portcullis. The trailing 6 chars are computed at runtime so the
-// full token never appears as a source literal — otherwise GitHub's
-// secret-scanning push protection would flag this file. Used only as
-// input to the redactor, never as an actual credential.
+// fakeGitHubToken is used only as input to the redactor, never as an
+// actual credential.
 func fakeGitHubToken() string {
-	const body = "1234567890abcdefghijklmnopqrst"
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	var suffix [6]byte
-	checksum := uint64(crc32.ChecksumIEEE([]byte(body)))
-	for i := len(suffix) - 1; i >= 0; i-- {
-		suffix[i] = alphabet[checksum%62]
-		checksum /= 62
-	}
-	return "ghp_" + body + string(suffix[:])
+	return portcullistest.FakeGitHubPAT("1234567890abcdefghijklmnopqrst")
 }
 
 // isolateEnv prevents a developer-exported DOCKER_AGENT_KIT_DIR from
