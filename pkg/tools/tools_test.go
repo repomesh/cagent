@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,6 +79,90 @@ func TestNewHandler_InvalidArguments(t *testing.T) {
 		},
 	})
 	require.Error(t, err)
+}
+
+// The next three tests pin the docker-agent-specific behavior of NewHandler.
+// Repair semantics themselves are covered by github.com/docker/aijson; what
+// is local to this package is (a) that NewHandler actually delegates to
+// aijson, and (b) that the OnRepair hook fans out to the tool_input_repaired
+// slog event with the expected fields (and stays quiet on the hot path).
+
+// TestNewHandler_DelegatesToAijson is the wiring canary: if someone swaps
+// aijson.Unmarshal back to encoding/json.Unmarshal, this test catches it.
+func TestNewHandler_DelegatesToAijson(t *testing.T) {
+	type args struct {
+		Paths []string `json:"paths"`
+	}
+	var got args
+	handler := NewHandler(func(_ context.Context, a args) (*ToolCallResult, error) {
+		got = a
+		return ResultSuccess("ok"), nil
+	})
+
+	_, err := handler(t.Context(), ToolCall{
+		Type: "function",
+		Function: FunctionCall{
+			Name:      "read_multiple_files",
+			Arguments: `{"paths":"only.txt"}`,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"only.txt"}, got.Paths)
+}
+
+func TestNewHandler_EmitsRepairTelemetry(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	type args struct {
+		Paths []string `json:"paths"`
+	}
+	handler := NewHandler(func(_ context.Context, _ args) (*ToolCallResult, error) {
+		return ResultSuccess("ok"), nil
+	})
+
+	_, err := handler(t.Context(), ToolCall{
+		Type: "function",
+		Function: FunctionCall{
+			Name:      "read_multiple_files",
+			Arguments: `{"paths":"only.txt"}`,
+		},
+	})
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "tool_input_repaired")
+	assert.Contains(t, out, "tool=read_multiple_files")
+	assert.Contains(t, out, "wrap_in_array")
+}
+
+// TestNewHandler_NoTelemetryOnValidInput pins the hot-path contract: a
+// well-formed tool call must NOT emit tool_input_repaired. Without this,
+// a regression in aijson's strict-first ordering would silently flood logs.
+func TestNewHandler_NoTelemetryOnValidInput(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	type args struct {
+		Paths []string `json:"paths"`
+	}
+	handler := NewHandler(func(_ context.Context, _ args) (*ToolCallResult, error) {
+		return ResultSuccess("ok"), nil
+	})
+
+	_, err := handler(t.Context(), ToolCall{
+		Type: "function",
+		Function: FunctionCall{
+			Name:      "read_multiple_files",
+			Arguments: `{"paths":["a.txt","b.txt"]}`,
+		},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, buf.String(), "tool_input_repaired")
 }
 
 func TestToolCallResultWithoutPayload(t *testing.T) {
