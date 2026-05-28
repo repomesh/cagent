@@ -8,7 +8,7 @@ import (
 )
 
 func TestCancellableParent_RoundTrip(t *testing.T) {
-	parent, cancel := context.WithCancel(context.Background())
+	parent, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	ctx := withCancellableParent(context.WithoutCancel(parent), parent)
@@ -17,12 +17,12 @@ func TestCancellableParent_RoundTrip(t *testing.T) {
 }
 
 func TestCancellableParent_AbsentReturnsNil(t *testing.T) {
-	got := cancellableParentFromContext(context.Background())
+	got := cancellableParentFromContext(t.Context())
 	assert.Nil(t, got)
 }
 
 func TestCancellableParent_NilParentIsNoOp(t *testing.T) {
-	base := context.Background()
+	base := t.Context()
 	got := withCancellableParent(base, nil)
 	// No key attached, so cancellableParentFromContext returns nil --
 	// the helper is a no-op when handed a nil parent.
@@ -37,7 +37,7 @@ func TestCancellableParent_NilParentIsNoOp(t *testing.T) {
 // ctx.Done() sees the detached ctx, code that opts in by reading
 // cancellableParentFromContext can additionally observe the parent.
 func TestCancellableParent_DetachedCtxStaysIndependent(t *testing.T) {
-	parent, parentCancel := context.WithCancel(context.Background())
+	parent, parentCancel := context.WithCancel(t.Context())
 	defer parentCancel()
 
 	detached := context.WithoutCancel(parent)
