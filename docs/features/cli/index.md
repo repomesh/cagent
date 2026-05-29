@@ -37,6 +37,9 @@ $ docker agent run [config] [message...] [flags]
 | `--dry-run`                             | Initialize the agent without executing anything (useful for validating a config)                                                          |
 | `--remote <addr>`                       | Use a remote runtime at the given address instead of running the agent locally                                                            |
 | `--lean`                                | Use a simplified TUI with minimal chrome                                                                                                  |
+| `--app-name <name>`                     | Override the application name label shown in the TUI (status bar, window title, "/exit" notifications).                                   |
+| `--sidebar`                             | Control sidebar visibility. Set to `--sidebar=false` to hide the sidebar and disable the Ctrl+B toggle (default: `true`).                 |
+| `--disable-commands <list>`             | Hide and disable specific slash commands in the TUI. Accepts a comma-separated list of command names (leading slash optional, case-insensitive). E.g. `--disable-commands="/cost,/eval,/model"`. |
 | `--json`                                | Output results as newline-delimited JSON (use with `--exec`)                                                                              |
 | `--hide-tool-calls`                     | Hide tool calls in the output                                                                                                             |
 | `--hide-tool-results`                   | Hide tool call results in the output                                                                                                      |
@@ -77,6 +80,11 @@ $ docker agent run agent.yaml --hook-pre-tool-use "./scripts/validate.sh" --hook
 
 # Queue multiple messages (processed in sequence)
 $ docker agent run agent.yaml "question 1" "question 2" "question 3"
+
+# Customize TUI display
+$ docker agent run agent.yaml --app-name "My Project"
+$ docker agent run agent.yaml --sidebar=false
+$ docker agent run agent.yaml --disable-commands="/cost,/eval,/model"
 ```
 
 ### `docker agent run --exec`
