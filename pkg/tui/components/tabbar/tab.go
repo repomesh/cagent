@@ -88,8 +88,8 @@ func renderTab(info messages.TabInfo, maxTitleLen, animFrame int, role dragRole)
 	if title == "" {
 		title = defaultTabTitle
 	}
-	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "…"
+	if r := []rune(title); len(r) > maxTitleLen {
+		title = string(r[:maxTitleLen-1]) + "…"
 	}
 
 	// Pick colors based on focus state.

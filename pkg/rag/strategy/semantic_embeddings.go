@@ -312,7 +312,7 @@ func (b *llmSemanticEmbeddingBuilder) BuildEmbeddingInput(ctx context.Context, s
 
 		fallback := ch.Content
 		if len(fallback) > maxEmbeddingInputLength {
-			fallback = fallback[:maxEmbeddingInputLength] + "..."
+			fallback = strings.ToValidUTF8(fallback[:maxEmbeddingInputLength], "") + "..."
 			slog.DebugContext(ctx, "Truncated fallback content to fit embedding model limits",
 				"original_length", len(ch.Content),
 				"truncated_length", len(fallback))
@@ -332,7 +332,7 @@ func (b *llmSemanticEmbeddingBuilder) BuildEmbeddingInput(ctx context.Context, s
 			"chunk_index", ch.Index,
 			"original_length", len(embeddingInput),
 			"truncated_length", maxEmbeddingInputLength)
-		embeddingInput = embeddingInput[:maxEmbeddingInputLength] + "..."
+		embeddingInput = strings.ToValidUTF8(embeddingInput[:maxEmbeddingInputLength], "") + "..."
 	}
 
 	slog.DebugContext(ctx, "Generated semantic embedding input for chunk",

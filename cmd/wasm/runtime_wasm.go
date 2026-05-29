@@ -250,11 +250,7 @@ func (rt *wasmRuntime) agentInstruction(name string) string {
 // maxIterations.
 func (rt *wasmRuntime) runAgentLoop(ctx context.Context, agentName string, messages []chat.Message) (map[string]any, error) {
 	if agentName == "" {
-		if len(rt.cfg.Agents) == 1 {
-			agentName = rt.cfg.Agents[0].Name
-		} else {
-			agentName = rt.cfg.Agents[0].Name
-		}
+		agentName = rt.cfg.Agents[0].Name
 	}
 	rt.currentAgent = agentName
 
@@ -792,8 +788,8 @@ func parseToolArgs(args string) map[string]any {
 
 // truncateOutput truncates a string to maxLen characters, appending "…" if truncated.
 func truncateOutput(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+	if r := []rune(s); len(r) > maxLen {
+		return string(r[:maxLen]) + "…"
 	}
-	return s[:maxLen] + "…"
+	return s
 }

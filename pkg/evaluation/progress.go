@@ -166,7 +166,7 @@ func (p *progressBar) render(final bool) {
 
 	// Calculate bar width based on terminal size
 	// Reserve space for: "[" + "]" + " 100% (999/999) " + counts (~20) + running info (~30)
-	barWidth := min(max(termWidth-80, 10), 10)
+	barWidth := min(max(termWidth-80, 10), 30)
 
 	filledWidth := 0
 	if p.total > 0 {
@@ -216,8 +216,8 @@ func (p *progressBar) render(final bool) {
 		// Calculate available space for running task name
 		availableForName := max(termWidth-len(status)-10, 5)
 		name := firstName
-		if len(name) > availableForName {
-			name = name[:availableForName-1] + "…"
+		if r := []rune(name); len(r) > availableForName {
+			name = string(r[:availableForName-1]) + "…"
 		}
 		if runningCount == 1 {
 			status += " | " + name

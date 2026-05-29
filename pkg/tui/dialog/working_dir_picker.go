@@ -897,8 +897,8 @@ func (d *workingDirPickerDialog) renderBrowseEntry(entry dirEntry, selected bool
 		icon := "📁 "
 		name := entry.name
 		nameLimit := availableWidth - dirPickerFolderIconWidth
-		if len(name) > nameLimit {
-			name = name[:nameLimit-1] + "…"
+		if r := []rune(name); len(r) > nameLimit {
+			name = string(r[:nameLimit-1]) + "…"
 		}
 		return prefix + nameStyle.Render(icon+name)
 	}
