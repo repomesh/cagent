@@ -122,7 +122,7 @@ When running `docker-agent serve api` (no local browser, no callback server), th
   | `auth_server_metadata`       | RFC 8414 authorization-server metadata document                  |
   | `resource_metadata`          | RFC 9728 protected-resource metadata document                    |
 
-  The client opens the browser at `docker-agent/authorize_url`, receives the OAuth callback at whatever endpoint the configured `redirect_uri` resolves to (typically a host-controlled bouncer that 302s into a deeplink), and replies to the elicitation with `accept` and `Content = {"code": "...", "state": "..."}`. The runtime verifies the `state`, exchanges the `code` at the token endpoint (using the same `redirect_uri` for RFC 6749 §4.1.3 binding), stores the token, and replays the original MCP request with `Authorization: Bearer ...`.
+  The client opens the browser at the URL provided in the `docker-agent/authorize_url` meta field, receives the OAuth callback at whatever endpoint the configured `redirect_uri` resolves to (typically a host-controlled bouncer that 302s into a deeplink), and replies to the elicitation with `accept` and `Content = {"code": "...", "state": "..."}`. The runtime verifies the `state`, exchanges the `code` at the token endpoint (using the same `redirect_uri` for RFC 6749 §4.1.3 binding), stores the token, and replays the original MCP request with `Authorization: Bearer ...`.
 
 - **Flag not set** (client-driven): the runtime emits only `auth_server_metadata` + `resource_metadata`; the client is expected to drive the OAuth flow itself (PKCE, DCR, token exchange) and reply with `Content = {"access_token": "...", "refresh_token": "...", ...}`.
 
