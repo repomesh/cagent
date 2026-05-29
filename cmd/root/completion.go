@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
@@ -91,6 +92,22 @@ func completeMessage(cmd *cobra.Command, args []string, toComplete string) ([]st
 	for k, v := range agentCfg.Commands {
 		if strings.HasPrefix("/"+k, toComplete) {
 			candidates = append(candidates, "/"+k+"\t"+v.DisplayText())
+		}
+	}
+
+	return candidates, cobra.ShellCompDirectiveNoFileComp
+}
+
+func completeTheme(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	refs, err := styles.ListThemeRefs()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	var candidates []string
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, toComplete) {
+			candidates = append(candidates, ref)
 		}
 	}
 
