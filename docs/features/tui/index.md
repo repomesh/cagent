@@ -26,6 +26,12 @@ $ docker agent run agent.yaml --yolo
 
 # Enable debug logging
 $ docker agent run agent.yaml --debug
+
+# Hide the sidebar (cannot be re-enabled via Ctrl+B)
+$ docker agent run agent.yaml --sidebar=false
+
+# Disable specific slash commands
+$ docker agent run agent.yaml --disable-commands="/cost,/eval,/model"
 ```
 
 ## Slash Commands
@@ -173,7 +179,7 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Ctrl+W     | Close the current tab                           |
 | Ctrl+N     | Next tab                                        |
 | Ctrl+P     | Previous tab                                    |
-| Ctrl+B     | Toggle the sidebar (full-UI mode only)          |
+| Ctrl+B     | Toggle the sidebar (full-UI mode only; disabled when --sidebar=false) |
 | Ctrl+Y     | Toggle YOLO mode (auto-approve tool calls)      |
 | Ctrl+O     | Toggle hide tool results                        |
 | Ctrl+Z     | Suspend TUI to background (resume with `fg`)    |
