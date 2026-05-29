@@ -263,6 +263,72 @@ func TestToolsUsesStableIterationOrder(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestServerFilters covers the allow/block-list narrowing applied at
+// construction time via WithAllowedServers / WithBlockedServers.
+func TestServerFilters(t *testing.T) {
+	full := New(stubEnv{vars: map[string]string{}})
+	require.GreaterOrEqual(t, len(full.catalog.Servers), 3, "need 3+ servers in fixture")
+	ids := []string{full.catalog.Servers[0].ID, full.catalog.Servers[1].ID, full.catalog.Servers[2].ID}
+
+	t.Run("allow list restricts to the named servers", func(t *testing.T) {
+		ts := New(stubEnv{vars: map[string]string{}}, WithAllowedServers(ids[:2]))
+		assert.Equal(t, len(ts.catalog.Servers), ts.catalog.Count)
+		assert.Len(t, ts.catalog.Servers, 2)
+		assert.Contains(t, ts.byID, ids[0])
+		assert.Contains(t, ts.byID, ids[1])
+		assert.NotContains(t, ts.byID, ids[2])
+	})
+
+	t.Run("block list removes the named servers", func(t *testing.T) {
+		ts := New(stubEnv{vars: map[string]string{}}, WithBlockedServers(ids[:1]))
+		assert.Len(t, ts.catalog.Servers, len(full.catalog.Servers)-1)
+		assert.NotContains(t, ts.byID, ids[0])
+		assert.Contains(t, ts.byID, ids[1])
+	})
+
+	t.Run("block takes precedence over allow", func(t *testing.T) {
+		ts := New(stubEnv{vars: map[string]string{}},
+			WithAllowedServers(ids[:2]), WithBlockedServers([]string{ids[0]}))
+		assert.Len(t, ts.catalog.Servers, 1)
+		assert.NotContains(t, ts.byID, ids[0])
+		assert.Contains(t, ts.byID, ids[1])
+	})
+
+	t.Run("unknown ids are ignored", func(t *testing.T) {
+		ts := New(stubEnv{vars: map[string]string{}},
+			WithAllowedServers([]string{ids[0], "definitely-not-a-server"}))
+		assert.Len(t, ts.catalog.Servers, 1)
+		assert.Contains(t, ts.byID, ids[0])
+	})
+
+	t.Run("blank entries are ignored", func(t *testing.T) {
+		ts := New(stubEnv{vars: map[string]string{}},
+			WithAllowedServers([]string{ids[0], "  ", ""}))
+		assert.Len(t, ts.catalog.Servers, 1)
+	})
+
+	t.Run("empty lists offer the full catalog", func(t *testing.T) {
+		ts := New(stubEnv{vars: map[string]string{}},
+			WithAllowedServers(nil), WithBlockedServers([]string{}))
+		assert.Len(t, ts.catalog.Servers, len(full.catalog.Servers))
+	})
+}
+
+// TestSearchRespectsAllowList ensures filtered-out servers are not
+// reachable through the search meta-tool.
+func TestSearchRespectsAllowList(t *testing.T) {
+	full := New(stubEnv{vars: map[string]string{}})
+	require.GreaterOrEqual(t, len(full.catalog.Servers), 2)
+	keep := full.catalog.Servers[0].ID
+	drop := full.catalog.Servers[1].ID
+
+	ts := New(stubEnv{vars: map[string]string{}}, WithAllowedServers([]string{keep}))
+
+	res, err := ts.handleSearch(t.Context(), SearchArgs{Query: drop})
+	require.NoError(t, err)
+	assert.True(t, res.IsError, "a blocked/hidden server must not be searchable")
+}
+
 func TestEnableUnknownServer(t *testing.T) {
 	ts := New(stubEnv{vars: map[string]string{}})
 	res, err := ts.handleEnable(t.Context(), EnableArgs{ID: "definitely-not-a-server"})

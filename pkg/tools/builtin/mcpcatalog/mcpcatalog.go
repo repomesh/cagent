@@ -65,6 +65,12 @@ type Toolset struct {
 	byID    map[string]Server
 	env     environment.Provider
 
+	// allowedServers / blockedServers capture the optional offer filters
+	// applied at construction time. They are retained only for reference;
+	// the actual filtering happens once in New via filterCatalog.
+	allowedServers []string
+	blockedServers []string
+
 	mu sync.RWMutex
 	// enabled holds the per-server StartableToolSet wrapper. Wrapping the
 	// inner *mcp.Toolset in a StartableToolSet gives us:
@@ -107,23 +113,91 @@ var (
 	_ tools.OAuthCapable   = (*Toolset)(nil)
 )
 
+// Option customizes a Toolset at construction time.
+type Option func(*Toolset)
+
+// WithAllowedServers restricts the offered catalog to the given server ids.
+// When the list is non-empty, only these servers are searchable and
+// enableable; every other entry is hidden. An empty or nil list leaves the
+// full catalog in place.
+func WithAllowedServers(ids []string) Option {
+	return func(t *Toolset) { t.allowedServers = ids }
+}
+
+// WithBlockedServers removes the given server ids from the offered catalog.
+// Block takes precedence over allow: a server present in both lists is
+// blocked.
+func WithBlockedServers(ids []string) Option {
+	return func(t *Toolset) { t.blockedServers = ids }
+}
+
 // New returns a Toolset backed by the embedded catalog. envProvider is used
 // to resolve ${ENV_VAR} placeholders in catalog headers (e.g. the Apify
 // `Authorization: Bearer ${APIFY_API_KEY}` header) at enable time, mirroring
 // how a YAML-declared `mcp.remote` toolset works.
-func New(envProvider environment.Provider) *Toolset {
+//
+// Optional WithAllowedServers / WithBlockedServers options narrow the set of
+// servers the toolset offers by default.
+func New(envProvider environment.Provider, opts ...Option) *Toolset {
 	cat := MustLoad()
-	byID := make(map[string]Server, len(cat.Servers))
-	for _, s := range cat.Servers {
-		byID[s.ID] = s
-	}
-	return &Toolset{
+	t := &Toolset{
 		catalog:          cat,
-		byID:             byID,
 		env:              envProvider,
 		enabled:          make(map[string]*tools.StartableToolSet),
 		removeOAuthToken: mcp.RemoveOAuthToken,
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	t.filterCatalog()
+	return t
+}
+
+// filterCatalog applies the allow/block lists to the embedded catalog,
+// rebuilding Servers, Count and the id index so the rest of the toolset only
+// ever sees the offered subset. Block takes precedence over allow. It always
+// runs (even with no filters) to populate byID.
+func (t *Toolset) filterCatalog() {
+	allow := toIDSet(t.allowedServers)
+	block := toIDSet(t.blockedServers)
+
+	if len(allow) > 0 || len(block) > 0 {
+		filtered := make([]Server, 0, len(t.catalog.Servers))
+		for _, s := range t.catalog.Servers {
+			if len(allow) > 0 {
+				if _, ok := allow[s.ID]; !ok {
+					continue
+				}
+			}
+			if _, ok := block[s.ID]; ok {
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		t.catalog.Servers = filtered
+		t.catalog.Count = len(filtered)
+	}
+
+	t.byID = make(map[string]Server, len(t.catalog.Servers))
+	for _, s := range t.catalog.Servers {
+		t.byID[s.ID] = s
+	}
+}
+
+// toIDSet builds a lookup set from a list of server ids, dropping empty /
+// whitespace-only entries. Returns nil for an empty input so callers can
+// cheaply test len() == 0.
+func toIDSet(ids []string) map[string]struct{} {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	return set
 }
 
 // Describe returns a short, user-visible label for the /tools dialog.
