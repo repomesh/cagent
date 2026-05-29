@@ -250,11 +250,7 @@ func (rt *wasmRuntime) agentInstruction(name string) string {
 // maxIterations.
 func (rt *wasmRuntime) runAgentLoop(ctx context.Context, agentName string, messages []chat.Message) (map[string]any, error) {
 	if agentName == "" {
-		if len(rt.cfg.Agents) == 1 {
-			agentName = rt.cfg.Agents[0].Name
-		} else {
-			agentName = rt.cfg.Agents[0].Name
-		}
+		agentName = rt.cfg.Agents[0].Name
 	}
 	rt.currentAgent = agentName
 
