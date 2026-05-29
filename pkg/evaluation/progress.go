@@ -216,8 +216,8 @@ func (p *progressBar) render(final bool) {
 		// Calculate available space for running task name
 		availableForName := max(termWidth-len(status)-10, 5)
 		name := firstName
-		if len(name) > availableForName {
-			name = name[:availableForName-1] + "…"
+		if r := []rune(name); len(r) > availableForName {
+			name = string(r[:availableForName-1]) + "…"
 		}
 		if runningCount == 1 {
 			status += " | " + name
