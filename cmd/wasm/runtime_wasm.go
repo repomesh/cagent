@@ -788,8 +788,8 @@ func parseToolArgs(args string) map[string]any {
 
 // truncateOutput truncates a string to maxLen characters, appending "…" if truncated.
 func truncateOutput(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+	if r := []rune(s); len(r) > maxLen {
+		return string(r[:maxLen]) + "…"
 	}
-	return s[:maxLen] + "…"
+	return s
 }
