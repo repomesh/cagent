@@ -11,7 +11,7 @@ require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.1
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/a2aproject/a2a-go v0.3.15
-	github.com/alecthomas/chroma/v2 v2.26.0
+	github.com/alecthomas/chroma/v2 v2.26.1
 	github.com/alpkeskin/gotoon v0.1.1
 	github.com/anthropics/anthropic-sdk-go v1.46.0
 	github.com/atotto/clipboard v0.1.4
@@ -87,7 +87,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.24 // indirect
 	github.com/blevesearch/zapx/v17 v17.1.2 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
-	github.com/dlclark/regexp2/v2 v2.1.0 // indirect
+	github.com/dlclark/regexp2/v2 v2.1.1 // indirect
 	github.com/dvsekhvalnov/jose2go v1.7.0 // indirect
 	github.com/godbus/dbus v0.0.0-20190726142602-4481cbc300e2 // indirect
 	github.com/gsterjov/go-libsecret v0.0.0-20161001094733-a6f4afe4910c // indirect
