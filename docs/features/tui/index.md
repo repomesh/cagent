@@ -261,6 +261,8 @@ settings:
   theme: my-theme # References ~/.cagent/themes/my-theme.yaml
 ```
 
+**At launch:** Pass `--theme <name>` to `docker agent run` to preselect a theme for that session. This overrides `settings.theme` in your config but is not saved. Invalid theme names print an error at startup listing the available options. Has no effect in `--exec` mode.
+
 **At runtime:** Use the `/theme` command to open the theme picker and select from available themes. Your selection is saved globally in `~/.config/cagent/config.yaml` under `settings.theme` and persists across sessions.
 
 <div class="callout callout-tip" markdown="1">

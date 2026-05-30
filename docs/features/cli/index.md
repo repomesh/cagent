@@ -37,6 +37,7 @@ $ docker agent run [config] [message...] [flags]
 | `--dry-run`                             | Initialize the agent without executing anything (useful for validating a config)                                                          |
 | `--remote <addr>`                       | Use a remote runtime at the given address instead of running the agent locally                                                            |
 | `--lean`                                | Use a simplified TUI with minimal chrome                                                                                                  |
+| `--theme <name>`                        | Preselect a TUI theme by name at launch (overrides `settings.theme` in user config; ignored in `--exec` mode). Run `/theme` to browse available names. |
 | `--app-name <name>`                     | Override the application name label shown in the TUI (status bar, window title, "/exit" notifications).                                   |
 | `--sidebar`                             | Control sidebar visibility. Set to `--sidebar=false` to hide the sidebar and disable the Ctrl+B toggle (default: `true`).                 |
 | `--disable-commands <list>`             | Hide and disable specific slash commands in the TUI. Accepts a comma-separated list of command names (leading slash optional, case-insensitive). E.g. `--disable-commands="/cost,/eval,/model"`. |
@@ -82,6 +83,7 @@ $ docker agent run agent.yaml --hook-pre-tool-use "./scripts/validate.sh" --hook
 $ docker agent run agent.yaml "question 1" "question 2" "question 3"
 
 # Customize TUI display
+$ docker agent run agent.yaml --theme dracula
 $ docker agent run agent.yaml --app-name "My Project"
 $ docker agent run agent.yaml --sidebar=false
 $ docker agent run agent.yaml --disable-commands="/cost,/eval,/model"
