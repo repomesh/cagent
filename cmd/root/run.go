@@ -22,6 +22,7 @@ import (
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/input"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/profiling"
@@ -372,6 +373,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	wd, _ := os.Getwd()
+	var createdWorktree *worktree.Worktree
 	if f.worktree {
 		name := f.worktreeName
 		if name == worktreeAutoName {
@@ -388,6 +390,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				return err
 			}
 		}
+		createdWorktree = wt
 		wd = wt.Dir
 		f.runConfig.WorkingDir = wt.Dir
 		out.Println("Using git worktree: " + wt.Dir + " (branch " + wt.Branch + ")")
@@ -408,6 +411,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	defer cleanup()
 
 	if !useTUI {
+		// Non-interactive (--exec) runs never clean up the worktree: there
+		// is no safe moment to prompt, and silently discarding work would
+		// be surprising. The worktree is left in place for later inspection.
 		return f.handleExecMode(ctx, out, rt, sess, args)
 	}
 
@@ -433,7 +439,80 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		opts = append(opts, hookOpt)
 	}
 
-	return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(), opts...)
+	if err := runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(), opts...); err != nil {
+		// On a TUI error we deliberately leave the worktree in place rather
+		// than risk discarding work after an abnormal exit.
+		return err
+	}
+
+	// The interactive session is over. Offer to clean up the worktree we
+	// created for it (never a pre-existing one, since Create only makes new
+	// worktrees). Shut the session down first so tools release any file
+	// handles inside the worktree before we try to remove it; cleanup is
+	// idempotent, so the deferred call above becomes a no-op.
+	//
+	// A fresh context is used because the TUI may have exited via a
+	// canceled ctx (Ctrl-C), which would otherwise abort the prompt and
+	// the git commands.
+	if createdWorktree != nil {
+		cleanup()
+		f.cleanupWorktree(context.WithoutCancel(ctx), out, createdWorktree)
+	}
+	return nil
+}
+
+// cleanupWorktree removes a worktree created for an interactive run once it
+// ends. A clean worktree (no uncommitted changes, untracked files, or new
+// commits) is removed automatically. A dirty one is kept unless the user
+// explicitly asks to remove it, so work is never discarded silently.
+// Failures are reported but never abort the command — the run already
+// succeeded.
+func (f *runExecFlags) cleanupWorktree(ctx context.Context, out *cli.Printer, wt *worktree.Worktree) {
+	st, err := wt.Status(ctx)
+	if err != nil {
+		out.Println("Could not inspect git worktree " + wt.Dir + ": " + err.Error())
+		out.Println("Leaving it in place. Remove it manually with: git -C " + wt.SourceDir + " worktree remove " + wt.Dir)
+		return
+	}
+
+	if st.IsDirty() {
+		if !promptRemoveDirtyWorktree(ctx, out, wt, st) {
+			out.Println("Keeping git worktree " + wt.Dir + " (branch " + wt.Branch + ").")
+			return
+		}
+	}
+
+	if err := wt.Remove(ctx); err != nil {
+		out.Println("Failed to remove git worktree " + wt.Dir + ": " + err.Error())
+		return
+	}
+	out.Println("Removed git worktree " + wt.Dir + " (branch " + wt.Branch + ").")
+}
+
+// promptRemoveDirtyWorktree asks the user whether to discard a worktree that
+// still holds work. It defaults to keeping (returns false) on any non-yes
+// answer or read error, so uncommitted work is never lost by accident.
+func promptRemoveDirtyWorktree(ctx context.Context, out *cli.Printer, wt *worktree.Worktree, st worktree.Status) bool {
+	var held []string
+	if st.Modified {
+		held = append(held, "uncommitted changes")
+	}
+	if st.Untracked {
+		held = append(held, "untracked files")
+	}
+	if st.NewCommits {
+		held = append(held, "new commits")
+	}
+
+	out.Println("\nThe git worktree " + wt.Dir + " (branch " + wt.Branch + ") still has " + strings.Join(held, ", ") + ".")
+	out.Println("Remove it and discard this work? Keeping preserves the directory and branch so you can return later. (y/N):")
+
+	response, err := input.ReadLine(ctx, os.Stdin)
+	if err != nil {
+		return false
+	}
+	response = strings.TrimSpace(strings.ToLower(response))
+	return response == "y" || response == "yes"
 }
 
 // dispatchWorktreeCreate fires the worktree_create hooks of the agent the

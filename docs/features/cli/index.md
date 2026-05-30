@@ -47,7 +47,7 @@ $ docker agent run [config] [message...] [flags]
 | `--template <image>`                    | Template image for the sandbox (default: `docker/sandbox-templates:docker-agent`)                                                         |
 | `--sbx`                                 | Prefer the `sbx` CLI backend when available (default `true`; set `--sbx=false` to force `docker sandbox`)                                 |
 | `--no-kit`                              | Disable the [auto-kit]({{ '/configuration/sandbox/' | relative_url }}#auto-kit): do not stage skills or prompt files into the sandbox    |
-| `-w, --worktree [name]`                 | Run the agent in a fresh git worktree of the working directory, isolating its changes from your checkout. Optionally name it (`--worktree=my-feature`); otherwise a name is generated. Requires the working directory to be inside a git repository. Cannot be combined with `--remote` or `--sandbox`. |
+| `-w, --worktree [name]`                 | Run the agent in a fresh git worktree of the working directory, isolating its changes from your checkout. Optionally name it (`--worktree=my-feature`); otherwise a name is generated. Requires the working directory to be inside a git repository. Cannot be combined with `--remote` or `--sandbox`. When the session ends, a clean worktree is removed automatically; one with work prompts to keep or remove (never in `--exec`). |
 | `--working-dir <path>`                  | Set the working directory for the session (applies to tools and relative paths)                                                           |
 | `--env-from-file <path>`                | Load environment variables from file (repeatable)                                                                                         |
 | `--code-mode-tools`                     | Provide a single tool to call other tools via JavaScript (forces code-mode tools globally)                                                |
@@ -102,6 +102,14 @@ $ docker agent run agent.yaml -w "Refactor the auth package"
 # Give the worktree (and its branch) an explicit name
 $ docker agent run agent.yaml --worktree=auth-refactor
 ```
+
+When the interactive session ends, the worktree is cleaned up based on its state:
+
+- **Clean** (no uncommitted changes, untracked files, or new commits): the worktree and its branch are removed automatically.
+- **Has work** (uncommitted changes, untracked files, or new commits): you're prompted to keep or remove it. Keeping preserves the directory and branch so you can return later; removing discards the worktree, its branch, and all that work.
+- **Non-interactive runs** (`--exec`): the worktree is never cleaned up — it's left in place for inspection.
+
+A worktree is only ever removed if `--worktree` created it for this run; a pre-existing worktree is never touched.
 
 ### `docker agent run --exec`
 

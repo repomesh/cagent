@@ -38,6 +38,27 @@ type Worktree struct {
 	// original checkout, so setup hooks need this to copy untracked files
 	// (.env, local config) git won't carry over.
 	SourceDir string
+	// BaseCommit is the commit the worktree's branch was created at. It is
+	// used to detect commits added during the session (see [Status]).
+	BaseCommit string
+}
+
+// Status describes whether a worktree holds work that would be lost if it
+// were removed.
+type Status struct {
+	// Modified is true when tracked files have uncommitted changes.
+	Modified bool
+	// Untracked is true when the worktree contains untracked files.
+	Untracked bool
+	// NewCommits is true when commits were added since the worktree was
+	// created (HEAD moved away from [Worktree.BaseCommit]).
+	NewCommits bool
+}
+
+// IsDirty reports whether the worktree holds any work (uncommitted changes,
+// untracked files, or new commits) that removing it would discard.
+func (s Status) IsDirty() bool {
+	return s.Modified || s.Untracked || s.NewCommits
 }
 
 // Create creates a new git worktree for the repository containing dir and
@@ -74,7 +95,62 @@ func Create(ctx context.Context, dir, name string) (*Worktree, error) {
 		return nil, fmt.Errorf("creating git worktree: %w", err)
 	}
 
-	return &Worktree{Dir: dest, Branch: branch, Name: name, SourceDir: root}, nil
+	wt := &Worktree{Dir: dest, Branch: branch, Name: name, SourceDir: root}
+
+	// Record the branch point so [Status] can later tell whether the
+	// session added commits. A brand-new repository with no commits has no
+	// HEAD yet; leave BaseCommit empty in that case.
+	if head, err := gitOutput(ctx, dest, "rev-parse", "HEAD"); err == nil {
+		wt.BaseCommit = head
+	}
+
+	return wt, nil
+}
+
+// Status inspects the worktree and reports whether it holds uncommitted
+// changes, untracked files, or commits added since creation.
+func (wt *Worktree) Status(ctx context.Context) (Status, error) {
+	out, err := gitOutput(ctx, wt.Dir, "status", "--porcelain")
+	if err != nil {
+		return Status{}, fmt.Errorf("inspecting worktree: %w", err)
+	}
+
+	var st Status
+	for line := range strings.SplitSeq(out, "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "??") {
+			st.Untracked = true
+		} else {
+			st.Modified = true
+		}
+	}
+
+	// HEAD moving away from the recorded branch point means the session
+	// committed something. When BaseCommit is empty (worktree created in a
+	// repo without commits) any resolvable HEAD counts as new work.
+	if head, err := gitOutput(ctx, wt.Dir, "rev-parse", "HEAD"); err == nil {
+		st.NewCommits = head != wt.BaseCommit
+	}
+
+	return st, nil
+}
+
+// Remove deletes the worktree's directory and its branch, discarding any
+// uncommitted changes, untracked files, and commits. Callers decide when
+// removal is appropriate (e.g. only for worktrees they created, never
+// pre-existing ones).
+func (wt *Worktree) Remove(ctx context.Context) error {
+	if err := git(ctx, wt.SourceDir, "worktree", "remove", "--force", wt.Dir); err != nil {
+		return fmt.Errorf("removing git worktree: %w", err)
+	}
+	// The branch can only be deleted once the worktree no longer occupies it;
+	// -D discards unmerged commits, which is the intended "remove and forget".
+	if err := git(ctx, wt.SourceDir, "branch", "-D", wt.Branch); err != nil {
+		return fmt.Errorf("deleting worktree branch: %w", err)
+	}
+	return nil
 }
 
 // validateName rejects names that would escape the worktrees directory or
@@ -101,18 +177,15 @@ func validateName(name string) error {
 // repoRoot returns the worktree root of the git repository containing dir,
 // or [ErrNotGitRepository] when dir is not inside one.
 func repoRoot(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	out, err := gitOutput(ctx, dir, "rev-parse", "--show-toplevel")
+	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return "", ErrNotGitRepository
 		}
 		return "", err
 	}
-	return filepath.Clean(strings.TrimSpace(stdout.String())), nil
+	return filepath.Clean(out), nil
 }
 
 func git(ctx context.Context, dir string, args ...string) error {
@@ -126,4 +199,19 @@ func git(ctx context.Context, dir string, args ...string) error {
 		return err
 	}
 	return nil
+}
+
+// gitOutput runs a git command in dir and returns its trimmed stdout.
+func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("%w: %s", err, msg)
+		}
+		return "", err
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }

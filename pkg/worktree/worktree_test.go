@@ -33,7 +33,7 @@ func TestCreateWorktree(t *testing.T) {
 	assert.FileExists(t, filepath.Join(wt.Dir, "a.txt"))
 
 	// The checked-out branch must match the one reported by the worktree.
-	out := gitOutput(t, wt.Dir, "rev-parse", "--abbrev-ref", "HEAD")
+	out := gitOut(t, wt.Dir, "rev-parse", "--abbrev-ref", "HEAD")
 	assert.Equal(t, wt.Branch, out)
 }
 
@@ -104,6 +104,110 @@ func TestCreateRejectsDuplicateName(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidName)
 }
 
+func TestStatusClean(t *testing.T) {
+	dir := bootstrapRepo(t)
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	wt, err := Create(t.Context(), dir, "clean")
+	require.NoError(t, err)
+
+	st, err := wt.Status(t.Context())
+	require.NoError(t, err)
+	assert.False(t, st.IsDirty())
+	assert.False(t, st.Modified)
+	assert.False(t, st.Untracked)
+	assert.False(t, st.NewCommits)
+}
+
+func TestStatusDetectsUntracked(t *testing.T) {
+	dir := bootstrapRepo(t)
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	wt, err := Create(t.Context(), dir, "untracked")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Dir, "new.txt"), []byte("x"), 0o644))
+
+	st, err := wt.Status(t.Context())
+	require.NoError(t, err)
+	assert.True(t, st.IsDirty())
+	assert.True(t, st.Untracked)
+	assert.False(t, st.Modified)
+	assert.False(t, st.NewCommits)
+}
+
+func TestStatusDetectsModified(t *testing.T) {
+	dir := bootstrapRepo(t)
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	wt, err := Create(t.Context(), dir, "modified")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Dir, "a.txt"), []byte("changed"), 0o644))
+
+	st, err := wt.Status(t.Context())
+	require.NoError(t, err)
+	assert.True(t, st.IsDirty())
+	assert.True(t, st.Modified)
+	assert.False(t, st.Untracked)
+	assert.False(t, st.NewCommits)
+}
+
+func TestStatusDetectsNewCommits(t *testing.T) {
+	dir := bootstrapRepo(t)
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	wt, err := Create(t.Context(), dir, "committed")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Dir, "a.txt"), []byte("changed"), 0o644))
+	runGit(t, wt.Dir, "commit", "-am", "work")
+
+	st, err := wt.Status(t.Context())
+	require.NoError(t, err)
+	assert.True(t, st.IsDirty())
+	assert.True(t, st.NewCommits)
+	// A committed change leaves a clean tree.
+	assert.False(t, st.Modified)
+	assert.False(t, st.Untracked)
+}
+
+func TestRemove(t *testing.T) {
+	dir := bootstrapRepo(t)
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	wt, err := Create(t.Context(), dir, "gone")
+	require.NoError(t, err)
+	require.DirExists(t, wt.Dir)
+
+	require.NoError(t, wt.Remove(t.Context()))
+	assert.NoDirExists(t, wt.Dir)
+
+	// The branch must be gone too.
+	branches := gitOut(t, dir, "branch", "--list", wt.Branch)
+	assert.Empty(t, branches)
+}
+
+func TestRemoveDiscardsDirtyWork(t *testing.T) {
+	dir := bootstrapRepo(t)
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	wt, err := Create(t.Context(), dir, "dirty")
+	require.NoError(t, err)
+	// Uncommitted change + untracked file + a new commit: removal must
+	// still succeed and wipe everything.
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Dir, "a.txt"), []byte("changed"), 0o644))
+	runGit(t, wt.Dir, "commit", "-am", "work")
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Dir, "untracked.txt"), []byte("x"), 0o644))
+
+	require.NoError(t, wt.Remove(t.Context()))
+	assert.NoDirExists(t, wt.Dir)
+}
+
 func bootstrapRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -127,7 +231,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 	require.NoError(t, err, string(out))
 }
 
-func gitOutput(t *testing.T, dir string, args ...string) string {
+func gitOut(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", dir}, args...)...)
 	out, err := cmd.Output()
