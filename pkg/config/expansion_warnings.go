@@ -27,6 +27,10 @@ var jsEnvRef = regexp.MustCompile(`\$\{\s*env\.[A-Za-z_][A-Za-z0-9_]*`)
 // trailing the identifier. Used to flag occurrences in shell-style fields,
 // where ScriptShellToolConfig and other path-like targets only call
 // os.Expand (no JS evaluator), so the literal `${env.X}` is passed through.
+//
+// Kept in sync with jsEnvRef in pkg/path/expand.go, which uses the same
+// pattern to normalize `${env.X}` to `${X}` in path fields. The pattern is
+// duplicated rather than shared to avoid an import cycle.
 var jsEnvRefStrict = regexp.MustCompile(`\$\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}`)
 
 // warnExpansionMismatches scans a loaded config for fields whose contents use

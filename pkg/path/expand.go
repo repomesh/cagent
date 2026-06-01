@@ -13,6 +13,11 @@ import (
 // Only the plain `${env.VAR}` reference is recognized; richer JS expressions
 // such as `${env.VAR || 'default'}` are not evaluated in path fields (that
 // would require the goja engine, which pkg/path cannot import).
+//
+// Kept in sync with jsEnvRefStrict in pkg/config/expansion_warnings.go: that
+// helper warns about the same `${env.VAR}` form in fields that, unlike paths,
+// cannot resolve it. The pattern is duplicated rather than shared to avoid an
+// import cycle (pkg/environment already imports pkg/path).
 var jsEnvRef = regexp.MustCompile(`\$\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}`)
 
 // ExpandPath expands shell-like patterns in a file path:
