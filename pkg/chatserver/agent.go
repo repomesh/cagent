@@ -157,8 +157,11 @@ func convertParts(in []ContentPart) []chat.MessagePart {
 // appendLatestUser walks msgs from the end and appends only the last
 // user-role message into sess. Used by conversation continuation, where
 // the session already contains the full prior history and we just need
-// to inject what the client just said.
-func appendLatestUser(sess *session.Session, msgs []ChatCompletionMessage) {
+// to inject what the client just said. It returns true when a user
+// message was found and appended, and false when the request carried no
+// usable user message (so the caller can reject it instead of replaying
+// the prior turn).
+func appendLatestUser(sess *session.Session, msgs []ChatCompletionMessage) bool {
 	for _, m := range slices.Backward(msgs) {
 		role := strings.ToLower(strings.TrimSpace(m.Role))
 		// Treat any non-system/assistant/tool role as user (matches
@@ -173,15 +176,16 @@ func appendLatestUser(sess *session.Session, msgs []ChatCompletionMessage) {
 				Content:      m.Content,
 				MultiContent: parts,
 			}})
-			return
+			return true
 		}
 		content := strings.TrimSpace(m.Content)
 		if content == "" {
 			continue
 		}
 		sess.AddMessage(session.UserMessage(m.Content))
-		return
+		return true
 	}
+	return false
 }
 
 // agentEmit collects the side-effect callbacks invoked by runAgentLoop as

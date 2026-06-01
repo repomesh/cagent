@@ -37,6 +37,70 @@ func BranchSession(parent *Session, branchAtPosition int) (*Session, error) {
 	return branched, nil
 }
 
+// Clone returns a deep copy of the session that is safe to mutate without
+// affecting the original. Conversation items (messages and sub-sessions)
+// are deep-cloned so the two sessions share no mutable state; scalar and
+// configuration fields are copied verbatim so the clone runs identically.
+// Unlike BranchSession, Clone keeps the original ID, message IDs, and the
+// full message history, making it suitable for transactional "work on a
+// copy, commit on success" flows.
+func (s *Session) Clone() *Session {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	clone := &Session{
+		ID:                      s.ID,
+		InputID:                 s.InputID,
+		Title:                   s.Title,
+		Evals:                   s.Evals,
+		EvalResult:              s.EvalResult,
+		CreatedAt:               s.CreatedAt,
+		ToolsApproved:           s.ToolsApproved,
+		NonInteractive:          s.NonInteractive,
+		HideToolResults:         s.HideToolResults,
+		WorkingDir:              s.WorkingDir,
+		SendUserMessage:         s.SendUserMessage,
+		MaxIterations:           s.MaxIterations,
+		MaxConsecutiveToolCalls: s.MaxConsecutiveToolCalls,
+		MaxOldToolCallTokens:    s.MaxOldToolCallTokens,
+		Starred:                 s.Starred,
+		InputTokens:             s.InputTokens,
+		OutputTokens:            s.OutputTokens,
+		Cost:                    s.Cost,
+		Permissions:             clonePermissionsConfig(s.Permissions),
+		AgentModelOverrides:     cloneStringMap(s.AgentModelOverrides),
+		CustomModelsUsed:        cloneStringSlice(s.CustomModelsUsed),
+		AttachedFiles:           cloneStringSlice(s.AttachedFiles),
+		ExcludedTools:           cloneStringSlice(s.ExcludedTools),
+		AgentName:               s.AgentName,
+		ParentID:                s.ParentID,
+		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
+	}
+
+	clone.Messages = make([]Item, 0, len(s.Messages))
+	for _, item := range s.Messages {
+		switch {
+		case item.Message != nil:
+			clone.Messages = append(clone.Messages, Item{Message: cloneMessage(item.Message)})
+		case item.SubSession != nil:
+			sub, err := cloneSubSession(item.SubSession)
+			if err != nil {
+				continue
+			}
+			clone.Messages = append(clone.Messages, Item{SubSession: sub})
+		default:
+			// Summary/Cost/FirstKeptEntry are value fields; a shallow
+			// copy of the item is already a faithful clone.
+			clone.Messages = append(clone.Messages, item)
+		}
+	}
+	return clone
+}
+
 func cloneSessionItem(item Item) (Item, error) {
 	switch {
 	case item.Message != nil:
