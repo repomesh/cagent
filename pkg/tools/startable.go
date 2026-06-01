@@ -31,6 +31,35 @@ func DescribeToolSet(ts ToolSet) string {
 	return fmt.Sprintf("%T", ts)
 }
 
+// failureStreak implements once-per-streak warning de-duplication. A streak
+// begins on the first fail() and ends on reset() (a success or a Stop).
+// shouldReport() returns true exactly once per streak — for the first failure —
+// so repeated failures don't re-queue duplicate warnings.
+type failureStreak struct {
+	active  bool // true between the first failure and the next reset
+	pending bool // true if the current streak's first failure is unreported
+}
+
+func (f *failureStreak) fail() {
+	if !f.active {
+		f.active = true
+		f.pending = true
+	}
+}
+
+func (f *failureStreak) reset() {
+	f.active = false
+	f.pending = false
+}
+
+func (f *failureStreak) shouldReport() bool {
+	if !f.pending {
+		return false
+	}
+	f.pending = false
+	return true
+}
+
 // StartableToolSet wraps a ToolSet with lazy, single-flight start semantics.
 // This is the canonical way to manage toolset lifecycle.
 //
@@ -45,13 +74,10 @@ func DescribeToolSet(ts ToolSet) string {
 type StartableToolSet struct {
 	ToolSet
 
-	mu              sync.Mutex
-	started         bool
-	inFailureStreak bool // true between the first failed Start and the next successful Start (or Stop)
-	pendingWarning  bool // true if the current streak's first failure has not yet been reported
-
-	inListFailureStreak bool // true between the first failed Tools() and the next successful Tools() (or Stop)
-	listPendingWarning  bool // true if the current list-failure streak's first failure has not yet been reported
+	mu          sync.Mutex
+	started     bool
+	startStreak failureStreak // Start() failures
+	listStreak  failureStreak // Tools() listing failures
 }
 
 // NewStartable wraps a ToolSet for lazy initialization.
@@ -81,12 +107,7 @@ func (s *StartableToolSet) Start(ctx context.Context) error {
 
 	if startable, ok := As[Startable](s.ToolSet); ok {
 		if err := startable.Start(ctx); err != nil {
-			// Queue a warning ONLY on the first failure of a streak so
-			// repeated retries don't re-queue duplicate warnings.
-			if !s.inFailureStreak {
-				s.inFailureStreak = true
-				s.pendingWarning = true
-			}
+			s.startStreak.fail()
 			return err
 		}
 	}
@@ -94,8 +115,7 @@ func (s *StartableToolSet) Start(ctx context.Context) error {
 	// Successful start: clear the streak so any future failure is reported
 	// as fresh. This is the recovery path — it is intentionally silent.
 	s.started = true
-	s.inFailureStreak = false
-	s.pendingWarning = false
+	s.startStreak.reset()
 	return nil
 }
 
@@ -109,17 +129,11 @@ func (s *StartableToolSet) Tools(ctx context.Context) ([]Tool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err != nil {
-		// Queue a warning ONLY on the first failure of a streak so
-		// repeated retries don't re-queue duplicate warnings.
-		if !s.inListFailureStreak {
-			s.inListFailureStreak = true
-			s.listPendingWarning = true
-		}
+		s.listStreak.fail()
 		return nil, err
 	}
 
-	s.inListFailureStreak = false
-	s.listPendingWarning = false
+	s.listStreak.reset()
 	return ta, nil
 }
 
@@ -130,10 +144,8 @@ func (s *StartableToolSet) Stop(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	s.started = false
-	s.inFailureStreak = false
-	s.pendingWarning = false
-	s.inListFailureStreak = false
-	s.listPendingWarning = false
+	s.startStreak.reset()
+	s.listStreak.reset()
 	if startable, ok := As[Startable](s.ToolSet); ok {
 		return startable.Stop(ctx)
 	}
@@ -147,11 +159,7 @@ func (s *StartableToolSet) Stop(ctx context.Context) error {
 func (s *StartableToolSet) ShouldReportFailure() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.pendingWarning {
-		return false
-	}
-	s.pendingWarning = false
-	return true
+	return s.startStreak.shouldReport()
 }
 
 // ShouldReportListFailure returns true exactly once per Tools() listing-failure
@@ -161,11 +169,7 @@ func (s *StartableToolSet) ShouldReportFailure() bool {
 func (s *StartableToolSet) ShouldReportListFailure() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.listPendingWarning {
-		return false
-	}
-	s.listPendingWarning = false
-	return true
+	return s.listStreak.shouldReport()
 }
 
 // Unwrap returns the underlying ToolSet.
