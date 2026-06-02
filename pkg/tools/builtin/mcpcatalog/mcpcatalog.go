@@ -8,8 +8,9 @@
 //     curated catalog (id / title / description / category / tags).
 //   - list_remote_mcp_servers   — show currently enabled servers.
 //   - enable_remote_mcp_server  — instantiate an *mcp.Toolset for a server
-//     (defers the actual TCP connect / OAuth handshake until Tools() is
-//     next enumerated).
+//     and synchronously drive its connect (including any required OAuth
+//     handshake) so the model gets a deterministic success / declined /
+//     transport-error result in the same turn.
 //   - disable_remote_mcp_server — stop the toolset and remove its tools.
 //     Only exposed once at least one server is enabled.
 //   - reset_remote_mcp_server_auth — drop persisted OAuth credentials so
@@ -26,11 +27,20 @@
 // (the primary interface) work fine; the prompt feature would need a
 // separate plumb-through interface to walk into container toolsets.
 //
-// On-demand semantics: the expensive parts — DNS, TCP, MCP handshake,
-// OAuth flow — happen the first time Tools() is called for a freshly
-// enabled server. The handshake runs through the same lifecycle.Supervisor
-// the YAML-declared `mcp.remote` toolset uses, so OAuth elicitation and
-// tool-list-change notifications behave identically.
+// On-demand semantics: DNS, TCP, MCP handshake and any OAuth flow happen
+// synchronously inside enable_remote_mcp_server's handler. Tool calls run
+// with an interactive context, so OAuth elicitation surfaces a dialog and
+// blocks until the user responds; the handshake runs through the same
+// lifecycle.Supervisor the YAML-declared `mcp.remote` toolset uses, so
+// elicitation and tool-list-change notifications behave identically. The
+// handler returns a deterministic success / declined / auth-required /
+// transport-error result so the model can continue with the user's
+// original request in the *same* turn (success) or recover appropriately
+// (failure) — no second user message required. Tools() additionally
+// retries any toolset left in the "deferred — auth required" state, which
+// keeps the startup non-interactive probe (mcp.WithoutInteractivePrompts)
+// from hanging while still surfacing OAuth dialogs on the first
+// interactive turn.
 package mcpcatalog
 
 import (
@@ -95,6 +105,14 @@ type Toolset struct {
 	// Defaults to mcp.RemoveOAuthToken; tests inject a stub to avoid
 	// touching the OS keyring.
 	removeOAuthToken func(resourceURL string) error
+
+	// startToolset drives the inner mcp.Toolset connect (including any
+	// OAuth handshake) synchronously from handleEnable so the model
+	// gets a deterministic success/decline/error result in the same
+	// turn. Defaults to (*tools.StartableToolSet).Start; tests inject a
+	// stub to exercise the success / declined / auth-required / errored
+	// branches without standing up a real MCP server.
+	startToolset func(ctx context.Context, ts *tools.StartableToolSet) error
 }
 
 var (
@@ -150,6 +168,9 @@ func New(envProvider environment.Provider, opts ...Option) *Toolset {
 		env:              envProvider,
 		enabled:          make(map[string]*tools.StartableToolSet),
 		removeOAuthToken: mcp.RemoveOAuthToken,
+		startToolset: func(ctx context.Context, ts *tools.StartableToolSet) error {
+			return ts.Start(ctx)
+		},
 	}
 	t.filterCatalog(cfg.allowedServers, cfg.blockedServers)
 	return t
@@ -251,18 +272,26 @@ Workflow:
      Use any term related to the user's intent ("notion", "stripe",
      "docs", "search", "browser", …).
   2. Call ` + ToolNameEnable + ` with the server's "id" to activate it.
-     The server's tools appear in your set on the *next* turn; the host
-     handles any required connection setup. For api_key servers, make
-     sure the listed env var(s) are set in the user's shell BEFORE
-     enabling, otherwise the server will refuse the connection.
-  3. On your NEXT turn (once the activated server's tools appear in
-     your set), go straight to the user's ORIGINAL request using those
-     tools. Do NOT stop and ask the user to repeat themselves; do NOT
-     narrate connection setup. Enabling a server is a means to an end,
-     not a stopping point.
-  4. Call ` + ToolNameDisable + ` to remove a server when no longer needed.
+     This call BLOCKS until the connection (and any required OAuth
+     handshake) completes, so by the time it returns you have a
+     deterministic answer:
+       - SUCCESS — the server's tools (names prefixed with the server's
+         id and an underscore) are live. Continue with the user's
+         ORIGINAL request using them right away. Do NOT stop, do NOT
+         ask the user to repeat themselves, do NOT narrate connection
+         setup. Enabling a server is a means to an end, not a stopping
+         point.
+       - ERROR — the result text tells you exactly why (user declined
+         the authorization dialog, missing env var, server refused).
+         Act on that specific reason; do NOT pretend the server is
+         connected and do NOT call any "<id>_..." tools (there are
+         none).
+     For api_key servers, make sure the listed env var(s) are set in
+     the user's shell BEFORE enabling, otherwise the enable will fail
+     with a missing-env warning.
+  3. Call ` + ToolNameDisable + ` to remove a server when no longer needed.
      This tool only appears once at least one server is enabled.
-  5. If a previously enabled server starts rejecting requests
+  4. If a previously enabled server starts rejecting requests
      (credentials revoked, scopes changed, signed in to the wrong
      account), call ` + ToolNameResetAuth + ` to clear any persisted
      credentials so the next enable starts fresh. This tool also only
@@ -418,7 +447,7 @@ func (t *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 		{
 			Name:         ToolNameEnable,
 			Category:     "mcp_catalog",
-			Description:  "Activate a remote MCP server from the catalog by id. Connection setup is deferred until the host next enumerates tools; the server's tools become available on the next turn.",
+			Description:  "Activate a remote MCP server from the catalog by id. Blocks until the connection (and any required OAuth handshake) completes; on success the server's tools are immediately available and you should continue with the user's original request using them.",
 			Parameters:   tools.MustSchemaFor[EnableArgs](),
 			OutputSchema: tools.MustSchemaFor[string](),
 			Handler:      tools.NewHandler(t.handleEnable),
@@ -660,11 +689,13 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		return tools.ResultError(fmt.Sprintf("unknown server id %q (use %s first to discover available ids)", id, ToolNameSearch)), nil
 	}
 
-	// Pre-flight: warn (don't block) if an api_key server is missing its env var.
-	// We do not block because the user may set the variable later, or rely on
-	// the model to surface the error from the first tool call.
-	// Perform these slow external calls BEFORE acquiring the lock — server data
-	// is immutable (from t.byID), no mutex protection needed here.
+	// Pre-flight: block if an api_key server is missing its env var. The
+	// catalog promises enable returns a deterministic answer in the same
+	// turn, so we cannot register a toolset we already know will be
+	// rejected on the first request. The model is told to ask the user to
+	// set the variable and retry.
+	// Perform these slow external calls BEFORE acquiring the lock — server
+	// data is immutable (from t.byID), no mutex protection needed here.
 	missing := t.missingAPIKeyEnv(ctx, server)
 	headers := t.expandHeaders(ctx, server.Headers)
 
@@ -677,11 +708,29 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 			missing = append(missing, env)
 		}
 	}
+	if len(missing) > 0 {
+		return tools.ResultError(fmt.Sprintf(
+			"cannot enable %q: the following env var(s) are NOT set: %s. "+
+				"Ask the user to set them in their shell, then call %s for this id again. "+
+				"Do NOT pretend the server is connected — no tools were activated.",
+			id, strings.Join(missing, ", "), ToolNameEnable)), nil
+	}
 
 	t.mu.Lock()
-	if _, exists := t.enabled[id]; exists {
+	if existing, exists := t.enabled[id]; exists {
+		started := existing.IsStarted()
 		t.mu.Unlock()
-		return tools.ResultSuccess(fmt.Sprintf("server %q is already enabled", id)), nil
+		// Idempotent re-enable. If the toolset is already started, its
+		// tools are live; otherwise the previous enable hit a deferred-
+		// auth fallback and the user can retry via disable+enable.
+		if started {
+			return tools.ResultSuccess(fmt.Sprintf(
+				"server %q is already enabled and connected. Its tools (names starting with %q) are live; proceed with the user's original request using them.",
+				id, id+"_")), nil
+		}
+		return tools.ResultSuccess(fmt.Sprintf(
+			"server %q is already enabled but not yet connected (likely waiting on user authorization). If the user has just authorized, retry their original request; otherwise tell them the connection still needs authorization.",
+			id)), nil
 	}
 
 	// Create the MCP toolset with the pre-computed headers.
@@ -717,27 +766,73 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 	notify := t.toolsChangedHandler
 	t.mu.Unlock()
 
-	// Notify the runtime that the meta-tool surface itself changed.
+	// Notify the runtime that the meta-tool surface changed (disable /
+	// reset_auth become visible the moment the entry lands in t.enabled).
+	// Done BEFORE the synchronous Start so the TUI can reflect the
+	// pending server while the (potentially slow) OAuth dialog is open.
 	if notify != nil {
 		notify()
 	}
 
-	msg := strings.Builder{}
-	fmt.Fprintf(&msg, "enable requested for %q (%s). The host will surface any required authorization dialog. On your next turn:\n", id, server.Title)
-	fmt.Fprintf(&msg, "  - if tools whose names start with %q appear in your available tools, proceed with the user's original request using them.\n", id+"_")
-	fmt.Fprintf(&msg, "  - if NO such tools appear, the user dismissed the authorization dialog. Do NOT claim the server is connected and do NOT ask the user for workspace details to use \"the available tools\" (there are none). Tell the user the request needs them to authorize the connection. If the user then re-asks for the same thing (or says \"yes\", \"retry\", \"try again\", etc.), call %s for this id again to surface a fresh authorization dialog.\n", ToolNameEnable)
-	fmt.Fprintf(&msg, "endpoint: %s\n", server.URL)
-	// Only surface unresolved env vars — the model can act on those by
-	// asking the user to set the variable and retrying. Every other auth
-	// detail (OAuth flow type, redirect URI, token persistence) is the
-	// host's concern and is intentionally not exposed to the model; the
-	// previous wording leaked "auth: OAuth — elicited on the next turn"
-	// and led the model to stop and ask the user to repeat themselves.
-	if len(missing) > 0 {
-		fmt.Fprintf(&msg, "WARNING: the following env var(s) are NOT set: %s. Ask the user to set them, then call %s and %s for this id again, otherwise tool calls will fail.\n",
-			strings.Join(missing, ", "), ToolNameDisable, ToolNameEnable)
+	// Drive the inner toolset's connect (and any OAuth handshake)
+	// synchronously so the model gets a deterministic answer in the same
+	// turn. Tool handlers run with an interactive context, so OAuth
+	// elicitation surfaces a dialog and blocks until the user responds.
+	//
+	// This is what makes a freshly-enabled server's tools usable on the
+	// VERY NEXT model response within the same RunStream: by the time
+	// handleEnable returns, the toolset is started, the runtime's next
+	// getTools() picks up its tools, and the model can call them in its
+	// follow-up turn — no second user message required.
+	if err := t.startToolset(ctx, wrapped); err != nil {
+		return t.handleEnableStartError(ctx, id, server, wrapped, err), nil
 	}
-	return tools.ResultSuccess(msg.String()), nil
+
+	return tools.ResultSuccess(fmt.Sprintf(
+		"enabled %q (%s). Its tools (names starting with %q) are now active. Proceed with the user's original request using them right away; do not stop to ask for confirmation.",
+		id, server.Title, id+"_")), nil
+}
+
+// handleEnableStartError translates a failed Start() into a model-facing
+// result and, where appropriate, rolls back the t.enabled bookkeeping so
+// the next Tools() enumeration doesn't replay the same failing handshake.
+// The three branches mirror the cases the model needs to distinguish:
+//
+//   - OAuthDeclined → user actively dismissed the dialog. Drop the entry
+//     (mirrors the existing Tools() handling) and tell the model to ask
+//     before retrying.
+//   - AuthorizationRequired → defensive fallback for the (rare) case where
+//     the elicitation bridge isn't wired up yet. Keep the entry so the
+//     next interactive Tools() call can surface the OAuth dialog, and
+//     fall back to the legacy "tools appear next turn" wording.
+//   - any other error (transport, server refused, context cancelled) →
+//     drop the entry and surface the underlying message so the model can
+//     decide what to tell the user.
+func (t *Toolset) handleEnableStartError(ctx context.Context, id string, server Server, wrapped *tools.StartableToolSet, err error) *tools.ToolCallResult {
+	switch {
+	case mcp.IsOAuthDeclined(err):
+		t.disableAfterDecline(ctx, id, wrapped)
+		return tools.ResultError(fmt.Sprintf(
+			"user declined the authorization dialog for %q (%s). No tools were activated — do NOT claim the server is connected and do NOT call any %q tools. Tell the user the request needs them to authorize the connection. If the user then says \"yes\", \"retry\", or re-asks for the same thing, call %s for %q again to surface a fresh authorization dialog.",
+			id, server.Title, id+"_", ToolNameEnable, id))
+	case mcp.IsAuthorizationRequired(err):
+		slog.DebugContext(ctx, "Remote MCP server enable deferred: authorization required, leaving in enabled set for next interactive Tools() to retry",
+			"id", id, "error", err)
+		return tools.ResultSuccess(fmt.Sprintf(
+			"enable requested for %q (%s); authorization is required and the host will surface the dialog. On your next turn, if tools whose names start with %q appear in your available tools, proceed with the user's original request using them. If NO such tools appear, the user dismissed the dialog — tell them the request needs them to authorize, and call %s for %q again if they want to retry.",
+			id, server.Title, id+"_", ToolNameEnable, id))
+	case errors.Is(err, context.Canceled):
+		// Don't roll back: cancellation is the runtime tearing down the
+		// turn (Ctrl+C, parent cancellation). The cleanup paths upstream
+		// (Toolset.Stop) own the lifecycle here.
+		return tools.ResultError(fmt.Sprintf(
+			"enable cancelled for %q before the connection completed.", id))
+	default:
+		t.disableAfterDecline(ctx, id, wrapped)
+		return tools.ResultError(fmt.Sprintf(
+			"failed to connect to %q (%s): %v. No tools were activated — do NOT claim the server is connected. Report the failure to the user; they may need to fix their network or, if the server's credentials changed, call %s for %q before re-enabling.",
+			id, server.Title, err, ToolNameResetAuth, id))
+	}
 }
 
 // expandHeaders resolves ${VAR} placeholders in catalog headers against the
