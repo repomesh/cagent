@@ -376,9 +376,9 @@ func (s *server) handleChatCompletions(c echo.Context) error {
 	}
 	defer s.conversationLocks.release(conversationID)
 
-	sess := s.resolveSession(conversationID, req.Messages)
-	if sess == nil {
-		return writeError(c, http.StatusBadRequest, "no user message provided")
+	sess, err := s.resolveSession(conversationID, req.Messages)
+	if err != nil {
+		return writeError(c, http.StatusBadRequest, err.Error())
 	}
 
 	agentName := s.policy.pick(req.Model)
@@ -396,45 +396,68 @@ func (s *server) handleChatCompletions(c echo.Context) error {
 	}
 
 	if req.Stream {
-		err := s.streamChatCompletion(c, rt, sess, model, req.StreamOptions.IncludeUsage)
-		s.maybeStoreConversation(conversationID, sess)
-		return err
+		runErr := s.streamChatCompletion(c, rt, sess, model, req.StreamOptions.IncludeUsage)
+		s.commitConversation(conversationID, sess, runErr)
+		// The agent run outcome is reported in-band (SSE error event for
+		// streams, JSON error envelope otherwise), so the HTTP handler
+		// itself always succeeds once we've started writing the response.
+		return nil
 	}
-	err = s.chatCompletion(c, rt, sess, model)
-	s.maybeStoreConversation(conversationID, sess)
-	return err
+	runErr := s.chatCompletion(c, rt, sess, model)
+	s.commitConversation(conversationID, sess, runErr)
+	return nil
 }
 
 // resolveSession decides whether to start fresh or continue an existing
 // conversation. When X-Conversation-Id is set and we have an existing
-// session for it, we append only the latest user message from the
-// request (the prior history is already in the session). Otherwise we
-// build a brand-new session from the full request history.
-func (s *server) resolveSession(id string, msgs []ChatCompletionMessage) *session.Session {
+// session for it, we work on a deep copy and append only the latest user
+// message from the request (the prior history is already in the
+// session). The cached session is left untouched until the run succeeds
+// (see commitConversation), so a failed turn never advances the
+// canonical conversation state. Otherwise we build a brand-new session
+// from the full request history.
+//
+// Returns an error when the request carries no usable user message, in
+// which case the caller rejects the request rather than replaying the
+// prior turn.
+func (s *server) resolveSession(id string, msgs []ChatCompletionMessage) (*session.Session, error) {
 	if id != "" {
 		if existing := s.conversations.Get(id); existing != nil {
-			appendLatestUser(existing, msgs)
-			return existing
+			working := existing.Clone()
+			if !appendLatestUser(working, msgs) {
+				return nil, errors.New("no user message provided")
+			}
+			return working, nil
 		}
 	}
-	return buildSession(msgs)
+	sess := buildSession(msgs)
+	if sess == nil {
+		return nil, errors.New("no user message provided")
+	}
+	return sess, nil
 }
 
-// maybeStoreConversation inserts the session into the cache after a
-// run. We always insert to handle the case where the conversation was
-// evicted while the request was in flight.
-func (s *server) maybeStoreConversation(id string, sess *session.Session) {
-	if id == "" || s.conversations == nil {
+// commitConversation stores the session into the cache after a run, but
+// only when the run succeeded. A failed turn must not advance the cached
+// conversation state: the working session was a clone, so leaving the
+// cache untouched means a retry runs against the last successful state.
+//
+// We always Put on success, even for existing conversations, to handle
+// the case where the conversation was evicted while the request was in
+// flight. Put refreshes the lastUsed timestamp and stores the updated
+// session.
+func (s *server) commitConversation(id string, sess *session.Session, runErr error) {
+	if id == "" || s.conversations == nil || runErr != nil {
 		return
 	}
-	// Always Put, even for existing conversations, to handle eviction
-	// during request processing. Put refreshes the lastUsed timestamp
-	// and ensures the updated session is stored.
 	s.conversations.Put(id, sess)
 }
 
 // chatCompletion runs the agent to completion and replies with one
-// non-streaming OpenAI ChatCompletion object.
+// non-streaming OpenAI ChatCompletion object. It returns the agent run
+// error (nil on success) so the caller can decide whether to commit the
+// conversation; the HTTP response — success or error envelope — is always
+// written here.
 func (s *server) chatCompletion(c echo.Context, rt runtime.Runtime, sess *session.Session, model string) error {
 	var toolCalls []ToolCallReference
 	emit := agentEmit{
@@ -443,7 +466,8 @@ func (s *server) chatCompletion(c echo.Context, rt runtime.Runtime, sess *sessio
 		},
 	}
 	if err := runAgentLoop(c.Request().Context(), rt, sess, emit); err != nil {
-		return writeError(c, http.StatusInternalServerError, fmt.Sprintf("agent execution failed: %v", err))
+		_ = writeError(c, http.StatusInternalServerError, fmt.Sprintf("agent execution failed: %v", err))
+		return err
 	}
 
 	return c.JSON(http.StatusOK, ChatCompletionResponse{
@@ -467,10 +491,11 @@ func (s *server) chatCompletion(c echo.Context, rt runtime.Runtime, sess *sessio
 // streamChatCompletion runs the agent and streams its response back to the
 // client as Server-Sent Events in OpenAI's chat.completion.chunk format.
 //
-// The error return is reserved for future use (e.g. surfacing a write
-// failure to the request logger). Today every error is converted into an
-// in-band SSE error event, so the function always returns nil.
-func (s *server) streamChatCompletion(c echo.Context, rt runtime.Runtime, sess *session.Session, model string, includeUsage bool) error { //nolint:unparam // see comment
+// It returns the agent run error (nil on success) so the caller can decide
+// whether to commit the conversation. The error is *also* reported in-band
+// as an SSE error event, so the HTTP handler itself still returns nil; the
+// return value here exists purely to drive the commit decision.
+func (s *server) streamChatCompletion(c echo.Context, rt runtime.Runtime, sess *session.Session, model string, includeUsage bool) error {
 	stream := newSSEStream(c.Response(), newChatID(), model)
 
 	// Initial "role: assistant" delta so clients can start rendering.
@@ -510,7 +535,7 @@ func (s *server) streamChatCompletion(c echo.Context, rt runtime.Runtime, sess *
 		}
 	}
 	stream.done()
-	return nil
+	return runErr
 }
 
 // sseStream writes OpenAI-style chat.completion.chunk events to a response.

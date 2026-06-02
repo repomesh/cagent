@@ -70,21 +70,23 @@ func TestConversationStore_Delete(t *testing.T) {
 
 func TestAppendLatestUser(t *testing.T) {
 	sess := session.New()
-	appendLatestUser(sess, []ChatCompletionMessage{
+	appended := appendLatestUser(sess, []ChatCompletionMessage{
 		{Role: "system", Content: "be helpful"},
 		{Role: "user", Content: "first"},
 		{Role: "assistant", Content: "ack"},
 		{Role: "user", Content: "second"},
 		{Role: "tool", Content: "tool result", ToolCallID: "x"},
 	})
+	assert.True(t, appended)
 	assert.Equal(t, "second", sess.GetLastUserMessageContent())
 }
 
 func TestAppendLatestUser_NoUserMessage(t *testing.T) {
 	sess := session.New()
-	appendLatestUser(sess, []ChatCompletionMessage{
+	appended := appendLatestUser(sess, []ChatCompletionMessage{
 		{Role: "system", Content: "be helpful"},
 		{Role: "assistant", Content: "ack"},
 	})
+	assert.False(t, appended)
 	assert.Empty(t, sess.GetLastUserMessageContent())
 }

@@ -37,6 +37,68 @@ func BranchSession(parent *Session, branchAtPosition int) (*Session, error) {
 	return branched, nil
 }
 
+// Clone returns a deep copy of the session that is safe to mutate without
+// affecting the original. Conversation items (messages and sub-sessions)
+// are deep-cloned so the two sessions share no mutable state; scalar and
+// configuration fields are copied verbatim so the clone runs identically.
+// Unlike BranchSession, Clone keeps the original ID, message IDs, and the
+// full message history, making it suitable for transactional "work on a
+// copy, commit on success" flows.
+func (s *Session) Clone() *Session {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	clone := &Session{
+		ID:                      s.ID,
+		InputID:                 s.InputID,
+		Title:                   s.Title,
+		Evals:                   cloneEvalCriteria(s.Evals),
+		EvalResult:              cloneEvalResult(s.EvalResult),
+		CreatedAt:               s.CreatedAt,
+		ToolsApproved:           s.ToolsApproved,
+		NonInteractive:          s.NonInteractive,
+		HideToolResults:         s.HideToolResults,
+		WorkingDir:              s.WorkingDir,
+		SendUserMessage:         s.SendUserMessage,
+		MaxIterations:           s.MaxIterations,
+		MaxConsecutiveToolCalls: s.MaxConsecutiveToolCalls,
+		MaxOldToolCallTokens:    s.MaxOldToolCallTokens,
+		Starred:                 s.Starred,
+		InputTokens:             s.InputTokens,
+		OutputTokens:            s.OutputTokens,
+		Cost:                    s.Cost,
+		Permissions:             clonePermissionsConfig(s.Permissions),
+		AgentModelOverrides:     cloneStringMap(s.AgentModelOverrides),
+		CustomModelsUsed:        cloneStringSlice(s.CustomModelsUsed),
+		AttachedFiles:           cloneStringSlice(s.AttachedFiles),
+		ExcludedTools:           cloneStringSlice(s.ExcludedTools),
+		AgentName:               s.AgentName,
+		ParentID:                s.ParentID,
+		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
+	}
+
+	// Start from a shallow copy of each item so value fields (Summary,
+	// Cost, FirstKeptEntry) are preserved verbatim, then deep-copy the
+	// pointer fields so the clone shares no mutable state. Sub-sessions
+	// recurse through Clone to stay faithful (unlike BranchSession's
+	// helper, which mints fresh IDs and resets metadata).
+	clone.Messages = make([]Item, len(s.Messages))
+	for i, item := range s.Messages {
+		clone.Messages[i] = item
+		if item.Message != nil {
+			clone.Messages[i].Message = cloneMessage(item.Message)
+		}
+		if item.SubSession != nil {
+			clone.Messages[i].SubSession = item.SubSession.Clone()
+		}
+	}
+	return clone
+}
+
 func cloneSessionItem(item Item) (Item, error) {
 	switch {
 	case item.Message != nil:
@@ -129,12 +191,51 @@ func generateBranchTitle(parentTitle string) string {
 	return parentTitle + " (branched)"
 }
 
+func cloneEvalCriteria(src *EvalCriteria) *EvalCriteria {
+	if src == nil {
+		return nil
+	}
+	cp := *src
+	cp.Relevance = cloneStringSlice(src.Relevance)
+	return &cp
+}
+
+func cloneEvalResult(src *EvalResult) *EvalResult {
+	if src == nil {
+		return nil
+	}
+	cp := *src
+	cp.Successes = cloneStringSlice(src.Successes)
+	cp.Failures = cloneStringSlice(src.Failures)
+	cp.Checks = cloneEvalResultChecks(src.Checks)
+	return &cp
+}
+
+func cloneEvalResultChecks(src EvalResultChecks) EvalResultChecks {
+	var cp EvalResultChecks
+	if src.Size != nil {
+		size := *src.Size
+		cp.Size = &size
+	}
+	if src.ToolCalls != nil {
+		toolCalls := *src.ToolCalls
+		cp.ToolCalls = &toolCalls
+	}
+	if src.Relevance != nil {
+		relevance := *src.Relevance
+		relevance.Results = slices.Clone(src.Relevance.Results)
+		cp.Relevance = &relevance
+	}
+	return cp
+}
+
 func clonePermissionsConfig(src *PermissionsConfig) *PermissionsConfig {
 	if src == nil {
 		return nil
 	}
 	return &PermissionsConfig{
 		Allow: cloneStringSlice(src.Allow),
+		Ask:   cloneStringSlice(src.Ask),
 		Deny:  cloneStringSlice(src.Deny),
 	}
 }
