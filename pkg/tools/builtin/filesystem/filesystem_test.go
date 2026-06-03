@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -486,6 +487,57 @@ func TestFilesystemTool_SearchFilesContent(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "Invalid regex pattern")
+}
+
+// TestFilesystemTool_SearchFilesContent_OutputCap verifies that a search
+// producing more matches than the output budget is truncated instead of
+// returning an unbounded string that would cascade into the message list,
+// the session store, and every subsequent model request.
+func TestFilesystemTool_SearchFilesContent_OutputCap(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	// One file with many matching lines, comfortably exceeding the cap.
+	var b strings.Builder
+	for range 200_000 {
+		b.WriteString("needle here\n")
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "big.txt"), []byte(b.String()), 0o644))
+
+	result, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "needle",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "Output truncated")
+	assert.Less(t, len(result.Output), maxSearchOutputBytes+1024,
+		"output must stay close to the cap, not grow unbounded")
+}
+
+// TestFilesystemTool_SearchFilesContent_SkipsLargeFiles verifies that files
+// larger than maxSearchFileSize are skipped so a recursive search can't be
+// made to read a multi-gigabyte file (or a binary/log) into memory.
+func TestFilesystemTool_SearchFilesContent_SkipsLargeFiles(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	// A small file that should match.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "small.txt"), []byte("findme\n"), 0o644))
+
+	// A file just over the size limit containing the same term: must be skipped.
+	big := make([]byte, maxSearchFileSize+1)
+	copy(big, "findme\n")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "big.bin"), big, 0o644))
+
+	result, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "findme",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "small.txt")
+	assert.NotContains(t, result.Output, "big.bin")
 }
 
 func TestFilesystemTool_PostEditCommands(t *testing.T) {
