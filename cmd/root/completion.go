@@ -1,7 +1,6 @@
 package root
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +64,7 @@ func completeMessage(cmd *cobra.Command, args []string, toComplete string) ([]st
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	cfg, err := config.Load(context.Background(), agentSource)
+	cfg, err := config.Load(cmd.Context(), agentSource)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
