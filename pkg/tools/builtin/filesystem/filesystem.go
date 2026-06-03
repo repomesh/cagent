@@ -1126,8 +1126,10 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 		}
 	}
 
-	var results []string
+	var out strings.Builder
 	filesWithMatches := make(map[string]struct{})
+	matchCount := 0
+	truncated := false
 
 	err = filepath.WalkDir(resolvedPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -1166,6 +1168,16 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 		// This prevents symlinks inside the allowed root from escaping the sandbox.
 		if _, checkErr := t.resolveAndCheckPath(path); checkErr != nil {
 			// Skip files outside the sandbox silently (don't fail the whole search).
+			return nil
+		}
+
+		// Only scan regular files within the size limit. We stat (following
+		// symlinks) rather than trust d.Info()'s lstat: t.readFile follows
+		// symlinks, so measuring the link itself would let a symlink to a
+		// huge file slip past the guard. Skipping non-regular files also
+		// avoids reading forever from a device or FIFO such as /dev/zero.
+		info, statErr := t.stat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Size() > maxSearchFileSize {
 			return nil
 		}
 
@@ -1208,8 +1220,19 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 					preview = preview[start:end]
 				}
 
-				result := fmt.Sprintf("%s:%d:%d: %s", path, lineNum+1, matchStart+1, preview)
-				results = append(results, result)
+				// Write matches straight into the builder rather than
+				// collecting them in a slice and joining at the end: that
+				// would hold every match twice (slice + joined copy). The
+				// builder's running length doubles as the output budget.
+				if matchCount > 0 {
+					out.WriteByte('\n')
+				}
+				fmt.Fprintf(&out, "%s:%d:%d: %s", path, lineNum+1, matchStart+1, preview)
+				matchCount++
+				if out.Len() >= maxSearchOutputBytes {
+					truncated = true
+					return fs.SkipAll
+				}
 			}
 		}
 
@@ -1220,19 +1243,24 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 	}
 
 	meta := SearchFilesContentMeta{
-		MatchCount: len(results),
+		MatchCount: matchCount,
 		FileCount:  len(filesWithMatches),
 	}
 
-	if len(results) == 0 {
+	if matchCount == 0 {
 		return &tools.ToolCallResult{
 			Output: "No results found",
 			Meta:   meta,
 		}, nil
 	}
 
+	output := out.String()
+	if truncated {
+		output += "\n\n[Output truncated: exceeded 1 MiB limit. Narrow the search with a more specific query, path, or exclude patterns.]"
+	}
+
 	return &tools.ToolCallResult{
-		Output: strings.Join(results, "\n"),
+		Output: output,
 		Meta:   meta,
 	}, nil
 }
