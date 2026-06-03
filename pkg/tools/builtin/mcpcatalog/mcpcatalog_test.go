@@ -161,13 +161,18 @@ func TestEnableDisableLifecycle(t *testing.T) {
 	ts.mu.RUnlock()
 	assert.True(t, exists)
 
-	// Re-enable: idempotent, no extra change notification. The success
-	// re-enable must tell the model the tools are still live so it does
-	// not stop to "set up" the connection again.
+	// Re-enable on a registered-but-still-unstarted entry: the guard at
+	// the top of handleEnable falls through to the Start retry path
+	// (otherwise the retry instructions emitted by the AuthorizationRequired
+	// / Canceled branches would dead-end at the guard). No extra
+	// tools_changed notification: the entry was already in t.enabled.
 	res, err = ts.handleEnable(ctx, EnableArgs{ID: oauthID})
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "already enabled")
-	assert.Equal(t, int32(1), changes.Load())
+	require.False(t, res.IsError, "re-enable: %s", res.Output)
+	assert.Contains(t, res.Output, "enabled",
+		"re-enable must report success — the Start retry succeeded under stubStartOK")
+	assert.Equal(t, int32(1), changes.Load(),
+		"re-enable of an existing entry must not fire tools-changed again")
 
 	// Search now reports it as enabled.
 	res, err = ts.handleSearch(ctx, SearchArgs{Query: oauthID})
@@ -577,6 +582,127 @@ func TestEnableSyncStartTransportError(t *testing.T) {
 	ts.mu.RUnlock()
 	assert.False(t, stillEnabled,
 		"a failed enable must roll back t.enabled so the next Tools() call does not replay the failure")
+}
+
+// flakyStartToolSet is a Startable test fake whose Start fails N times
+// before returning nil. It exists so the retry-on-second-enable regression
+// tests can assert that the model's retry instructions actually drive a
+// fresh Start attempt instead of dead-ending at the idempotent guard.
+type flakyStartToolSet struct {
+	startCalls atomic.Int32
+	failures   int   // number of times Start should fail before succeeding
+	failWith   error // sentinel returned on each failure
+}
+
+func (f *flakyStartToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return nil, nil
+}
+
+func (f *flakyStartToolSet) Start(context.Context) error {
+	n := f.startCalls.Add(1)
+	if int(n) <= f.failures {
+		return f.failWith
+	}
+	return nil
+}
+
+func (f *flakyStartToolSet) Stop(context.Context) error { return nil }
+
+// TestEnableRetriesStartOnExistingUnstartedEntry is the regression test
+// for the AuthorizationRequired-branch dead-end the reviewer flagged: the
+// model-facing retry instruction must actually drive a second Start
+// attempt. Before the fix, the top-of-handleEnable guard short-circuited
+// every retry into the "already enabled but not yet connected" message
+// without invoking the seam, so the OAuth dialog never re-surfaced and
+// the only escape was disable+enable.
+func TestEnableRetriesStartOnExistingUnstartedEntry(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+
+	id := firstOAuthServerID(t, ts)
+	fake := &flakyStartToolSet{
+		failures: 1,
+		failWith: &mcptools.AuthorizationRequiredError{URL: ts.byID[id].URL},
+	}
+	ts.startToolset = func(ctx context.Context, _ *tools.StartableToolSet) error {
+		return fake.Start(ctx)
+	}
+
+	var changes atomic.Int32
+	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+
+	// First enable: defensive AuthorizationRequired fallback. Entry stays
+	// in t.enabled, message tells the model to call enable again.
+	res, err := ts.handleEnable(t.Context(), EnableArgs{ID: id})
+	require.NoError(t, err)
+	require.False(t, res.IsError, "deferred-auth must not be returned as an error: %s", res.Output)
+	assert.Contains(t, res.Output, "next turn",
+		"the AuthRequired branch must surface its deferred-auth wording on first failure")
+
+	ts.mu.RLock()
+	_, stillEnabled := ts.enabled[id]
+	ts.mu.RUnlock()
+	require.True(t, stillEnabled, "AuthRequired must leave the entry in t.enabled for retry")
+
+	// Second enable on the same id: the guard must NOT short-circuit on
+	// the existing unstarted entry. It must invoke Start again so the
+	// model's "call enable again" instruction actually drives a retry.
+	res, err = ts.handleEnable(t.Context(), EnableArgs{ID: id})
+	require.NoError(t, err)
+	require.False(t, res.IsError, "retry: %s", res.Output)
+	assert.Contains(t, res.Output, "enabled",
+		"re-enable must report success once the underlying Start succeeds")
+	assert.Contains(t, res.Output, id+"_",
+		"re-enable must reference the tool-name prefix so the model knows the tools are live")
+
+	assert.Equal(t, int32(2), fake.startCalls.Load(),
+		"re-enable must invoke Start a second time — the AuthRequired fallback's retry instruction depends on it")
+	// Only the first enable registers the entry; the retry reuses it, so
+	// the tools-changed notification fires exactly once across both calls.
+	assert.Equal(t, int32(1), changes.Load(),
+		"re-enable of an existing entry must NOT re-fire tools-changed — it would falsely signal a tool-surface change")
+}
+
+// TestEnableRetriesStartAfterCancellation is the regression test for the
+// context.Canceled branch the reviewer flagged: when Start is cancelled,
+// the entry stays in t.enabled, and a subsequent enable must drive Start
+// again rather than dead-ending at the guard. This covers the soft
+// per-turn cancellation case where Toolset.Stop has not (and will not)
+// run between the cancelled enable and the retry.
+func TestEnableRetriesStartAfterCancellation(t *testing.T) {
+	ts := New(stubEnv{vars: map[string]string{}})
+
+	id := firstOAuthServerID(t, ts)
+	fake := &flakyStartToolSet{failures: 1, failWith: context.Canceled}
+	ts.startToolset = func(ctx context.Context, _ *tools.StartableToolSet) error {
+		return fake.Start(ctx)
+	}
+
+	// First enable: Start returns context.Canceled. The handler must
+	// surface a tool error AND leave the entry behind so a retry has
+	// somewhere to land.
+	res, err := ts.handleEnable(t.Context(), EnableArgs{ID: id})
+	require.NoError(t, err)
+	require.True(t, res.IsError, "cancelled Start must surface a tool error: %s", res.Output)
+	assert.Contains(t, res.Output, "cancelled",
+		"the error must name cancellation so the model can explain to the user")
+	assert.Contains(t, res.Output, ToolNameEnable,
+		"the error must instruct the model how to retry")
+
+	ts.mu.RLock()
+	_, stillEnabled := ts.enabled[id]
+	ts.mu.RUnlock()
+	require.True(t, stillEnabled,
+		"context.Canceled must leave the entry so the next enable can retry — the alternative would be relying on Toolset.Stop firing between turns, which is a fragile invariant")
+
+	// Second enable: must drive Start again, not short-circuit at the
+	// guard with a "still not connected" message. Otherwise the user is
+	// stuck and the only escape is disable+enable.
+	res, err = ts.handleEnable(t.Context(), EnableArgs{ID: id})
+	require.NoError(t, err)
+	require.False(t, res.IsError, "retry after cancel: %s", res.Output)
+	assert.Contains(t, res.Output, "enabled")
+	assert.Equal(t, int32(2), fake.startCalls.Load(),
+		"the retry must invoke Start a second time — the post-cancel recovery depends on it")
 }
 
 func TestListEnabled(t *testing.T) {

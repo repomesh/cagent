@@ -716,60 +716,65 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 			id, strings.Join(missing, ", "), ToolNameEnable)), nil
 	}
 
+	// Two paths land here: a fresh enable (no entry yet) and a re-enable
+	// of an existing entry whose previous Start did not complete (deferred
+	// auth-required fallback, cancellation, or any other transient
+	// failure). Both must converge on a Start attempt, otherwise the
+	// model-facing retry instructions in the failure branches dead-end at
+	// the guard.
 	t.mu.Lock()
-	if existing, exists := t.enabled[id]; exists {
-		started := existing.IsStarted()
+	wrapped, alreadyEnabled := t.enabled[id]
+	if alreadyEnabled && wrapped.IsStarted() {
 		t.mu.Unlock()
-		// Idempotent re-enable. If the toolset is already started, its
-		// tools are live; otherwise the previous enable hit a deferred-
-		// auth fallback and the user can retry via disable+enable.
-		if started {
-			return tools.ResultSuccess(fmt.Sprintf(
-				"server %q is already enabled and connected. Its tools (names starting with %q) are live; proceed with the user's original request using them.",
-				id, id+"_")), nil
-		}
+		// Live entry — nothing to do.
 		return tools.ResultSuccess(fmt.Sprintf(
-			"server %q is already enabled but not yet connected (likely waiting on user authorization). If the user has just authorized, retry their original request; otherwise tell them the connection still needs authorization.",
-			id)), nil
+			"server %q is already enabled and connected. Its tools (names starting with %q) are live; proceed with the user's original request using them.",
+			id, id+"_")), nil
 	}
 
-	// Create the MCP toolset with the pre-computed headers.
-	// The nil third arg (*latest.RemoteOAuthConfig) is intentional: every
-	// server currently in the catalog works with default Dynamic Client
-	// Registration and the runtime's default callback. If a future entry
-	// needs custom scopes / a fixed client_id / a non-default callback,
-	// extend Auth in servers.go and plumb the resulting *RemoteOAuthConfig
-	// through here.
-	mcpToolset := mcp.NewRemoteToolset(id, server.URL, server.Transport, headers, nil)
+	var notify func()
+	if !alreadyEnabled {
+		// Create the MCP toolset with the pre-computed headers.
+		// The nil third arg (*latest.RemoteOAuthConfig) is intentional:
+		// every server currently in the catalog works with default
+		// Dynamic Client Registration and the runtime's default callback.
+		// If a future entry needs custom scopes / a fixed client_id / a
+		// non-default callback, extend Auth in servers.go and plumb the
+		// resulting *RemoteOAuthConfig through here.
+		mcpToolset := mcp.NewRemoteToolset(id, server.URL, server.Transport, headers, nil)
 
-	// Re-attach the captured handlers so OAuth flows behave identically to
-	// a YAML-declared mcp.remote toolset. Apply BEFORE wrapping so we hit
-	// the *mcp.Toolset's typed setters directly without a tools.As walk.
-	if t.elicitationHandler != nil {
-		mcpToolset.SetElicitationHandler(t.elicitationHandler)
-	}
-	if t.oauthSuccessHandler != nil {
-		mcpToolset.SetOAuthSuccessHandler(t.oauthSuccessHandler)
-	}
-	if t.toolsChangedHandler != nil {
-		mcpToolset.SetToolsChangedHandler(t.toolsChangedHandler)
-	}
-	if t.managedOAuthSet {
-		mcpToolset.SetManagedOAuth(t.managedOAuth)
-	}
-	if t.unmanagedOAuthRedirectURI != "" {
-		mcpToolset.SetUnmanagedOAuthRedirectURI(t.unmanagedOAuthRedirectURI)
-	}
+		// Re-attach the captured handlers so OAuth flows behave
+		// identically to a YAML-declared mcp.remote toolset. Apply
+		// BEFORE wrapping so we hit the *mcp.Toolset's typed setters
+		// directly without a tools.As walk.
+		if t.elicitationHandler != nil {
+			mcpToolset.SetElicitationHandler(t.elicitationHandler)
+		}
+		if t.oauthSuccessHandler != nil {
+			mcpToolset.SetOAuthSuccessHandler(t.oauthSuccessHandler)
+		}
+		if t.toolsChangedHandler != nil {
+			mcpToolset.SetToolsChangedHandler(t.toolsChangedHandler)
+		}
+		if t.managedOAuthSet {
+			mcpToolset.SetManagedOAuth(t.managedOAuth)
+		}
+		if t.unmanagedOAuthRedirectURI != "" {
+			mcpToolset.SetUnmanagedOAuthRedirectURI(t.unmanagedOAuthRedirectURI)
+		}
 
-	wrapped := tools.NewStartable(mcpToolset)
-	t.enabled[id] = wrapped
-	notify := t.toolsChangedHandler
+		wrapped = tools.NewStartable(mcpToolset)
+		t.enabled[id] = wrapped
+		notify = t.toolsChangedHandler
+	}
 	t.mu.Unlock()
 
 	// Notify the runtime that the meta-tool surface changed (disable /
 	// reset_auth become visible the moment the entry lands in t.enabled).
 	// Done BEFORE the synchronous Start so the TUI can reflect the
 	// pending server while the (potentially slow) OAuth dialog is open.
+	// Only the first-time enable notifies; a retry on an existing entry
+	// has no surface change to report.
 	if notify != nil {
 		notify()
 	}
@@ -784,6 +789,10 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 	// handleEnable returns, the toolset is started, the runtime's next
 	// getTools() picks up its tools, and the model can call them in its
 	// follow-up turn — no second user message required.
+	//
+	// StartableToolSet.Start is idempotent and single-flight: on a retry
+	// path it re-invokes the inner Start when the previous attempt left
+	// the wrapper in the not-started state.
 	if err := t.startToolset(ctx, wrapped); err != nil {
 		return t.handleEnableStartError(ctx, id, server, wrapped, err), nil
 	}
@@ -796,18 +805,26 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 // handleEnableStartError translates a failed Start() into a model-facing
 // result and, where appropriate, rolls back the t.enabled bookkeeping so
 // the next Tools() enumeration doesn't replay the same failing handshake.
-// The three branches mirror the cases the model needs to distinguish:
+// The four branches mirror the cases the model needs to distinguish:
 //
 //   - OAuthDeclined → user actively dismissed the dialog. Drop the entry
 //     (mirrors the existing Tools() handling) and tell the model to ask
-//     before retrying.
+//     before retrying. A subsequent enable for the same id will land on
+//     a fresh entry and run a fresh OAuth flow.
 //   - AuthorizationRequired → defensive fallback for the (rare) case where
 //     the elicitation bridge isn't wired up yet. Keep the entry so the
-//     next interactive Tools() call can surface the OAuth dialog, and
-//     fall back to the legacy "tools appear next turn" wording.
-//   - any other error (transport, server refused, context cancelled) →
-//     drop the entry and surface the underlying message so the model can
-//     decide what to tell the user.
+//     next interactive Tools() call can surface the OAuth dialog. A
+//     subsequent enable for the same id is funnelled through
+//     handleEnable's top-of-function guard, which sees an unstarted
+//     entry and re-attempts Start — that is what makes the model-facing
+//     "call enable again" instruction below actually work.
+//   - context.Canceled → leave the entry. If the cancellation tore down
+//     the whole session, Toolset.Stop will clean it up; if it was a
+//     softer per-turn cancellation, the next enable's top-of-function
+//     guard re-attempts Start on the existing wrapper.
+//   - any other error (transport, server refused, …) → drop the entry
+//     and surface the underlying message so the model can decide what to
+//     tell the user. A subsequent enable lands on a fresh entry.
 func (t *Toolset) handleEnableStartError(ctx context.Context, id string, server Server, wrapped *tools.StartableToolSet, err error) *tools.ToolCallResult {
 	switch {
 	case mcp.IsOAuthDeclined(err):
@@ -816,17 +833,21 @@ func (t *Toolset) handleEnableStartError(ctx context.Context, id string, server 
 			"user declined the authorization dialog for %q (%s). No tools were activated — do NOT claim the server is connected and do NOT call any %q tools. Tell the user the request needs them to authorize the connection. If the user then says \"yes\", \"retry\", or re-asks for the same thing, call %s for %q again to surface a fresh authorization dialog.",
 			id, server.Title, id+"_", ToolNameEnable, id))
 	case mcp.IsAuthorizationRequired(err):
-		slog.DebugContext(ctx, "Remote MCP server enable deferred: authorization required, leaving in enabled set for next interactive Tools() to retry",
+		slog.DebugContext(ctx, "Remote MCP server enable deferred: authorization required, leaving in enabled set for next interactive Tools() / enable to retry",
 			"id", id, "error", err)
 		return tools.ResultSuccess(fmt.Sprintf(
 			"enable requested for %q (%s); authorization is required and the host will surface the dialog. On your next turn, if tools whose names start with %q appear in your available tools, proceed with the user's original request using them. If NO such tools appear, the user dismissed the dialog — tell them the request needs them to authorize, and call %s for %q again if they want to retry.",
 			id, server.Title, id+"_", ToolNameEnable, id))
 	case errors.Is(err, context.Canceled):
-		// Don't roll back: cancellation is the runtime tearing down the
-		// turn (Ctrl+C, parent cancellation). The cleanup paths upstream
-		// (Toolset.Stop) own the lifecycle here.
+		// Don't roll back. If this is full-session cancellation (Ctrl+C,
+		// parent shutdown), Toolset.Stop will tear the entry down with
+		// the rest of the session; if it's softer (per-turn cancel /
+		// timeout), the next enable's top-of-function guard re-attempts
+		// Start on the existing unstarted wrapper, so the model's retry
+		// instruction still has somewhere to land.
 		return tools.ResultError(fmt.Sprintf(
-			"enable cancelled for %q before the connection completed.", id))
+			"enable cancelled for %q before the connection completed. Call %s for %q again to retry once the user is ready.",
+			id, ToolNameEnable, id))
 	default:
 		t.disableAfterDecline(ctx, id, wrapped)
 		return tools.ResultError(fmt.Sprintf(
