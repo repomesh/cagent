@@ -1,10 +1,16 @@
 models:
   default:
-    provider: anthropic
-    model: claude-opus-4-6
-  haiku:
-    provider: anthropic
-    model: claude-haiku-4-5
+    first_available:
+      - anthropic/claude-opus-4-8
+      - openai/gpt-5.5
+      - google/gemini-3.5-flash
+      - dmr/ai/qwen3
+  fast:
+    first_available:
+      - anthropic/claude-haiku-4-5
+      - openai/gpt-5.4-mini
+      - google/gemini-3.1-flash-lite
+      - dmr/ai/qwen3
 
 agents:
   root:
@@ -185,7 +191,7 @@ agents:
         agent: root
 
   librarian:
-    model: haiku
+    model: fast
     description: Web Researcher
     instruction: |
       You search the web for documentation, articles, and technical references.
