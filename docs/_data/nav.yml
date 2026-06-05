@@ -144,6 +144,8 @@
   items:
     - title: Tips & Best Practices
       url: /guides/tips/
+    - title: Thinking / Reasoning
+      url: /guides/thinking/
     - title: Managing Secrets
       url: /guides/secrets/
     - title: Go SDK

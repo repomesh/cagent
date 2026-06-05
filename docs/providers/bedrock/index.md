@@ -80,7 +80,7 @@ models:
 | `role_session_name`      | string | docker-agent-bedrock-session | Session name for assumed role        |
 | `external_id`            | string | —                      | External ID for role assumption      |
 | `endpoint_url`           | string | —                      | Custom endpoint (VPC/testing)        |
-| `interleaved_thinking`   | bool   | true                   | Reasoning during tool calls (Claude) |
+| `interleaved_thinking`   | bool   | false                  | Allow reasoning between tool calls (Claude); adds the required beta header automatically |
 | `disable_prompt_caching` | bool   | false                  | Disable automatic prompt caching     |
 
 ## Inference Profiles
@@ -100,6 +100,56 @@ Use inference profile prefixes for optimal routing:
   <p>Use <code>global.</code> prefix on model IDs for automatic cross-region routing. Use <code>eu.</code> prefix for GDPR compliance.</p>
 
 </div>
+
+## Thinking Budget (Claude on Bedrock)
+
+Bedrock Claude models support extended thinking — an internal reasoning phase before the model produces its response. Set `thinking_budget` to a token count (1024–32768) or an effort level string that maps automatically:
+
+| Effort level | Token budget |
+| ------------ | ------------ |
+| `minimal`    | 1,024        |
+| `low`        | 2,048        |
+| `medium`     | 8,192        |
+| `high`       | 16,384       |
+| `xhigh`/`max`| 32,768       |
+
+```yaml
+models:
+  bedrock-claude-thinking:
+    provider: amazon-bedrock
+    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    thinking_budget: 8192   # tokens, or use an effort string like "medium"
+    max_tokens: 16384       # must be > thinking_budget
+    provider_opts:
+      region: us-east-1
+```
+
+`thinking_budget` must be ≥ 1024 and less than `max_tokens`. Values outside this range are logged as a warning and ignored.
+
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">Temperature and top_p
+</div>
+  <p>Bedrock Claude suppresses <code>temperature</code> and <code>top_p</code> while extended thinking is active — Anthropic requires <code>temperature=1.0</code> internally.</p>
+</div>
+
+## Interleaved Thinking (Claude on Bedrock)
+
+Interleaved thinking lets the model reason between tool calls, not just at the start. This is useful for complex agentic tasks. Enable it alongside a thinking budget:
+
+```yaml
+models:
+  bedrock-claude-interleaved:
+    provider: amazon-bedrock
+    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    thinking_budget: high
+    provider_opts:
+      region: us-east-1
+      interleaved_thinking: true
+```
+
+docker-agent automatically adds the `interleaved-thinking-2025-05-14` beta header when `interleaved_thinking: true` is set. If you set `interleaved_thinking: false` while a thinking budget is active, a warning is logged because the budget may be ignored by Bedrock without the beta header.
+
+See the [Thinking / Reasoning guide]({{ '/guides/thinking/' | relative_url }}) for a full cross-provider overview.
 
 ## Prompt Caching
 

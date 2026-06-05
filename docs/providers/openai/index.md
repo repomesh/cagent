@@ -49,15 +49,48 @@ Find more model names at [modelnames.ai](https://modelnames.ai/) or in the [offi
 
 ## Thinking Budget
 
-OpenAI uses effort level strings:
+OpenAI reasoning models (o-series, gpt-5, gpt-5-mini) support extended thinking through the `reasoning_effort` API parameter. Set `thinking_budget` to control the effort level:
 
 ```yaml
 models:
-  gpt-thinking:
+  gpt-thinker:
     provider: openai
     model: gpt-5-mini
-    thinking_budget: low # minimal | low | medium (default) | high | xhigh | max | none | adaptive/<level>
+    thinking_budget: high   # minimal | low | medium | high | xhigh
 ```
+
+**Effort levels:**
+
+| Level     | Description                                              |
+| --------- | -------------------------------------------------------- |
+| `none`    | Disable thinking (a minimum output floor still applies). |
+| `minimal` | Fastest; lightest reasoning pass.                        |
+| `low`     | Quick reasoning for straightforward tasks.               |
+| `medium`  | Balanced default.                                        |
+| `high`    | More thorough; recommended for complex tasks.            |
+| `xhigh`   | Near-maximum effort; slower but most accurate.           |
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Hidden reasoning tokens
+</div>
+  <p>OpenAI reasoning models always produce hidden reasoning tokens that count against <code>max_tokens</code> — even with <code>thinking_budget: none</code>. docker-agent automatically raises the output-token floor so reasoning cannot starve visible text output.</p>
+</div>
+
+### Adaptive Thinking
+
+Use `adaptive/<level>` to let the model scale effort dynamically based on task complexity:
+
+```yaml
+models:
+  gpt-adaptive:
+    provider: openai
+    model: gpt-5-mini
+    thinking_budget: adaptive/medium   # adaptive/low | adaptive/medium | adaptive/high | adaptive/xhigh | adaptive/max
+```
+
+> `max` is only valid inside the `adaptive/` prefix — `thinking_budget: max` (bare) is not accepted by OpenAI.
+
+See the [Thinking / Reasoning guide]({{ '/guides/thinking/' | relative_url }}) for a cross-provider overview.
 
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">Custom endpoints
