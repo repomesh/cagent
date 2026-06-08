@@ -47,7 +47,7 @@ Every docker-agent configuration has a **root agent** — the entry point that r
 
 | Property               | Type    | Required | Description                                                    |
 | ---------------------- | ------- | -------- | -------------------------------------------------------------- |
-| `model`                | string  | ✓        | Model reference (inline like `openai/gpt-5-mini` or a named model) |
+| `model`                | string  | ✓        | Model reference (inline like `openai/gpt-5` or a named model) |
 | `description`          | string  | ✓        | What the agent does — used by other agents for delegation      |
 | `instruction`          | string  | ✓        | System prompt defining behavior                                |
 | `toolsets`             | array   | ✗        | List of tool configurations                                    |
@@ -69,7 +69,7 @@ agents:
     model: anthropic/claude-sonnet-4-5
     fallback:
       models:
-        - openai/gpt-5-mini
+        - openai/gpt-5
         - google/gemini-2.5-flash
       retries: 2 # retries per model for 5xx errors
       cooldown: 1m # stick with fallback after 429
@@ -82,7 +82,7 @@ Define reusable prompts that can be invoked as commands:
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     instruction: You are a helpful assistant.
     commands:
       df: "Check how much free space I have on my disk"

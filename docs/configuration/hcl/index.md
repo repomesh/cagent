@@ -22,7 +22,7 @@ _Write docker-agent configs in HCL instead of YAML. It maps to the same docker-a
 #!/usr/bin/env docker agent run
 
 agent "root" {
-  model       = "openai/gpt-5-mini"
+  model       = "openai/gpt-5"
   description = "A helpful assistant"
   instruction = <<-EOT
   You are a helpful assistant.
@@ -133,7 +133,7 @@ Instead of writing list entries with `type: ...`, HCL uses a `toolset` block who
 
 ```hcl
 agent "root" {
-  model       = "openai/gpt-5-mini"
+  model       = "openai/gpt-5"
   description = "Dev assistant"
   instruction = "You can inspect and modify code."
 
@@ -151,7 +151,7 @@ Agent commands are often nicer to write in HCL because each command gets its own
 
 ```hcl
 agent "root" {
-  model       = "openai/gpt-5-mini"
+  model       = "openai/gpt-5"
   description = "Build helper"
   instruction = "You help with builds."
 
@@ -168,7 +168,7 @@ Use quoted strings for short values and heredocs for long prompts, welcome messa
 
 ```hcl
 agent "root" {
-  model       = "openai/gpt-5-mini"
+  model       = "openai/gpt-5"
   description = "Friendly assistant"
 
   instruction = <<-EOT
@@ -206,7 +206,7 @@ For example, model routing rules become repeated `routing { ... }` blocks:
 ```hcl
 model "smart_router" {
   provider = "openai"
-  model    = "gpt-5-mini"
+  model    = "gpt-5"
 
   routing {
     model    = "anthropic/claude-sonnet-4-5"

@@ -120,7 +120,7 @@ agents:
       - researcher
 
   researcher:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Web researcher
     instruction: |
       Search the web, then hand off to the summarizer.
@@ -131,7 +131,7 @@ agents:
       - summarizer
 
   summarizer:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Summarizes findings
     instruction: |
       Summarize the research results, then hand off
@@ -190,7 +190,7 @@ Sub-agents don't have to be defined locally — you can reference agents from OC
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Coordinator that delegates to local and catalog sub-agents
     instruction: |
       Delegate tasks to the most appropriate sub-agent.
@@ -199,7 +199,7 @@ agents:
       - agentcatalog/pirate # pulled from registry automatically
 
   local_helper:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: A local helper agent for simple tasks
     instruction: You are a helpful assistant.
 ```
@@ -283,7 +283,7 @@ agents:
       - type: think
 
   reviewer:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Code review specialist
     instruction: |
       You review code for quality, security, and maintainability.
@@ -292,7 +292,7 @@ agents:
       - type: filesystem
 
   tester:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Quality assurance engineer
     instruction: |
       You write tests and ensure software quality. Run tests
@@ -317,7 +317,7 @@ agents:
       - type: think
 
   researcher:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Web researcher
     instruction: Search the web and gather information.
     toolsets:
@@ -342,7 +342,7 @@ A key advantage of multi-agent systems is using different models for different r
 models:
   fast:
     provider: openai
-    model: gpt-5-mini
+    model: gpt-5
     temperature: 0.2 # precise
 
   creative:

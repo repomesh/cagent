@@ -241,7 +241,7 @@ For that defense-in-depth case, set `redact_secrets: true` on an agent. It scrub
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: A helpful assistant
     instruction: You are a helpful assistant.
     redact_secrets: true

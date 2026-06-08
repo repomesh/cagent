@@ -130,7 +130,7 @@ mcps:
 
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     toolsets:
       - type: mcp
         ref: github

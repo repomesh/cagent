@@ -40,7 +40,7 @@ Use the `docker agent new` command to scaffold a config file through prompts:
 $ docker agent new
 
 # Or specify options directly
-$ docker agent new --model openai/gpt-5-mini
+$ docker agent new --model openai/gpt-5
 
 # Override iteration limits
 $ docker agent new --model dmr/ai/gemma3-qat:12B --max-iterations 15

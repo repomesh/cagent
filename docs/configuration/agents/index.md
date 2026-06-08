@@ -76,7 +76,7 @@ agents:
 
 | Property                    | Type    | Required | Description                                                                                                                                                                   |
 | --------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                     | string  | ✓        | Model reference. Either inline (`openai/gpt-5-mini`) or a named model from the `models` section.                                                                              |
+| `model`                     | string  | ✓        | Model reference. Either inline (`openai/gpt-5`) or a named model from the `models` section.                                                                              |
 | `description`               | string  | ✓        | Brief description of the agent's purpose. Used by coordinators to decide delegation.                                                                                          |
 | `instruction`               | string  | ✓        | System prompt that defines the agent's behavior, personality, and constraints.                                                                                                |
 | `sub_agents`                | array   | ✗        | List of agent names or external OCI references this agent can delegate to. Supports local agents, registry references (e.g., `agentcatalog/pirate`), and named references (`name:reference`). Automatically enables the `transfer_task` tool. See [External Sub-Agents]({{ '/concepts/multi-agent/#external-sub-agents-from-registries' | relative_url }}). |
@@ -117,7 +117,7 @@ The response cache short-circuits the model when the same user question is asked
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Cached assistant
     instruction: You are a helpful assistant.
     cache:
@@ -162,7 +162,7 @@ The `redact_secrets` flag is a single agent-level switch that scrubs accidentall
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: A helpful assistant that scrubs secrets before they leak
     instruction: |
       You are a helpful assistant. If the user accidentally pastes a token,
@@ -202,7 +202,7 @@ Display a message when users start a session:
 ```yaml
 agents:
   assistant:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Development assistant
     instruction: You are a helpful coding assistant.
     welcome_message: |
@@ -254,7 +254,7 @@ agents:
     model: anthropic/claude-sonnet-4-5
     fallback:
       models:
-        - openai/gpt-5-mini
+        - openai/gpt-5
         - google/gemini-2.5-flash
       retries: 2
       cooldown: 1m
@@ -269,7 +269,7 @@ Define reusable prompt shortcuts that can send prompts to the current agent or s
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     instruction: You are a system administrator.
     commands:
       df: "Check how much free space I have on my disk"
@@ -314,7 +314,7 @@ Commands with an `agent` field switch the active agent for that command's scope.
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Main assistant
     instruction: You are a project coordinator.
     sub_agents: [planner, reviewer]
@@ -330,7 +330,7 @@ agents:
       status: "Summarize what we have accomplished so far"
 
   planner:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Planning specialist
     instruction: You create detailed project plans.
 
@@ -389,7 +389,7 @@ agents:
     add_date: true
     add_environment_info: true
     fallback:
-      models: [openai/gpt-5-mini]
+      models: [openai/gpt-5]
     toolsets:
       - type: think
     commands:
@@ -411,7 +411,7 @@ agents:
       - type: todo
 
   researcher:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: Web researcher with memory
     instruction: Search for information and remember findings.
     toolsets:

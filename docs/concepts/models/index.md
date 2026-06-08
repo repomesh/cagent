@@ -19,7 +19,7 @@ Use the `provider/model` shorthand directly in the agent definition:
 ```yaml
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     instruction: You are a helpful assistant.
 ```
 
@@ -125,7 +125,7 @@ models:
 
   fast-responder:
     provider: openai
-    model: gpt-5-mini
+    model: gpt-5
     thinking_budget: none # disable thinking
 ```
 
@@ -143,7 +143,7 @@ models:
 ```yaml
 agents:
   root:
-    model: anthropic/claude-sonnet-4-5,openai/gpt-5-mini
+    model: anthropic/claude-sonnet-4-5,openai/gpt-5
     instruction: You are a helpful assistant.
 ```
 

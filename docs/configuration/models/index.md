@@ -116,7 +116,7 @@ Uses effort levels as strings:
 models:
   gpt:
     provider: openai
-    model: gpt-5-mini
+    model: gpt-5
     thinking_budget: low # minimal | low | medium | high | xhigh | max | adaptive/<level>
 ```
 
@@ -278,7 +278,7 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    model: gpt-5-mini
+    model: gpt-5
 
   # Anthropic
   claude:
