@@ -85,7 +85,7 @@ At its core, Docker Agent follows a simple loop:
 # A minimal agent definition
 agents:
   root:
-    model: openai/gpt-5-mini
+    model: openai/gpt-5
     description: A helpful assistant
     instruction: You are a helpful assistant.
     toolsets:

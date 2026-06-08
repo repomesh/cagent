@@ -209,7 +209,7 @@ API keys and secrets are read from environment variables — never stored in con
 <div class="callout callout-warning" markdown="1">
 <div class="callout-title">Important
 </div>
-  <p>Model references are case-sensitive: <code>openai/gpt-5-mini</code> is not the same as <code>openai/GPT-5-mini</code>.</p>
+  <p>Model references are case-sensitive: <code>openai/gpt-5</code> is not the same as <code>openai/GPT-5</code>.</p>
 
 </div>
 

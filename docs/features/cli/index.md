@@ -151,7 +151,7 @@ $ docker agent new [flags]
 
 # Examples
 $ docker agent new
-$ docker agent new --model openai/gpt-5-mini
+$ docker agent new --model openai/gpt-5
 $ docker agent new --model dmr/ai/gemma3-qat:12B --max-iterations 15
 ```
 

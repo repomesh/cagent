@@ -94,7 +94,7 @@ models:
     max_tokens: 64000
   gpt:
     provider: openai
-    model: gpt-5-mini
+    model: gpt-5
   local:
     provider: dmr
     model: ai/qwen3
@@ -104,7 +104,7 @@ agents:
     model: claude # coordinator uses Claude
     sub_agents: [coder, helper]
   coder:
-    model: gpt # coder uses GPT-5-mini
+    model: gpt # coder uses GPT-5
   helper:
     model: local # helper runs locally for free
 ```
