@@ -263,3 +263,44 @@ func TestQueueFlow_ClearQueue(t *testing.T) {
 	assert.Empty(t, p.messageQueue)
 	assert.NotNil(t, cmd) // Info notification
 }
+
+func TestReadOnly_RejectsMessages(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	a := app.New(t.Context(), queueTestRuntime{}, sess, app.WithReadOnly())
+	require.True(t, a.IsReadOnly())
+
+	p := New(a, service.NewSessionState(sess)).(*chatPage)
+
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "hello"})
+
+	assert.Empty(t, p.messageQueue)
+	assert.NotNil(t, cmd)
+}
+
+func TestReadOnly_AllowsSlashCommands(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	a := app.New(t.Context(), queueTestRuntime{}, sess, app.WithReadOnly())
+	p := New(a, service.NewSessionState(sess)).(*chatPage)
+	p.commandParser = commands.NewParser(commands.Category{
+		Name: "Test",
+		Commands: []commands.Item{
+			{
+				SlashCommand: "/now",
+				Immediate:    true,
+				Execute: func(arg string) tea.Cmd {
+					return func() tea.Msg { return immediateCommandMsg{arg: arg} }
+				},
+			},
+		},
+	})
+
+	// Slash commands should still work in read-only mode
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/now please"})
+
+	require.NotNil(t, cmd)
+	assert.Equal(t, immediateCommandMsg{arg: "please"}, cmd())
+}

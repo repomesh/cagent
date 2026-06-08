@@ -474,12 +474,16 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 
 // editorOpts returns the editor.Option slice derived from the current appModel.
 func (m *appModel) editorOpts() []editor.Option {
-	return []editor.Option{
+	opts := []editor.Option{
 		editor.WithCompletions(
 			completions.NewCommandCompletion(m.commandCategories()),
 			completions.NewFileCompletion(),
 		),
 	}
+	if m.application.IsReadOnly() {
+		opts = append(opts, editor.WithReadOnly())
+	}
+	return opts
 }
 
 // initSessionComponents creates a new chat page, session state, and editor for
@@ -1020,6 +1024,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleAttachFile(msg.FilePath)
 
 	case messages.SendAttachmentMsg:
+		if m.application.IsReadOnly() {
+			return m, notification.WarningCmd("Session is read-only. No new messages can be sent.")
+		}
 		m.application.RunWithMessage(context.Background(), nil, msg.Content)
 		return m, nil
 

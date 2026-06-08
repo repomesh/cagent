@@ -168,6 +168,14 @@ func WithCompletions(comps ...completions.Completion) Option {
 	}
 }
 
+// WithReadOnly disables the editor so no new messages can be composed.
+func WithReadOnly() Option {
+	return func(e *editor) {
+		e.textarea.Placeholder = "Session is read-only"
+		e.textarea.KeyMap.InsertNewline.SetEnabled(false)
+	}
+}
+
 // New creates a new editor component
 func New(hist *history.History, opts ...Option) Editor {
 	ta := textarea.New()

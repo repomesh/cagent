@@ -69,6 +69,7 @@ type runExecFlags struct {
 	worktree          bool
 	worktreeName      string
 	worktreePR        string
+	sessionReadOnly   bool
 
 	// Exec only
 	exec          bool
@@ -170,6 +171,7 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringVarP(&flags.worktreeName, "worktree", "w", "", "Run the agent in a fresh git worktree of the working directory (isolates changes from your checkout). Optionally name it: --worktree=my-name")
 	cmd.PersistentFlags().Lookup("worktree").NoOptDefVal = worktreeAutoName
 	cmd.PersistentFlags().StringVar(&flags.worktreePR, "worktree-pr", "", "Run the agent in a git worktree checked out on an existing GitHub pull request (number or URL). Continues the PR's branch; requires the GitHub CLI (gh).")
+	cmd.PersistentFlags().BoolVar(&flags.sessionReadOnly, "session-read-only", false, "Open the session in read-only mode (view conversation history but prevent new messages)")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
 	cmd.MarkFlagsMutuallyExclusive("remote", "sandbox")
 	cmd.MarkFlagsMutuallyExclusive("remote", "session-db")
@@ -724,6 +726,10 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 }
 
 func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session, args []string) error {
+	if f.sessionReadOnly {
+		return errors.New("--session-read-only cannot be used with --exec: there is nothing to display without a TUI")
+	}
+
 	// args[0] is the agent file; args[1:] are user messages for multi-turn conversation
 	var userMessages []string
 	if len(args) > 1 {
@@ -804,6 +810,9 @@ func (f *runExecFlags) buildAppOpts(args []string) ([]app.Opt, error) {
 	}
 	if f.snapshotController != nil {
 		opts = append(opts, app.WithSnapshotController(f.snapshotController))
+	}
+	if f.sessionReadOnly {
+		opts = append(opts, app.WithReadOnly())
 	}
 	return opts, nil
 }
