@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1181,6 +1183,11 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 			return nil
 		}
 
+		binary, err := t.isBinaryFile(path)
+		if err != nil || binary {
+			return nil
+		}
+
 		content, err := t.readFile(path)
 		if err != nil {
 			return nil
@@ -1263,6 +1270,53 @@ func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesCo
 		Output: output,
 		Meta:   meta,
 	}, nil
+}
+
+func (t *ToolSet) readFileHeader(resolved string, size int) ([]byte, error) {
+	if size <= 0 {
+		return nil, nil
+	}
+
+	root, rel, err := t.rootedAccess(resolved)
+	if err != nil {
+		return nil, err
+	}
+
+	var file *os.File
+	if root != nil {
+		file, err = root.Open(rel)
+	} else {
+		file, err = os.Open(resolved)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	buf := make([]byte, size)
+	n, err := io.ReadFull(file, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+func (t *ToolSet) isBinaryFile(resolved string) (bool, error) {
+	header, err := t.readFileHeader(resolved, maxBinarySniffBytes)
+	if err != nil {
+		return false, err
+	}
+	return isBinaryContent(header), nil
+}
+
+func isBinaryContent(header []byte) bool {
+	if len(header) == 0 {
+		return false
+	}
+	if bytes.IndexByte(header, 0) >= 0 {
+		return true
+	}
+	return !strings.HasPrefix(http.DetectContentType(header), "text/")
 }
 
 func (t *ToolSet) handleWriteFile(ctx context.Context, args WriteFileArgs) (*tools.ToolCallResult, error) {

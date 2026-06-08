@@ -567,6 +567,52 @@ func TestFilesystemTool_SearchFilesContent_SkipsSymlinkToLargeFile(t *testing.T)
 	assert.NotContains(t, result.Output, "target.bin")
 }
 
+// TestFilesystemTool_SearchFilesContent_SkipsBinaryFiles verifies that
+// small binary files are skipped even when they contain the query bytes.
+func TestFilesystemTool_SearchFilesContent_SkipsBinaryFiles(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "text.txt"), []byte("findme\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "program.bin"), []byte{0x7f, 'E', 'L', 'F', 0, 'f', 'i', 'n', 'd', 'm', 'e', '\n'}, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "doc.pdf"), []byte("%PDF-1.7\nfindme\n"), 0o644))
+
+	result, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "findme",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "text.txt")
+	assert.NotContains(t, result.Output, "program.bin")
+	assert.NotContains(t, result.Output, "doc.pdf")
+	assert.Equal(t, SearchFilesContentMeta{MatchCount: 1, FileCount: 1}, result.Meta)
+}
+
+func TestIsBinaryContent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		header []byte
+		want   bool
+	}{
+		{name: "empty", header: nil, want: false},
+		{name: "plain text", header: []byte("package main\nfunc main() {}\n"), want: false},
+		{name: "utf8 text", header: []byte("Résumé\n"), want: false},
+		{name: "elf", header: []byte{0x7f, 'E', 'L', 'F', 0, 1, 1, 0}, want: true},
+		{name: "png", header: []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, want: true},
+		{name: "pdf", header: []byte("%PDF-1.7\nfindme\n"), want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, isBinaryContent(tc.header))
+		})
+	}
+}
+
 func TestFilesystemTool_PostEditCommands(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

@@ -9,6 +9,10 @@ const maxFiles = 100
 // Skipping them keeps a recursive search over a large tree bounded.
 const maxSearchFileSize = 10 << 20 // 10 MiB
 
+// maxBinarySniffBytes is how much of a file header search_files_content
+// reads to decide whether the file is binary before loading the rest.
+const maxBinarySniffBytes = 512
+
 // maxSearchOutputBytes caps the total size of the joined match output.
 // Without it a broad search (e.g. across the home directory) produces a
 // multi-megabyte result that is then copied into the in-memory message
