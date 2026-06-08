@@ -61,9 +61,6 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.BetaRawContentBlockStartEvent:
 		switch block := eventVariant.ContentBlock.AsAny().(type) {
 		case anthropic.BetaToolUseBlock:
-			if a.toolIDByBlock == nil {
-				a.toolIDByBlock = map[int64]string{}
-			}
 			a.toolIDByBlock[eventVariant.Index] = block.ID
 			a.toolCall = true
 			toolCall := tools.ToolCall{
