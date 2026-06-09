@@ -629,7 +629,10 @@ func (m *appModel) handleThemeFileChanged(themeRef string) (tea.Model, tea.Cmd) 
 // --- Miscellaneous ---
 
 func (m *appModel) handleOpenURL(url string) (tea.Model, tea.Cmd) {
-	_ = browser.Open(context.Background(), url)
+	if err := browser.Open(context.Background(), url); err != nil {
+		slog.Warn("Failed to open URL", "url", url, "error", err)
+		return m, notification.ErrorCmd("Failed to open URL in browser")
+	}
 	return m, nil
 }
 
