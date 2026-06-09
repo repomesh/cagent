@@ -19,6 +19,9 @@ import (
 
 const (
 	ModelsDevAPIURL = "https://models.dev/api.json"
+	// APIHost is the host portion of ModelsDevAPIURL, allowlisted by
+	// sandbox callers so the in-sandbox agent can reach the catalog.
+	APIHost         = "models.dev"
 	CacheFileName   = "models_dev.json"
 	refreshInterval = 24 * time.Hour
 )
