@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+
+	"github.com/docker/docker-agent/pkg/httpclient"
 )
 
 // PerformOAuthLogin performs a standalone OAuth flow for the given MCP server URL.
@@ -19,7 +21,7 @@ import (
 func PerformOAuthLogin(ctx context.Context, serverURL string) error {
 	tokenStore := NewKeyringTokenStore()
 
-	o := &oauth{metadataClient: &http.Client{Timeout: 5 * time.Second}}
+	o := &oauth{metadataClient: httpclient.NewSafeClient(5*time.Second, false)}
 
 	// Derive the base origin (scheme + host) from the server URL.
 	// The well-known endpoints live at the origin, not under the SSE/path.
