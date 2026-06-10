@@ -17,6 +17,7 @@ import (
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
@@ -142,6 +143,56 @@ func TestQueueFlow_BusyAgent_BangCommandBypassesQueue(t *testing.T) {
 		t.Fatal("bang command should not cancel the running stream")
 	default:
 	}
+}
+
+// TestQueueFlow_SkillCommand_DispatchesOnceWithoutLooping guards against a
+// regression (introduced by reordering the checks in handleSendMsg for the
+// --session-read-only feature) where fork-mode skill slash commands looped
+// forever. Such commands resolve by re-dispatching themselves as
+// SendMsg{BypassQueue: true}; if handleSendMsg re-parses that bypass message
+// it matches the same command again, re-runs Execute, and never reaches
+// processMessage (so the skill never actually runs).
+//
+// The test reproduces the real two-hop flow: the user-typed "/myskill" is
+// parsed into an Execute that emits a BypassQueue SendMsg, which is then fed
+// back through handleSendMsg. Execute must run exactly once.
+func TestQueueFlow_SkillCommand_DispatchesOnceWithoutLooping(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	p := New(app.New(t.Context(), queueTestRuntime{}, sess), service.NewSessionState(sess)).(*chatPage)
+
+	calls := 0
+	p.commandParser = commands.NewParser(commands.Category{
+		Name: "Skills",
+		Commands: []commands.Item{
+			{
+				SlashCommand: "/myskill",
+				Immediate:    true,
+				Execute: func(string) tea.Cmd {
+					calls++
+					return core.CmdHandler(messages.SendMsg{Content: "/myskill", BypassQueue: true})
+				},
+			},
+		},
+	})
+
+	// Hop 1: the user types "/myskill". It is parsed and Execute emits a
+	// BypassQueue re-dispatch of the same command.
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/myskill"})
+	require.NotNil(t, cmd)
+	require.Equal(t, 1, calls)
+
+	redispatch, ok := cmd().(messages.SendMsg)
+	require.True(t, ok, "skill Execute should re-dispatch a SendMsg")
+	require.True(t, redispatch.BypassQueue, "re-dispatch must bypass the queue")
+
+	// Hop 2: the BypassQueue message must be processed directly, not re-parsed
+	// back into the command (which would invoke Execute again and loop).
+	_, cmd = p.handleSendMsg(redispatch)
+	require.NotNil(t, cmd)
+	assert.Empty(t, p.messageQueue)
+	assert.Equal(t, 1, calls, "BypassQueue message must not be re-parsed into the command again")
 }
 
 func TestQueueFlow_BusyAgent_QueuesMessage(t *testing.T) {
@@ -303,4 +354,23 @@ func TestReadOnly_AllowsSlashCommands(t *testing.T) {
 
 	require.NotNil(t, cmd)
 	assert.Equal(t, immediateCommandMsg{arg: "please"}, cmd())
+}
+
+// TestReadOnly_RejectsBypassQueueCommands ensures resolved skill/agent
+// commands (re-dispatched as SendMsg{BypassQueue: true}) are still blocked in
+// read-only mode. BypassQueue only skips re-parsing to avoid the command loop;
+// it must not let model-bound work slip past the read-only guard.
+func TestReadOnly_RejectsBypassQueueCommands(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	a := app.New(t.Context(), queueTestRuntime{}, sess, app.WithReadOnly())
+	p := New(a, service.NewSessionState(sess)).(*chatPage)
+
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/myskill", BypassQueue: true})
+
+	require.NotNil(t, cmd)
+	assert.Empty(t, p.messageQueue)
+	assert.False(t, p.working, "read-only must not start processing a BypassQueue message")
+	assert.Nil(t, p.msgCancel, "read-only must not start a stream for a BypassQueue message")
 }

@@ -649,11 +649,19 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, core.CmdHandler(msgtypes.ExitSessionMsg{})
 	}
 
-	// Allow immediate slash commands (e.g. /exit, /compact) even in read-only mode
-	if cmd := p.parseImmediateCommand(msg.Content); cmd != nil {
-		return p, cmd
+	// Immediate UI slash commands (e.g. /exit, /compact) run even in read-only
+	// mode. A BypassQueue message has already been resolved (e.g. an agent
+	// command or fork-mode skill re-dispatching itself) and must skip parsing:
+	// re-parsing would match the same command again and loop forever.
+	if !msg.BypassQueue {
+		if cmd := p.parseImmediateCommand(msg.Content); cmd != nil {
+			return p, cmd
+		}
 	}
 
+	// Everything below hands work to the model, which read-only sessions must
+	// reject: normal input, bang commands, and resolved agent/skill commands
+	// flagged BypassQueue.
 	if p.app != nil && p.app.IsReadOnly() {
 		return p, notification.WarningCmd("Session is read-only. No new messages can be sent.")
 	}
