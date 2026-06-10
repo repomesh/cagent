@@ -43,20 +43,13 @@ func sseEvent(t string, payload any) ssestream.Event {
 // JSON for each block. Every event carries the block's index. The adapter
 // must use that index to route partial JSON back to the correct tool call.
 //
-// The current adapter stores the most recently seen tool ID in a single
-// streamAdapter.toolID field. When a second tool_use block starts, that
-// field is overwritten. Subsequent input_json deltas for the FIRST block
-// then carry the SECOND block's ID, and the runtime accumulator
-// (keyed by tool call ID in pkg/runtime/streaming.go) concatenates both
-// calls' argument fragments into the same buffer, producing malformed JSON
-// that surfaces upstream as Go json errors like
-//
-//	"invalid character 's' looking for beginning of value"
-//	"invalid character '-' after object key:value pair"
-//
-// This test demonstrates the bug. With the fix in place (route by block
-// index, not by a single shared toolID), both tool calls' arguments end up
-// in their own buffers and parse cleanly.
+// The adapter used to store the most recently seen tool ID in a single
+// field, which was overwritten when a second tool_use block started.
+// Subsequent input_json deltas for the FIRST block then carried the SECOND
+// block's ID, and the runtime accumulator (keyed by tool call ID in
+// pkg/runtime/streaming.go) concatenated both calls' argument fragments
+// into the same buffer, producing malformed JSON. This test guards the fix:
+// routing by block index keeps each tool call's arguments in its own buffer.
 func TestParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 	// Event sequence: two parallel tool_use blocks with interleaved
 	// input_json_delta events. This mirrors what Anthropic emits when the
@@ -126,7 +119,7 @@ func TestParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 	}
 
 	stream := ssestream.NewStream[anthropic.MessageStreamEventUnion](&fakeDecoder{events: events}, nil)
-	adapter := &streamAdapter{retryableStream: retryableStream[anthropic.MessageStreamEventUnion]{stream: stream}}
+	adapter := (&Client{}).newStreamAdapter(stream, false)
 
 	// Replicate the runtime's tool-call accumulator (pkg/runtime/streaming.go).
 	// It keys by ToolCall.ID and concatenates Arguments fragments. This is the
@@ -243,7 +236,7 @@ func TestBetaParallelToolCallIDsAreNotCrossWired(t *testing.T) {
 	}
 
 	stream := ssestream.NewStream[anthropic.BetaRawMessageStreamEventUnion](&fakeDecoder{events: events}, nil)
-	adapter := &betaStreamAdapter{retryableStream: retryableStream[anthropic.BetaRawMessageStreamEventUnion]{stream: stream}}
+	adapter := (&Client{}).newBetaStreamAdapter(stream, false)
 
 	argsByID := map[string]*strings.Builder{}
 	for {
