@@ -17,6 +17,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/docker/go-units"
 	"github.com/mattn/go-runewidth"
 	"github.com/rivo/uniseg"
@@ -173,6 +174,13 @@ func WithReadOnly() Option {
 	return func(e *editor) {
 		e.textarea.Placeholder = "Session is read-only"
 		e.textarea.KeyMap.InsertNewline.SetEnabled(false)
+	}
+}
+
+// WithPlaceholder sets the editor's placeholder text (shown while empty).
+func WithPlaceholder(placeholder string) Option {
+	return func(e *editor) {
+		e.textarea.Placeholder = placeholder
 	}
 }
 
@@ -381,8 +389,11 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	// This ensures the suggestion wraps at the same points as when the text is accepted.
 	wrappedLines := e.computeWrappedLines(e.suggestion, textWidth)
 
-	baseLayer := lipgloss.NewLayer(view)
-	var overlays []*lipgloss.Layer
+	type overlay struct {
+		x, y    int
+		content string
+	}
+	var overlays []overlay
 
 	for i, suggLine := range wrappedLines {
 		if suggLine == "" && i > 0 {
@@ -391,9 +402,9 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		}
 
 		currentY := targetLine + i
-		// Note: We intentionally don't skip lines beyond the view.
-		// Lipgloss canvas will extend the output to accommodate overlays
-		// that are positioned beyond the base layer's boundaries.
+		// Note: We intentionally don't skip lines beyond the view; the
+		// output is extended to accommodate overlays positioned beyond
+		// the base view's boundaries.
 
 		var xOffset int
 		if i == 0 {
@@ -409,25 +420,20 @@ func (e *editor) applySuggestionOverlay(view string) string {
 			firstRune, restOfLine := splitFirstRune(suggLine)
 			cursorChar := styles.SuggestionCursorStyle.Render(firstRune)
 
-			cursorOverlay := lipgloss.NewLayer(cursorChar).
-				X(xOffset).
-				Y(currentY)
-			overlays = append(overlays, cursorOverlay)
+			overlays = append(overlays, overlay{x: xOffset, y: currentY, content: cursorChar})
 
 			if restOfLine != "" {
 				ghostRest := styles.SuggestionGhostStyle.Render(restOfLine)
-				restOverlay := lipgloss.NewLayer(ghostRest).
-					X(xOffset + runewidth.StringWidth(firstRune)).
-					Y(currentY)
-				overlays = append(overlays, restOverlay)
+				overlays = append(overlays, overlay{
+					x:       xOffset + runewidth.StringWidth(firstRune),
+					y:       currentY,
+					content: ghostRest,
+				})
 			}
 		} else {
 			// Subsequent lines: all ghost styling
 			ghostLine := styles.SuggestionGhostStyle.Render(suggLine)
-			lineOverlay := lipgloss.NewLayer(ghostLine).
-				X(xOffset).
-				Y(currentY)
-			overlays = append(overlays, lineOverlay)
+			overlays = append(overlays, overlay{x: xOffset, y: currentY, content: ghostLine})
 		}
 	}
 
@@ -435,13 +441,30 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		return view
 	}
 
-	// Build canvas with all layers
-	allLayers := make([]*lipgloss.Layer, 0, len(overlays)+1)
-	allLayers = append(allLayers, baseLayer)
-	allLayers = append(allLayers, overlays...)
+	// Splice the overlays into the rendered view line by line. This is
+	// ANSI-aware string surgery instead of lipgloss canvas compositing, so
+	// the editor does not depend on canvas/compositor APIs that differ
+	// across lipgloss v2 pre-releases (it keeps the editor embeddable by
+	// consumers pinned to other lipgloss snapshots, e.g. Docker Sandboxes).
+	outLines := strings.Split(view, "\n")
+	for _, ov := range overlays {
+		for len(outLines) <= ov.y {
+			outLines = append(outLines, "")
+		}
+		outLines[ov.y] = spliceLine(outLines[ov.y], ov.content, ov.x)
+	}
+	return strings.Join(outLines, "\n")
+}
 
-	compositor := lipgloss.NewCompositor(allLayers...)
-	return compositor.Render()
+// spliceLine overwrites line content at column x with overlay, preserving
+// ANSI styling on both sides and padding when the line is shorter than x.
+func spliceLine(line, overlay string, x int) string {
+	left := ansi.Truncate(line, x, "")
+	if pad := x - ansi.StringWidth(left); pad > 0 {
+		left += strings.Repeat(" ", pad)
+	}
+	right := ansi.TruncateLeft(line, x+ansi.StringWidth(overlay), "")
+	return left + overlay + right
 }
 
 // splitFirstRune splits a string into its first rune and the rest.
