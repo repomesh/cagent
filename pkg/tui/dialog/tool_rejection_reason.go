@@ -1,35 +1,21 @@
 package dialog
 
 import (
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/components/toolconfirm"
 )
 
 // ToolRejectionDialogID is the unique identifier for the tool rejection reason dialog.
 const ToolRejectionDialogID = "tool-rejection-reason"
 
-// toolRejectionOptions defines the preset rejection reasons.
-// These match the original presets from tool_confirmation.go.
-var toolRejectionOptions = []MultiChoiceOption{
-	{
-		ID:    "bad_args",
-		Label: "Bad arguments",
-		Value: "The arguments provided are incorrect or invalid.",
-	},
-	{
-		ID:    "wrong_tool",
-		Label: "Wrong tool",
-		Value: "This is the wrong tool for this task.",
-	},
-	{
-		ID:    "unsafe",
-		Label: "Unsafe",
-		Value: "This action could be unsafe or destructive.",
-	},
-	{
-		ID:    "clarify",
-		Label: "Clarify first",
-		Value: "Please clarify what you're trying to accomplish.",
-	},
+// toolRejectionOptions adapts the shared preset rejection reasons to the
+// multi-choice dialog options.
+func toolRejectionOptions() []MultiChoiceOption {
+	reasons := toolconfirm.RejectionReasons()
+	options := make([]MultiChoiceOption, 0, len(reasons))
+	for _, r := range reasons {
+		options = append(options, MultiChoiceOption{ID: r.ID, Label: r.Label, Value: r.Value})
+	}
+	return options
 }
 
 // NewToolRejectionReasonDialog creates a multi-choice dialog for selecting
@@ -38,7 +24,7 @@ func NewToolRejectionReasonDialog() Dialog {
 	return NewMultiChoiceDialog(MultiChoiceConfig{
 		DialogID:          ToolRejectionDialogID,
 		Title:             "Why reject this tool call?",
-		Options:           toolRejectionOptions,
+		Options:           toolRejectionOptions(),
 		AllowCustom:       true,
 		AllowSecondary:    true,
 		SecondaryLabel:    "Skip",
@@ -63,6 +49,6 @@ func HandleToolRejectionResult(result MultiChoiceResult) *RuntimeResumeMsg {
 	}
 
 	return &RuntimeResumeMsg{
-		Request: runtime.ResumeReject(reason),
+		Request: toolconfirm.Reject.Resume("", reason),
 	}
 }
