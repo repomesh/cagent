@@ -1712,22 +1712,6 @@ func (m *model) RemoveSpinner() {
 	m.removeSpinner()
 }
 
-// animationStopper is implemented by views that register with the animation coordinator.
-// When a view is removed from the UI, StopAnimation must be called to unregister
-// its animation subscription and prevent leaked ticks.
-type animationStopper interface {
-	StopAnimation()
-}
-
-// stopViewAnimation stops animation subscriptions for a view being removed.
-// This prevents animation tick leaks when views with active spinners are
-// removed from the message list (e.g., on stream cancellation via ESC).
-func stopViewAnimation(view layout.Model) {
-	if stopper, ok := view.(animationStopper); ok {
-		stopper.StopAnimation()
-	}
-}
-
 func (m *model) removeSpinner() {
 	if len(m.messages) == 0 {
 		return
@@ -1737,7 +1721,7 @@ func (m *model) removeSpinner() {
 	if m.messages[lastIdx].Type == types.MessageTypeSpinner {
 		// Stop any animation subscriptions before removing the view
 		if lastIdx < len(m.views) {
-			stopViewAnimation(m.views[lastIdx])
+			animation.StopView(m.views[lastIdx])
 			m.views = m.views[:lastIdx]
 		}
 		m.messages = m.messages[:lastIdx]
@@ -1767,7 +1751,7 @@ func (m *model) removePendingToolCallMessages() {
 			(msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning) {
 			// Stop any animation subscriptions before removing the view
 			if i < len(m.views) {
-				stopViewAnimation(m.views[i])
+				animation.StopView(m.views[i])
 			}
 			continue
 		}

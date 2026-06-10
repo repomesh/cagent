@@ -728,18 +728,7 @@ func (m *Model) StopAnimation() {
 	}
 	// Stop spinners in all tool entries
 	for _, entry := range m.toolEntries {
-		stopViewAnimation(entry.view)
-	}
-}
-
-// stopViewAnimation stops animation subscriptions for a view being removed.
-type animationStopper interface {
-	StopAnimation()
-}
-
-func stopViewAnimation(view layout.Model) {
-	if stopper, ok := view.(animationStopper); ok {
-		stopper.StopAnimation()
+		animation.StopView(entry.view)
 	}
 }
 
