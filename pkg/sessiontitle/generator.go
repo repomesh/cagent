@@ -75,7 +75,7 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 
 	messages := buildPrompt(userMessages)
 
-	var lastErr error
+	var errs []error
 	for idx, baseModel := range g.models {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -87,9 +87,10 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 			return title, nil
 		}
 
-		lastErr = err
+		errs = append(errs, err)
 		// Per-attempt failures are logged at Debug because we still have
-		// fallbacks; the final error is what callers log/wrap.
+		// fallbacks; the final error joins every attempt so callers see
+		// which model failed and why instead of just the last one.
 		slog.DebugContext(ctx, "Title generation attempt failed",
 			"session_id", sessionID,
 			"model", baseModel.ID(),
@@ -97,7 +98,7 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 			"error", err)
 	}
 
-	return "", fmt.Errorf("generating title failed: %w", lastErr)
+	return "", fmt.Errorf("all %d title model(s) failed: %w", len(g.models), errors.Join(errs...))
 }
 
 // generateOnce performs a single one-shot title generation call against
@@ -118,12 +119,12 @@ func generateOnce(ctx context.Context, baseModel provider.Provider, messages []c
 
 	stream, err := titleModel.CreateChatCompletionStream(ctx, messages, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("model %q: %w", baseModel.ID(), err)
 	}
 
 	raw, err := drainStream(stream)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("model %q: %w", baseModel.ID(), err)
 	}
 
 	title := sanitizeTitle(raw)

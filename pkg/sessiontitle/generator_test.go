@@ -135,6 +135,37 @@ func TestGenerator_Generate_FallsBackOnRecvError(t *testing.T) {
 	assert.Equal(t, 1, fallback.calls)
 }
 
+func TestGenerator_Generate_AllModelsFail_ReportsEachModel(t *testing.T) {
+	t.Parallel()
+
+	primary := &mockProvider{
+		id: modelsdev.NewID("primary", "boom"),
+		createFn: func() (chat.MessageStream, error) {
+			return nil, errors.New("exit status 1")
+		},
+	}
+	fallback := &mockProvider{
+		id: modelsdev.NewID("fallback", "nope"),
+		createFn: func() (chat.MessageStream, error) {
+			return nil, errors.New("connection refused")
+		},
+	}
+
+	gen := New(primary, fallback)
+	title, err := gen.Generate(t.Context(), "sess-1", []string{"hello"})
+	require.Error(t, err)
+	assert.Empty(t, title)
+
+	// Every attempt is surfaced, each tagged with the model that failed,
+	// so a bare leaf like "exit status 1" is no longer the whole message.
+	msg := err.Error()
+	assert.Contains(t, msg, "all 2 title model(s) failed")
+	assert.Contains(t, msg, `model "primary/boom"`)
+	assert.Contains(t, msg, "exit status 1")
+	assert.Contains(t, msg, `model "fallback/nope"`)
+	assert.Contains(t, msg, "connection refused")
+}
+
 func TestGenerator_Generate_FallsBackOnEmptyOutput(t *testing.T) {
 	t.Parallel()
 
