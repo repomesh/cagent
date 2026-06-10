@@ -225,7 +225,7 @@ func (f *debugFlags) runDebugTitleCommand(cmd *cobra.Command, args []string) (co
 
 	title, err := gen.Generate(ctx, "debug", []string{args[1]})
 	if err != nil {
-		return fmt.Errorf("generating title: %w", err)
+		return fmt.Errorf("generating title with agent %q: %w", agent.Name(), err)
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), title)
