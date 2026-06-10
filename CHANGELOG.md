@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.76.0] - 2026-06-10
+
+This is a maintenance release with dependency updates and internal improvements.
+
+## Technical Changes
+- Maintenance release with dependency updates
+
+
+
 ## [v1.74.0] - 2026-06-09
 
 This release introduces self-update functionality, session read-only mode, and 1Password CLI integration, along with model selection improvements and various bug fixes.
@@ -3363,3 +3372,5 @@ This release improves the terminal user interface with better error handling and
 [v1.73.0]: https://github.com/docker/docker-agent/releases/tag/v1.73.0
 
 [v1.74.0]: https://github.com/docker/docker-agent/releases/tag/v1.74.0
+
+[v1.76.0]: https://github.com/docker/docker-agent/releases/tag/v1.76.0
