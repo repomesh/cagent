@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -318,6 +319,41 @@ func TestURLSource_Read_RejectsHTTP(t *testing.T) {
 	_, err := NewURLSource("http://example.com/agent.yaml", nil).Read(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "only https://")
+}
+
+func TestURLSource_Read_AllowsLocalhostHTTP(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("localhost content"))
+	}))
+	t.Cleanup(server.Close)
+
+	// Replace the 127.0.0.1 address from httptest with localhost so
+	// the production code path recognises it as a localhost exemption.
+	localhostURL := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+
+	source := NewURLSource(localhostURL, nil)
+	data, err := source.Read(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "localhost content", string(data))
+}
+
+func TestURLSource_Read_RejectsNonHTTPSchemesOnLocalhost(t *testing.T) {
+	t.Parallel()
+
+	for _, u := range []string{
+		"ftp://localhost/agent.yaml",
+		"file://localhost/agent.yaml",
+		"gopher://localhost/agent.yaml",
+	} {
+		t.Run(u, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewURLSource(u, nil).Read(t.Context())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "only https://")
+		})
+	}
 }
 
 func TestURLSource_Read_RejectsLocalAddresses(t *testing.T) {

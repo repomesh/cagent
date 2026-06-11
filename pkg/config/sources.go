@@ -255,10 +255,17 @@ func (a urlSource) Read(ctx context.Context) ([]byte, error) {
 
 	client := httpclient.NewHTTPClient(ctx)
 	if !a.unsafe {
-		client = &http.Client{
-			Timeout:       60 * time.Second,
-			Transport:     httpclient.NewSSRFSafeTransport(),
-			CheckRedirect: httpclient.HTTPSOnlyRedirects(10),
+		if isLocalhostHTTP(a.url) {
+			client = &http.Client{
+				Timeout:       60 * time.Second,
+				CheckRedirect: httpclient.BoundedRedirects(10),
+			}
+		} else {
+			client = &http.Client{
+				Timeout:       60 * time.Second,
+				Transport:     httpclient.NewSSRFSafeTransport(),
+				CheckRedirect: httpclient.HTTPSOnlyRedirects(10),
+			}
 		}
 	}
 
@@ -366,16 +373,27 @@ func IsURLReference(input string) bool {
 	return strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://")
 }
 
-// validateAgentURL enforces that an agent URL uses HTTPS. SSRF protection
+// isLocalhostHTTP reports whether rawURL is an http:// URL targeting localhost.
+func isLocalhostHTTP(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "http" && u.Hostname() == "localhost"
+}
+
+// validateAgentURL enforces that an agent URL uses HTTPS, with an exception
+// for http://localhost which is allowed for local development. SSRF protection
 // (rejecting connections to loopback / private / link-local addresses) is
 // done at dial time by [httpclient.NewSSRFSafeTransport] so that DNS
-// rebinding cannot be used to bypass it.
+// rebinding cannot be used to bypass it. The SSRF transport is intentionally
+// skipped for http://localhost since loopback is the whole point.
 func validateAgentURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL %q: %w", rawURL, err)
 	}
-	if u.Scheme != "https" {
+	if u.Scheme != "https" && !isLocalhostHTTP(rawURL) {
 		return fmt.Errorf("refusing to load agent from %q: only https:// URLs are allowed (got scheme %q)", rawURL, u.Scheme)
 	}
 	if u.Host == "" {
