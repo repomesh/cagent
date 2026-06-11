@@ -60,81 +60,103 @@ func TestElicitationBridge_SendDeliversToCurrentChannel(t *testing.T) {
 	}
 }
 
-// TestElicitationBridge_SwapWaitsForInflightSenders is the key correctness
-// test: the bridge must not let a swap proceed while a send is in flight,
-// because the calling code on the runtime closes the channel shortly after
-// swapping it out. Without the RLock-during-send invariant the inner stream
-// could close the channel while an MCP elicitation is mid-send and panic.
-//
-// The test parks a send on a full channel, attempts a swap concurrently,
-// and asserts the swap blocks until the send completes (i.e. until the
-// reader drains).
-func TestElicitationBridge_SwapWaitsForInflightSenders(t *testing.T) {
+func TestElicitationBridge_SendRecoversClosedChannel(t *testing.T) {
 	t.Parallel()
 
 	var b elicitationBridge
+	ch := make(chan Event)
+	b.swap(ch)
+	close(ch)
 
-	// Unbuffered channel so the send blocks until a reader receives.
-	inner := make(chan Event)
-	b.swap(inner)
+	err := b.send(Error("closed"))
+	assert.ErrorIs(t, err, errNoElicitationChannel)
+}
 
+// TestElicitationBridge_RestoreAndCloseWaitsForInflightSenders is the
+// regression test for issue #3069: stream teardown must not close an event
+// channel while an MCP elicitation goroutine is blocked sending to it.
+//
+// The test parks a send on the current channel, starts restoreAndClose, and
+// verifies teardown cannot close the channel until the parked send drains.
+// Running under -race exercises the close-vs-send coordination that used to
+// panic with "send on closed channel".
+func TestElicitationBridge_RestoreAndCloseWaitsForInflightSenders(t *testing.T) {
+	t.Parallel()
+
+	var b elicitationBridge
+	current := make(chan Event)
 	parent := make(chan Event, 1)
+	b.swap(current)
 
 	sendStarted := make(chan struct{})
-	sendDone := make(chan struct{})
-
-	// Goroutine 1: in-flight sender on the inner channel.
+	sendDone := make(chan error, 1)
 	go func() {
 		close(sendStarted)
-		_ = b.send(Error("inflight"))
-		close(sendDone)
+		sendDone <- b.send(Error("inflight"))
 	}()
 	<-sendStarted
 
 	// Give the sender a moment to grab the RLock and park on the channel.
 	time.Sleep(20 * time.Millisecond)
 
-	// Goroutine 2: swap to parent. Must block until inner send completes.
-	swapped := make(chan struct{})
-	var prev chan Event
+	closed := make(chan struct{})
 	go func() {
-		prev = b.swap(parent)
-		close(swapped)
+		b.restoreAndClose(current, parent, StreamStopped("session", "agent", turnEndReasonNormal))
+		close(closed)
 	}()
 
-	// Swap must NOT have completed yet — the in-flight reader still holds
-	// the RLock.
 	select {
-	case <-swapped:
-		t.Fatal("swap completed while a send was still in flight; close-during-send race possible")
+	case <-closed:
+		t.Fatal("channel closed while a send was still in flight")
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	// Drain the inner channel; this lets the in-flight send return,
-	// release the RLock, and the swap to proceed.
-	<-inner
+	select {
+	case ev := <-current:
+		ee, ok := ev.(*ErrorEvent)
+		require.True(t, ok)
+		assert.Equal(t, "inflight", ee.Error)
+	case <-time.After(time.Second):
+		t.Fatal("expected in-flight event")
+	}
 
 	select {
-	case <-sendDone:
+	case err := <-sendDone:
+		require.NoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("in-flight send never completed after reader drained")
 	}
 
 	select {
-	case <-swapped:
+	case ev := <-current:
+		require.IsType(t, &StreamStoppedEvent{}, ev)
 	case <-time.After(time.Second):
-		t.Fatal("swap never completed after in-flight send finished")
+		t.Fatal("expected final stream stopped event")
 	}
-	assert.Equal(t, inner, prev, "swap should return the previously stored channel")
+
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("restoreAndClose never completed after final event drained")
+	}
+
+	select {
+	case _, ok := <-current:
+		assert.False(t, ok, "current channel should be closed after StreamStopped")
+	default:
+		t.Fatal("current channel should be closed")
+	}
 }
 
-// TestElicitationBridge_ConcurrentSendsAreSerializedSafely runs many
-// concurrent sends + swaps under -race to confirm the contract.
-func TestElicitationBridge_ConcurrentSendsAreSerializedSafely(t *testing.T) {
+// TestElicitationBridge_ConcurrentSendsAndCloseAreSerializedSafely runs many
+// concurrent sends while closing the stream under -race to confirm the bridge
+// owns all close-vs-send synchronization.
+func TestElicitationBridge_ConcurrentSendsAndCloseAreSerializedSafely(t *testing.T) {
 	t.Parallel()
 
 	var b elicitationBridge
 	ch := make(chan Event, 64)
+	parent := make(chan Event, 1)
 	b.swap(ch)
 
 	var wg sync.WaitGroup
@@ -146,28 +168,19 @@ func TestElicitationBridge_ConcurrentSendsAreSerializedSafely(t *testing.T) {
 		})
 	}
 
-	// Concurrent reader to keep the channel from filling up.
-	done := make(chan struct{})
+	received := make(chan struct{})
 	go func() {
-		defer close(done)
-		count := 0
+		defer close(received)
 		for range ch {
-			count++
-			if count == 50 {
-				return
-			}
 		}
 	}()
 
 	wg.Wait()
-	// Drain anything still pending.
-	for {
-		select {
-		case <-ch:
-		case <-done:
-			return
-		case <-time.After(100 * time.Millisecond):
-			return
-		}
+	b.restoreAndClose(ch, parent, StreamStopped("session", "agent", turnEndReasonNormal))
+
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not observe channel close")
 	}
 }

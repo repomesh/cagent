@@ -162,7 +162,7 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 
 // finalizeEventChannel performs cleanup at the end of a RunStream goroutine:
 // restores the previous elicitation channel, emits the StreamStopped event,
-// fires hooks, and closes the events channel.
+// closes the events channel, and fires hooks.
 //
 // reason is one of the turnEndReason* constants and classifies how the
 // stream ended (e.g. "normal", "error", "canceled"). It is surfaced in
@@ -170,13 +170,6 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 // distinguish between successful completion, crashes, and user-initiated
 // stops without reverse-engineering reconnect failures.
 func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.Session, reason string, prevElicitationCh, events chan Event) {
-	// Swap back the parent's elicitation channel before closing this
-	// stream's channel. This prevents a send-on-closed-channel panic
-	// and restores elicitation for the parent session.
-	r.elicitation.swap(prevElicitationCh)
-
-	defer close(events)
-
 	a := r.resolveSessionAgent(sess)
 
 	// Execute session end hooks with a context that won't be cancelled so
@@ -186,7 +179,8 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 	if ctx.Err() != nil && reason == "" {
 		reason = turnEndReasonCanceled
 	}
-	events <- StreamStopped(sess.ID, a.Name(), reason)
+
+	r.elicitation.restoreAndClose(events, prevElicitationCh, StreamStopped(sess.ID, a.Name(), reason))
 
 	r.executeOnUserInputHooks(ctx, sess.ID, "stream stopped")
 
