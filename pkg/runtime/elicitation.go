@@ -91,14 +91,12 @@ func (b *elicitationBridge) send(ev Event) (err error) {
 	return nil
 }
 
-// restoreAndClose restores the previous stream channel, emits the final
-// event while no elicitation sender can target the closing channel, then
-// closes the current channel under the bridge write lock.
-func (b *elicitationBridge) restoreAndClose(current, previous chan Event, final Event) {
+// restoreAndClose restores the previous stream channel and closes the current
+// stream channel under the bridge write lock.
+func (b *elicitationBridge) restoreAndClose(current, previous chan Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ch = previous
-	current <- final
 	close(current)
 }
 

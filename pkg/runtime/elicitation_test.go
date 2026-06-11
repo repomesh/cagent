@@ -7,6 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 )
 
 func TestElicitationError_Error(t *testing.T) {
@@ -101,7 +105,7 @@ func TestElicitationBridge_RestoreAndCloseWaitsForInflightSenders(t *testing.T) 
 
 	closed := make(chan struct{})
 	go func() {
-		b.restoreAndClose(current, parent, StreamStopped("session", "agent", turnEndReasonNormal))
+		b.restoreAndClose(current, parent)
 		close(closed)
 	}()
 
@@ -128,21 +132,14 @@ func TestElicitationBridge_RestoreAndCloseWaitsForInflightSenders(t *testing.T) 
 	}
 
 	select {
-	case ev := <-current:
-		require.IsType(t, &StreamStoppedEvent{}, ev)
-	case <-time.After(time.Second):
-		t.Fatal("expected final stream stopped event")
-	}
-
-	select {
 	case <-closed:
 	case <-time.After(time.Second):
-		t.Fatal("restoreAndClose never completed after final event drained")
+		t.Fatal("restoreAndClose never completed after reader drained")
 	}
 
 	select {
 	case _, ok := <-current:
-		assert.False(t, ok, "current channel should be closed after StreamStopped")
+		assert.False(t, ok, "current channel should be closed after in-flight send completed")
 	default:
 		t.Fatal("current channel should be closed")
 	}
@@ -176,11 +173,72 @@ func TestElicitationBridge_ConcurrentSendsAndCloseAreSerializedSafely(t *testing
 	}()
 
 	wg.Wait()
-	b.restoreAndClose(ch, parent, StreamStopped("session", "agent", turnEndReasonNormal))
+	b.restoreAndClose(ch, parent)
 
 	select {
 	case <-received:
 	case <-time.After(time.Second):
 		t.Fatal("reader did not observe channel close")
 	}
+}
+
+func TestLocalRuntime_FinalizeEventChannelEmitsStreamStoppedOnce(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	sess := session.New()
+	events := make(chan Event, 1)
+	parent := make(chan Event, 1)
+	rt.elicitation.swap(events)
+
+	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+
+	var stopped int
+	for ev := range events {
+		if _, ok := ev.(*StreamStoppedEvent); ok {
+			stopped++
+		}
+	}
+	assert.Equal(t, 1, stopped, "StreamStopped should be emitted exactly once")
+}
+
+func TestLocalRuntime_FinalizeEventChannelDoesNotDeadlockWhenBufferFullAndConsumerGone(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	sess := session.New()
+	events := make(chan Event, 1)
+	parent := make(chan Event, 1)
+	events <- Error("buffer already full")
+	rt.elicitation.swap(events)
+
+	done := make(chan struct{})
+	go func() {
+		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("finalizeEventChannel deadlocked with a full buffer and no consumer")
+	}
+
+	var stopped int
+	for ev := range events {
+		if _, ok := ev.(*StreamStoppedEvent); ok {
+			stopped++
+		}
+	}
+	assert.Zero(t, stopped, "StreamStopped should be dropped instead of blocking when the buffer is full")
+}
+
+func newElicitationTestRuntime(t *testing.T) *LocalRuntime {
+	t.Helper()
+
+	prov := &mockProvider{id: "test/mock-model"}
+	root := agent.New("root", "test", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(team.New(team.WithAgents(root)), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	return rt
 }
