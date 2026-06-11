@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -92,6 +93,27 @@ func AlwaysAllowLabel(pattern string) string {
 	return "always allow " + pattern
 }
 
+// ActionKeys are the uppercase action letters of the decision row, in
+// display order. Click hit-testing on the rendered options walks these
+// letters; map a hit back to its decision with DecisionForAction.
+const ActionKeys = "YNTA"
+
+// DecisionForAction maps an action letter from ActionKeys ("Y", "N", "T",
+// "A") to its decision. ok is false for any other string.
+func DecisionForAction(action string) (decision Decision, ok bool) {
+	switch action {
+	case "Y":
+		return Approve, true
+	case "N":
+		return Reject, true
+	case "T":
+		return ApproveTool, true
+	case "A":
+		return ApproveSession, true
+	}
+	return 0, false
+}
+
 // OptionsHelp returns the key/label pairs of the decision row, in display
 // order, ready for a help-keys renderer (e.g. dialog.RenderHelpKeys).
 func OptionsHelp(pattern string) []string {
@@ -109,6 +131,24 @@ type KeyMap struct {
 	No       key.Binding
 	All      key.Binding
 	ThisTool key.Binding
+}
+
+// DecisionFor maps a key press to its decision. ok is false when the key
+// is not a confirmation key. Every UI hosting a confirmation should
+// dispatch through this single mapping so the bindings and their meaning
+// can never drift apart.
+func (k KeyMap) DecisionFor(msg tea.KeyPressMsg) (decision Decision, ok bool) {
+	switch {
+	case key.Matches(msg, k.Yes):
+		return Approve, true
+	case key.Matches(msg, k.No):
+		return Reject, true
+	case key.Matches(msg, k.ThisTool):
+		return ApproveTool, true
+	case key.Matches(msg, k.All):
+		return ApproveSession, true
+	}
+	return 0, false
 }
 
 // DefaultKeyMap returns the standard confirmation key bindings.

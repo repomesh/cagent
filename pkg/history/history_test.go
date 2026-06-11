@@ -534,3 +534,21 @@ func TestHistory_RedactsOnMigrate(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), pat, "migrated on-disk history must not contain the secret")
 }
+
+func TestNewAtDir(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "gordon")
+
+	h, err := NewAtDir(dir)
+	require.NoError(t, err)
+	require.NoError(t, h.Add("hello"))
+
+	// The history lands directly at dir/history, no ".cagent" segment.
+	_, err = os.Stat(filepath.Join(dir, "history"))
+	require.NoError(t, err)
+
+	reloaded, err := NewAtDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"hello"}, reloaded.Messages)
+}

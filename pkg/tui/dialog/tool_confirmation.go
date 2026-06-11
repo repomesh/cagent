@@ -1,9 +1,6 @@
 package dialog
 
 import (
-	"strings"
-
-	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -127,24 +124,24 @@ func (d *toolConfirmationDialog) Init() tea.Cmd {
 	return d.scrollView.Init()
 }
 
-// executeAction dispatches a confirmation action by key ("Y", "N", "T", "A").
-func (d *toolConfirmationDialog) executeAction(action string) (layout.Model, tea.Cmd) {
-	switch action {
-	case "Y":
+// executeAction dispatches a confirmation decision.
+func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (layout.Model, tea.Cmd) {
+	switch decision {
+	case toolconfirm.Approve:
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
 			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.Approve.Resume("", "")}),
 		)
-	case "N":
+	case toolconfirm.Reject:
 		return d, core.CmdHandler(OpenDialogMsg{
 			Model: NewToolRejectionReasonDialog(),
 		})
-	case "T":
+	case toolconfirm.ApproveTool:
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
 			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveTool.Resume(d.permissionPattern, "")}),
 		)
-	case "A":
+	case toolconfirm.ApproveSession:
 		d.sessionState.SetYoloMode(true)
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
@@ -172,15 +169,8 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, cmd
 		}
 
-		switch {
-		case key.Matches(msg, d.keyMap.Yes):
-			return d.executeAction("Y")
-		case key.Matches(msg, d.keyMap.No):
-			return d.executeAction("N")
-		case key.Matches(msg, d.keyMap.All):
-			return d.executeAction("A")
-		case key.Matches(msg, d.keyMap.ThisTool):
-			return d.executeAction("T")
+		if decision, ok := d.keyMap.DecisionFor(msg); ok {
+			return d.executeAction(decision)
 		}
 
 		// Forward scrolling keys to the scroll view
@@ -229,10 +219,9 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 	// Walk backward from the click position to find the nearest action key.
 	// The plain text looks like: "Y yes  N no  T always allow...  A all tools"
 	// Each region starts with its uppercase action key.
-	actionKeys := "YNTA"
 	for i := relX; i >= 0; i-- {
-		if strings.ContainsRune(actionKeys, rune(optionsPlain[i])) {
-			return d.executeAction(string(optionsPlain[i]))
+		if decision, ok := toolconfirm.DecisionForAction(string(optionsPlain[i])); ok {
+			return d.executeAction(decision)
 		}
 	}
 
