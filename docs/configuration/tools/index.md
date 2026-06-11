@@ -167,7 +167,11 @@ toolsets:
 
 ### Checksum Verification
 
-Downloaded binaries are **checksum-verified** before installation. Verification fails closed: if a checksum is advertised in the aqua registry manifest but does not match the downloaded archive (or the manifest is missing entirely), the install is aborted and an error is returned. Checksum types that are unsupported or too weak are skipped with a warning rather than causing a hard failure.
+Where the aqua registry includes a checksum manifest, downloaded binaries are verified against it before installation. Verification behaviour depends on the checksum type advertised:
+
+- **Strong checksums (sha256, sha512, etc.)** — verified before the binary is installed. If the downloaded archive does not match, the install is aborted and an error is returned (fails closed).
+- **Unsupported or weak checksum types (e.g. md5, sha1)** — skipped with a warning; installation proceeds without verification.
+- **No manifest** — if no checksum is advertised in the registry entry, the binary is installed without verification.
 
 ### version_overrides Resolution
 
