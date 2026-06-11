@@ -324,6 +324,30 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 		err = CheckRequiredEnvVars(t.Context(), cfg, "https://my-gateway.example.com", &noEnvProvider{})
 		require.NoError(t, err)
 	})
+
+	t.Run("localhost gateway without token", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		require.NoError(t, err)
+
+		err = CheckRequiredEnvVars(t.Context(), cfg, "http://localhost:8080", &noEnvProvider{})
+		require.ErrorContains(t, err, "sign in Docker Desktop")
+	})
+
+	t.Run("localhost gateway with token", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		require.NoError(t, err)
+
+		env := &fakeEnvProvider{vars: map[string]string{
+			environment.DockerDesktopTokenEnv: "some-jwt-token",
+		}}
+
+		err = CheckRequiredEnvVars(t.Context(), cfg, "http://localhost:8080", env)
+		require.NoError(t, err)
+	})
 }
 
 func TestApplyModelOverrides(t *testing.T) {

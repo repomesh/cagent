@@ -123,7 +123,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	} else {
 		// When using a Gateway targeting a Docker domain, tokens are short-lived.
 		// Only require and inject the Docker JWT if the gateway is a .docker.com URL.
-		if environment.IsDockerURL(gateway) {
+		if environment.IsTrustedDockerURL(gateway) {
 			// Fail fast if Docker Desktop's auth token isn't available
 			if token, _ := env.Get(ctx, environment.DockerDesktopTokenEnv); token == "" {
 				slog.ErrorContext(ctx, "Gemini client creation failed", "error", "failed to get Docker Desktop's authentication token")
@@ -134,7 +134,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// When using a Gateway, tokens are short-lived.
 		clientFn = func(ctx context.Context) (*genai.Client, error) {
 			var authToken string
-			if environment.IsDockerURL(gateway) {
+			if environment.IsTrustedDockerURL(gateway) {
 				// Query a fresh auth token each time the client is used
 				authToken, _ = env.Get(ctx, environment.DockerDesktopTokenEnv)
 				if authToken == "" {

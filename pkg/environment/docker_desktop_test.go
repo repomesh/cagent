@@ -8,7 +8,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
-func TestIsDockerURL(t *testing.T) {
+func TestIsTrustedDockerURL(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -24,10 +24,18 @@ func TestIsDockerURL(t *testing.T) {
 		{"https://sub.sub.docker.com/path", true},
 		{"http://docker.com/path", true},
 
+		// Localhost URLs (local development)
+		{"http://localhost:8080/agent.yaml", true},
+		{"https://localhost/agent.yaml", true},
+		{"http://localhost/v1/models", true},
+		{"http://127.0.0.1:8080/agent.yaml", true},
+		{"http://127.0.0.1/path", true},
+		{"http://[::1]:8080/agent.yaml", true},
+		{"http://[::1]/path", true},
+
 		// Non-Docker URLs
 		{"https://example.com/agent.yaml", false},
 		{"https://github.com/docker/repo", false},
-		{"http://localhost:8080/agent.yaml", false},
 		{"", false},
 
 		// Security: malicious URLs that should NOT be treated as Docker URLs
@@ -43,7 +51,7 @@ func TestIsDockerURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, environment.IsDockerURL(tt.url))
+			assert.Equal(t, tt.expected, environment.IsTrustedDockerURL(tt.url))
 		})
 	}
 }

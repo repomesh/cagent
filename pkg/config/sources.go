@@ -340,8 +340,8 @@ func isGitHubURL(urlStr string) bool {
 	return slices.Contains(githubHosts, u.Host)
 }
 
-// isDockerURL is an alias for [environment.IsDockerURL] for local readability.
-var isDockerURL = environment.IsDockerURL
+// isTrustedDockerURL is an alias for [environment.IsTrustedDockerURL] for local readability.
+var isTrustedDockerURL = environment.IsTrustedDockerURL
 
 // addGitHubAuth adds GitHub token authorization to the request if:
 // - The URL is a GitHub URL
@@ -374,7 +374,7 @@ func (a urlSource) addDockerAuth(ctx context.Context, req *http.Request) {
 		return
 	}
 
-	if !isDockerURL(a.url) {
+	if !isTrustedDockerURL(a.url) {
 		return
 	}
 

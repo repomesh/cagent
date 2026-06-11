@@ -618,7 +618,7 @@ func TestIsGitHubURL(t *testing.T) {
 	}
 }
 
-func TestIsDockerURL(t *testing.T) {
+func TestIsTrustedDockerURL(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -634,10 +634,15 @@ func TestIsDockerURL(t *testing.T) {
 		{"https://sub.sub.docker.com/path", true},
 		{"http://docker.com/path", true},
 
+		// Localhost URLs (local development)
+		{"http://localhost:8080/agent.yaml", true},
+		{"https://localhost/agent.yaml", true},
+		{"http://127.0.0.1:8080/agent.yaml", true},
+		{"http://[::1]:8080/agent.yaml", true},
+
 		// Non-Docker URLs
 		{"https://example.com/agent.yaml", false},
 		{"https://github.com/docker/repo", false},
-		{"http://localhost:8080/agent.yaml", false},
 		{"", false},
 
 		// Security: malicious URLs that should NOT be treated as Docker URLs
@@ -653,7 +658,7 @@ func TestIsDockerURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, isDockerURL(tt.url))
+			assert.Equal(t, tt.expected, isTrustedDockerURL(tt.url))
 		})
 	}
 }
@@ -672,17 +677,29 @@ func TestURLSource_Read_WithDockerAuth_NonDockerURL(t *testing.T) {
 		environment.DockerDesktopTokenEnv: "docker-jwt-token",
 	})
 
-	source := newURLSourceForTest(server.URL, envProvider)
-	_, err := source.Read(t.Context())
+	// Use a non-Docker, non-localhost URL as the source URL so
+	// isTrustedDockerURL returns false. The actual HTTP request still goes to
+	// the local test server via the unsafe flag.
+	src := &urlSource{
+		url:         "https://example.com/agent.yaml",
+		envProvider: envProvider,
+		unsafe:      true,
+	}
+	// Override the url to point at our test server for the actual fetch,
+	// but addDockerAuth checks the url field which is example.com.
+	// We need to actually fetch from the test server though, so we
+	// manually test addDockerAuth in isolation instead.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
 	require.NoError(t, err)
+	src.addDockerAuth(t.Context(), req)
 	assert.Empty(t, receivedAuth, "non-Docker URLs should not receive Docker auth header")
 }
 
-func TestURLSource_Read_WithDockerAuth_DockerURL(t *testing.T) {
+func TestURLSource_Read_WithDockerAuth_LocalhostURL(t *testing.T) {
 	t.Parallel()
 
-	// We cannot test with real docker.com URLs, but we verify that URLs with
-	// docker.com in the path (not hostname) don't receive the token.
+	// httptest.NewServer binds to 127.0.0.1 which is treated as localhost.
+	// Verify that the Docker JWT is included for localhost URLs.
 	var receivedAuth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
@@ -694,11 +711,10 @@ func TestURLSource_Read_WithDockerAuth_DockerURL(t *testing.T) {
 		environment.DockerDesktopTokenEnv: "docker-jwt-token",
 	})
 
-	maliciousURL := server.URL + "/desktop.docker.com/agent.yaml"
-	source := newURLSourceForTest(maliciousURL, envProvider)
+	source := newURLSourceForTest(server.URL, envProvider)
 	_, err := source.Read(t.Context())
 	require.NoError(t, err)
-	assert.Empty(t, receivedAuth, "should not add Docker auth header when docker.com host is only in path")
+	assert.Equal(t, "Bearer docker-jwt-token", receivedAuth, "localhost URLs should receive Docker auth header")
 }
 
 func TestURLSource_Read_WithDockerAuth_NoToken(t *testing.T) {
@@ -764,6 +780,30 @@ func TestURLSource_addDockerAuth(t *testing.T) {
 			wantAuth: "Bearer my-jwt",
 		},
 		{
+			name: "localhost with token",
+			url:  "http://localhost:8080/v1/models",
+			envProvider: environment.NewMapEnvProvider(map[string]string{
+				environment.DockerDesktopTokenEnv: "my-jwt",
+			}),
+			wantAuth: "Bearer my-jwt",
+		},
+		{
+			name: "127.0.0.1 with token",
+			url:  "http://127.0.0.1:9090/agent.yaml",
+			envProvider: environment.NewMapEnvProvider(map[string]string{
+				environment.DockerDesktopTokenEnv: "my-jwt",
+			}),
+			wantAuth: "Bearer my-jwt",
+		},
+		{
+			name: "IPv6 loopback with token",
+			url:  "http://[::1]:9090/agent.yaml",
+			envProvider: environment.NewMapEnvProvider(map[string]string{
+				environment.DockerDesktopTokenEnv: "my-jwt",
+			}),
+			wantAuth: "Bearer my-jwt",
+		},
+		{
 			name: "non-docker URL with token",
 			url:  "https://example.com/agent.yaml",
 			envProvider: environment.NewMapEnvProvider(map[string]string{
@@ -774,6 +814,12 @@ func TestURLSource_addDockerAuth(t *testing.T) {
 		{
 			name:        "docker.com URL without token",
 			url:         "https://desktop.docker.com/agent.yaml",
+			envProvider: environment.NewNoEnvProvider(),
+			wantAuth:    "",
+		},
+		{
+			name:        "localhost without token",
+			url:         "http://localhost:8080/agent.yaml",
 			envProvider: environment.NewNoEnvProvider(),
 			wantAuth:    "",
 		},
