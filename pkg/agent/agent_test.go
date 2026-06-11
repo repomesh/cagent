@@ -75,6 +75,49 @@ func (f *flappyToolSet) Tools(_ context.Context) ([]tools.Tool, error) {
 	return f.stubs, nil
 }
 
+type reconnectingToolSet struct {
+	started      bool
+	startCalls   int
+	restartCalls int
+	listCalls    int
+	stubs        []tools.Tool
+}
+
+var (
+	_ tools.ToolSet   = (*reconnectingToolSet)(nil)
+	_ tools.Startable = (*reconnectingToolSet)(nil)
+)
+
+func (r *reconnectingToolSet) Start(context.Context) error {
+	r.startCalls++
+	r.started = true
+	return nil
+}
+
+func (r *reconnectingToolSet) Stop(context.Context) error {
+	r.started = false
+	return nil
+}
+
+func (r *reconnectingToolSet) Restart(context.Context) error {
+	r.restartCalls++
+	r.started = true
+	return nil
+}
+
+func (r *reconnectingToolSet) IsStarted() bool { return r.started }
+
+func (r *reconnectingToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	if !r.started {
+		return nil, errors.New("toolset not started")
+	}
+	r.listCalls++
+	if r.listCalls == 1 {
+		r.started = false
+	}
+	return r.stubs, nil
+}
+
 func TestAgentTools(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -495,4 +538,28 @@ func TestAgentWarningsConcurrentAccess(t *testing.T) {
 	// A successful run means no data race and no panic; we don't assert a
 	// specific number of warnings drained because drainers run concurrently
 	// with writers.
+}
+
+func TestAgentToolsRecoversWhenUnderlyingToolsetDies(t *testing.T) {
+	t.Parallel()
+
+	stub := &reconnectingToolSet{
+		stubs: []tools.Tool{{Name: "mcp_ping", Parameters: map[string]any{}}},
+	}
+	a := New("root", "test", WithToolSets(stub))
+
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, got, 1, "turn 1: tool should be available after initial start")
+	assert.Empty(t, a.DrainWarnings())
+	assert.Equal(t, 1, stub.startCalls)
+	assert.Equal(t, 0, stub.restartCalls)
+	assert.False(t, stub.IsStarted(), "test fixture simulates an underlying session death after turn 1")
+
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, got, 1, "turn 2: tool should be available after Startable-triggered recovery")
+	assert.Empty(t, a.DrainWarnings(), "silent recovery must not emit a warning")
+	assert.Equal(t, 1, stub.startCalls)
+	assert.Equal(t, 1, stub.restartCalls)
 }

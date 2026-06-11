@@ -7,12 +7,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
 
 // mockMCPClient is a test double for the mcpClient interface.
@@ -606,4 +608,66 @@ func TestCallToolRecoversFromErrSessionMissing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "recovered", result.Output)
 	assert.Equal(t, int32(2), callCount.Load(), "expected exactly 2 CallTool invocations (1 failed + 1 retry)")
+}
+
+func TestRemoteToolsetDefaultsRestartAlways(t *testing.T) {
+	t.Parallel()
+
+	policy := remotePolicy(lifecycle.Policy{Restart: lifecycle.RestartOnFailure})
+
+	assert.Equal(t, lifecycle.RestartAlways, policy.Restart)
+}
+
+func TestRemoteToolsetPreservesRestartNever(t *testing.T) {
+	t.Parallel()
+
+	policy := remotePolicy(lifecycle.Policy{Restart: lifecycle.RestartNever})
+
+	assert.Equal(t, lifecycle.RestartNever, policy.Restart)
+}
+
+func TestRemotePolicyPreservesRestartAlways(t *testing.T) {
+	t.Parallel()
+
+	policy := remotePolicy(lifecycle.Policy{Restart: lifecycle.RestartAlways})
+
+	assert.Equal(t, lifecycle.RestartAlways, policy.Restart)
+}
+
+func TestRemoteToolsetReconnectsAfterCleanClose(t *testing.T) {
+	t.Parallel()
+
+	pingTool := &mcp.Tool{Name: "ping"}
+	mock := &failingInitClient{
+		toolsToList: []*mcp.Tool{pingTool},
+		waitCh:      make(chan struct{}),
+	}
+
+	ts := newTestToolset("test-remote", "remote-server", mock)
+	ts.supervisor = newSupervisor(ts, lifecycle.Policy{
+		Restart: lifecycle.RestartAlways,
+		Backoff: lifecycle.Backoff{
+			Initial:    time.Millisecond,
+			Max:        2 * time.Millisecond,
+			Multiplier: 2,
+		},
+	})
+
+	require.NoError(t, ts.Start(t.Context()))
+	require.True(t, ts.IsStarted())
+
+	require.NoError(t, mock.Close(t.Context()))
+	require.Eventually(t, func() bool {
+		mock.mu.Lock()
+		initCalls := mock.initCalls
+		mock.mu.Unlock()
+		return initCalls >= 2 && ts.IsStarted()
+	}, 2*time.Second, 10*time.Millisecond, "remote toolset did not reconnect after clean close")
+
+	toolList, err := ts.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, toolList, 1)
+	assert.Equal(t, "test-remote_ping", toolList[0].Name)
+
+	_ = ts.Stop(t.Context())
 }

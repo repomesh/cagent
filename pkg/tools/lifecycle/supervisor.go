@@ -418,6 +418,9 @@ func (s *Supervisor) shouldRestart(err error, forced bool) bool {
 	case RestartAlways:
 		return true
 	default: // RestartOnFailure
+		// Clean exits are not failures for stdio MCP and LSP child processes.
+		// Remote MCP streams that should reconnect after an idle clean close opt
+		// into RestartAlways when their supervisor policy is constructed.
 		return err != nil && !IsPermanent(err)
 	}
 }

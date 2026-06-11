@@ -267,8 +267,19 @@ func newRemoteToolset(
 		logID:       urlString,
 		description: desc,
 	}
-	ts.supervisor = newSupervisor(ts, firstOrZero(policy))
+	ts.supervisor = newSupervisor(ts, remotePolicy(firstOrZero(policy)))
 	return ts
+}
+
+func remotePolicy(base lifecycle.Policy) lifecycle.Policy {
+	if base.Restart == lifecycle.RestartOnFailure {
+		// Remote MCP servers commonly close idle SSE/streaming connections
+		// cleanly even though the server remains available. Treat on_failure as
+		// always for this transport so those clean closes reconnect, while
+		// preserving RestartNever opt-outs and stdio child-process semantics.
+		base.Restart = lifecycle.RestartAlways
+	}
+	return base
 }
 
 // firstOrZero returns the first element of s or the zero value of T if

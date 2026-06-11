@@ -226,3 +226,98 @@ func TestStartableToolSet_ListFailureRecoveryResetsStreak(t *testing.T) {
 	assert.Check(t, err != nil)
 	assert.Check(t, is.Equal(s.ShouldReportListFailure(), true), "fresh failure after recovery must warn")
 }
+
+type reportingToolSet struct {
+	started      bool
+	startCalls   int
+	restartCalls int
+}
+
+func (r *reportingToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return []tools.Tool{{Name: "reporting_tool"}}, nil
+}
+
+func (r *reportingToolSet) Start(context.Context) error {
+	r.startCalls++
+	r.started = true
+	return nil
+}
+
+func (r *reportingToolSet) Stop(context.Context) error {
+	r.started = false
+	return nil
+}
+
+func (r *reportingToolSet) IsStarted() bool { return r.started }
+
+func (r *reportingToolSet) Restart(context.Context) error {
+	r.restartCalls++
+	r.started = true
+	return nil
+}
+
+type reportingStartOnlyToolSet struct {
+	started    bool
+	startCalls int
+}
+
+func (r *reportingStartOnlyToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return []tools.Tool{{Name: "start_only_tool"}}, nil
+}
+
+func (r *reportingStartOnlyToolSet) Start(context.Context) error {
+	r.startCalls++
+	r.started = true
+	return nil
+}
+
+func (r *reportingStartOnlyToolSet) Stop(context.Context) error {
+	r.started = false
+	return nil
+}
+
+func (r *reportingStartOnlyToolSet) IsStarted() bool { return r.started }
+
+func TestStartableToolSet_RecoversDeadUnderlyingWithRestart(t *testing.T) {
+	t.Parallel()
+
+	inner := &reportingToolSet{}
+	s := tools.NewStartable(inner)
+
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(inner.startCalls, 1))
+	assert.Check(t, is.Equal(inner.restartCalls, 0))
+
+	inner.started = false
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(inner.startCalls, 1), "recovery should prefer Restart over Start")
+	assert.Check(t, is.Equal(inner.restartCalls, 1))
+}
+
+func TestStartableToolSet_RecoversDeadUnderlyingWithStartFallback(t *testing.T) {
+	t.Parallel()
+
+	inner := &reportingStartOnlyToolSet{}
+	s := tools.NewStartable(inner)
+
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(inner.startCalls, 1))
+
+	inner.started = false
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(inner.startCalls, 2))
+}
+
+func TestStartableToolSet_NoStartReporterPreservesLatchedStart(t *testing.T) {
+	t.Parallel()
+
+	inner := &flappyToolSet{}
+	s := tools.NewStartable(inner)
+
+	assert.NilError(t, s.Start(t.Context()))
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(inner.startups, 1))
+}

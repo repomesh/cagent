@@ -40,6 +40,12 @@ type failureStreak struct {
 	pending bool // true if the current streak's first failure is unreported
 }
 
+// startReporter is implemented by toolsets whose live lifecycle state can be
+// queried independently of the StartableToolSet wrapper's latched state.
+type startReporter interface {
+	IsStarted() bool
+}
+
 func (f *failureStreak) fail() {
 	if !f.active {
 		f.active = true
@@ -101,11 +107,21 @@ func (s *StartableToolSet) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	recovering := false
 	if s.started {
-		return nil
+		if reporter, ok := As[startReporter](s.ToolSet); !ok || reporter.IsStarted() {
+			return nil
+		}
+		s.started = false
+		recovering = true
 	}
 
-	if startable, ok := As[Startable](s.ToolSet); ok {
+	if restarter, ok := As[Restartable](s.ToolSet); recovering && ok {
+		if err := restarter.Restart(ctx); err != nil {
+			s.startStreak.fail()
+			return err
+		}
+	} else if startable, ok := As[Startable](s.ToolSet); ok {
 		if err := startable.Start(ctx); err != nil {
 			s.startStreak.fail()
 			return err

@@ -451,6 +451,120 @@ func TestSupervisor_PermanentErrorsDontRestart(t *testing.T) {
 	assert.Check(t, is.Equal(c.Calls(), 1), "must not retry on permanent error")
 }
 
+func TestSupervisor_CleanClosePolicyBoundary(t *testing.T) {
+	t.Parallel()
+
+	sess1 := newFakeSession()
+	c := newScriptedConnector(scriptStep{session: sess1})
+
+	failedCh := make(chan error, 1)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Restart: lifecycle.RestartOnFailure,
+		Backoff: fastBackoff,
+		OnFailed: func(err error) {
+			select {
+			case failedCh <- err:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	sess1.fail(nil)
+
+	select {
+	case err := <-failedCh:
+		assert.Check(t, err == nil)
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not transition to Failed after clean close")
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateFailed))
+	assert.Check(t, is.Equal(c.Calls(), 1), "RestartOnFailure must not reconnect clean closes")
+}
+
+func TestSupervisor_RestartAlwaysReconnectsCleanCloseAndResetsBudget(t *testing.T) {
+	t.Parallel()
+
+	sess1 := newFakeSession()
+	sess2 := newFakeSession()
+	sess3 := newFakeSession()
+	c := newScriptedConnector(
+		scriptStep{session: sess1},
+		scriptStep{session: sess2},
+		scriptStep{session: sess3},
+	)
+
+	restarted := make(chan struct{}, 2)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Restart:     lifecycle.RestartAlways,
+		MaxAttempts: 1,
+		Backoff:     fastBackoff,
+		OnRestart: func() {
+			select {
+			case restarted <- struct{}{}:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	sess1.fail(nil)
+
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not reconnect after first clean close")
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady))
+	assert.Check(t, is.Equal(c.Calls(), 2))
+
+	sess2.fail(nil)
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not reconnect after second clean close")
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady))
+	assert.Check(t, is.Equal(c.Calls(), 3), "successful reconnect must reset the budget")
+
+	assert.NilError(t, s.Stop(t.Context()))
+}
+
+func TestSupervisor_RestartAlwaysCleanCloseStillHonorsFailedReconnectBudget(t *testing.T) {
+	t.Parallel()
+
+	sess1 := newFakeSession()
+	c := newScriptedConnector(
+		scriptStep{session: sess1},
+		scriptStep{err: errors.New("fail-1")},
+		scriptStep{err: errors.New("fail-2")},
+	)
+
+	failedCh := make(chan error, 1)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Restart:     lifecycle.RestartAlways,
+		MaxAttempts: 2,
+		Backoff:     fastBackoff,
+		OnFailed: func(err error) {
+			select {
+			case failedCh <- err:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	sess1.fail(nil)
+
+	select {
+	case <-failedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not give up after failed reconnect budget")
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateFailed))
+	assert.Check(t, is.Equal(c.Calls(), 3))
+}
+
 func TestBackoff_Defaults(t *testing.T) {
 	t.Parallel()
 
