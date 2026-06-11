@@ -3,6 +3,8 @@ package toolconfirm
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -95,4 +97,40 @@ func TestRejectionReasonsAreStable(t *testing.T) {
 		ids = append(ids, r.ID)
 	}
 	assert.Equal(t, []string{"bad_args", "wrong_tool", "unsafe", "clarify"}, ids)
+}
+
+func TestKeyMapDecisionFor(t *testing.T) {
+	t.Parallel()
+
+	keyMap := DefaultKeyMap()
+	for _, tt := range []struct {
+		key      string
+		decision Decision
+	}{
+		{"y", Approve}, {"Y", Approve},
+		{"n", Reject}, {"N", Reject},
+		{"t", ApproveTool}, {"T", ApproveTool},
+		{"a", ApproveSession}, {"A", ApproveSession},
+	} {
+		decision, ok := keyMap.DecisionFor(tea.KeyPressMsg{Code: rune(tt.key[0]), Text: tt.key})
+		require.True(t, ok, "key %q", tt.key)
+		assert.Equal(t, tt.decision, decision, "key %q", tt.key)
+	}
+
+	_, ok := keyMap.DecisionFor(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	assert.False(t, ok)
+}
+
+func TestDecisionForAction(t *testing.T) {
+	t.Parallel()
+
+	for i, want := range []Decision{Approve, Reject, ApproveTool, ApproveSession} {
+		action := string(ActionKeys[i])
+		decision, ok := DecisionForAction(action)
+		require.True(t, ok, "action %q", action)
+		assert.Equal(t, want, decision, "action %q", action)
+	}
+
+	_, ok := DecisionForAction("x")
+	assert.False(t, ok)
 }
