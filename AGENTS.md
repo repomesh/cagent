@@ -107,3 +107,4 @@ Before marking work as complete:
 - Group related changes together; avoid mixing unrelated changes
 - Keep branches focused on single features or fixes
 - Ensure your branch is up-to-date before submitting
+- Sign commits with a GPG or SSH key (`git commit -S`)
