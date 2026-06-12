@@ -39,10 +39,6 @@ type ModelChoice struct {
 	IsCustom bool `json:"is_custom,omitempty"`
 	// IsCatalog indicates this is a model from the models.dev catalog
 	IsCatalog bool `json:"is_catalog,omitempty"`
-	// IsGateway indicates the configured models gateway advertises this
-	// model on its /v1/models endpoint. UIs use it to scope the picker to
-	// gateway-served models by default while still offering the full list.
-	IsGateway bool `json:"is_gateway,omitempty"`
 
 	// The fields below are populated (best-effort) from the models.dev
 	// catalog. They are optional and may all be zero/empty when no
@@ -488,27 +484,14 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 		choices = append(choices, choice)
 	}
 
-	// When a models gateway is configured and advertises its models via
-	// /v1/models, those entries are listed first and flagged IsGateway.
-	// The full catalog is still appended (deduplicated) so UIs can offer
-	// an "all models" escape hatch: gateways may serve more models than
-	// they advertise (see PR #3086). When the gateway doesn't expose
-	// /v1/models, only the catalog filtered by available credentials is
-	// returned, as before.
+	// Prefer live gateway discovery when a models gateway is configured:
+	// the picker then only shows the models actually served by the
+	// gateway, merged with the explicitly configured ones above. When the
+	// gateway doesn't expose /v1/models, fall back to the models.dev
+	// catalog filtered by available credentials.
 	if r.modelSwitcherCfg.ModelsGateway != "" {
 		if gatewayChoices, ok := r.buildGatewayChoices(ctx); ok {
-			choices = append(choices, gatewayChoices...)
-
-			seen := make(map[string]bool, len(choices))
-			for _, c := range choices {
-				seen[c.Ref] = true
-			}
-			for _, c := range r.buildCatalogChoices(ctx) {
-				if !seen[c.Ref] {
-					choices = append(choices, c)
-				}
-			}
-			return choices
+			return append(choices, gatewayChoices...)
 		}
 	}
 

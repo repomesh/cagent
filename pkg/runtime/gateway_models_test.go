@@ -67,10 +67,6 @@ func catalogDB() *modelsdev.Database {
 						Name:       "Catalog Only",
 						Modalities: modelsdev.Modalities{Output: []string{"text"}},
 					},
-					"gpt-4o": {
-						Name:       "GPT-4o",
-						Modalities: modelsdev.Modalities{Output: []string{"text"}},
-					},
 				},
 			},
 		},
@@ -108,24 +104,11 @@ func TestAvailableModels_GatewayDiscovery(t *testing.T) {
 	assert.Contains(t, got, "openai/bare-model", "bare IDs must be routed through the openai provider")
 	assert.NotContains(t, got, "anthropic/claude-sonnet-4-0", "gateway models duplicating configured ones must be skipped")
 	assert.NotContains(t, got, "openai/text-embedding-3-small", "embedding models must be filtered out")
-	assert.Contains(t, got, "openai/catalog-only-model", "catalog entries must still be returned so UIs can offer an all-models view")
-
-	count := 0
-	for _, ref := range got {
-		if ref == "openai/gpt-4o" {
-			count++
-		}
-	}
-	assert.Equal(t, 1, count, "models in both the gateway list and the catalog must not be duplicated")
+	assert.NotContains(t, got, "openai/catalog-only-model", "catalog must be suppressed when gateway discovery succeeds")
 
 	for _, c := range choices {
-		switch c.Ref {
-		case "openai/gpt-4o":
+		if c.Ref == "openai/gpt-4o" {
 			assert.True(t, c.IsCatalog, "gateway models should be grouped like catalog entries")
-			assert.True(t, c.IsGateway, "gateway models must be flagged is_gateway")
-		case "openai/catalog-only-model":
-			assert.True(t, c.IsCatalog)
-			assert.False(t, c.IsGateway, "plain catalog entries must not be flagged is_gateway")
 		}
 	}
 }

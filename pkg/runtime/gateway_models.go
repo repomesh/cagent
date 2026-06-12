@@ -132,7 +132,6 @@ func (r *LocalRuntime) buildGatewayChoices(ctx context.Context) ([]ModelChoice, 
 			Provider:  prov,
 			Model:     model,
 			IsCatalog: true,
-			IsGateway: true,
 		}
 		if meta != nil {
 			if meta.Name != "" {
