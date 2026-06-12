@@ -125,3 +125,18 @@ $ docker agent run docker.io/myorg/private-agent:latest
   <p>Having issues with push/pull? See <a href="{{ '/community/troubleshooting/' | relative_url }}">Troubleshooting</a> for common registry issues.</p>
 
 </div>
+
+## Local Development
+
+For local development and testing, you can run an agent directly from a local HTTP server without a registry:
+
+```bash
+# Serve an agent config locally
+$ python3 -m http.server 8080
+
+# Run it directly via HTTP
+$ docker agent run http://localhost:8080/agent.yaml
+$ docker agent run http://127.0.0.1:8080/agent.yaml
+```
+
+This is useful for iterating on agent configs served from a local dev server before pushing to a registry. Both `localhost` and `127.0.0.1` addresses are supported with plain `http://` URLs.
