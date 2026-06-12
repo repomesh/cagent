@@ -484,6 +484,17 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 		choices = append(choices, choice)
 	}
 
+	// Prefer live gateway discovery when a models gateway is configured:
+	// the picker then only shows the models actually served by the
+	// gateway, merged with the explicitly configured ones above. When the
+	// gateway doesn't expose /v1/models, fall back to the models.dev
+	// catalog filtered by available credentials.
+	if r.modelSwitcherCfg.ModelsGateway != "" {
+		if gatewayChoices, ok := r.buildGatewayChoices(ctx); ok {
+			return append(choices, gatewayChoices...)
+		}
+	}
+
 	// Append models.dev catalog entries filtered by available credentials
 	catalogChoices := r.buildCatalogChoices(ctx)
 	choices = append(choices, catalogChoices...)
