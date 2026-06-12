@@ -787,6 +787,21 @@ func TestBuildAdditionalModelRequestFields_Adaptive(t *testing.T) {
 			budget:     latest.ThinkingBudget{Effort: "medium"},
 			wantEffort: "medium",
 		},
+		{
+			name:       "minimal maps to low on adaptive-only model",
+			model:      "global.anthropic.claude-opus-4-8",
+			budget:     latest.ThinkingBudget{Effort: "minimal"},
+			wantEffort: "low",
+		},
+		{
+			// Explicit adaptive is forwarded as-is even on models that still
+			// use token-based thinking; Bedrock rejects it with a clear API
+			// error instead of docker-agent silently dropping it.
+			name:       "explicit adaptive forwarded on token-thinking model",
+			model:      "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+			budget:     latest.ThinkingBudget{Effort: "adaptive"},
+			wantEffort: "high",
+		},
 	}
 
 	for _, tc := range cases {
@@ -823,6 +838,41 @@ func TestBuildAdditionalModelRequestFields_EffortMapsToTokens(t *testing.T) {
 	fields := decodeRequestFields(t, result)
 	assert.Equal(t, map[string]any{"type": "enabled", "budget_tokens": float64(16384)}, fields["thinking"])
 	assert.NotContains(t, fields, "output_config")
+}
+
+func TestBuildAdditionalModelRequestFields_DisabledOnAdaptiveOnlyModel(t *testing.T) {
+	t.Parallel()
+
+	// Disabled budgets must stay disabled, never coerced to adaptive.
+	for name, budget := range map[string]latest.ThinkingBudget{
+		"zero tokens": {Tokens: 0},
+		"none":        {Effort: "none"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client := bedrockThinkingClient("global.anthropic.claude-opus-4-8", &budget)
+
+			assert.Nil(t, client.buildAdditionalModelRequestFields())
+			assert.False(t, client.isThinkingEnabled())
+		})
+	}
+}
+
+func TestBuildAdditionalModelRequestFields_AdaptiveWithInterleavedThinking(t *testing.T) {
+	t.Parallel()
+
+	// interleaved_thinking is auto-enabled for Claude thinking budgets, but
+	// the token-thinking beta header must not leak into adaptive requests.
+	client := bedrockThinkingClient("global.anthropic.claude-opus-4-8", &latest.ThinkingBudget{Effort: "adaptive"})
+	client.ModelConfig.ProviderOpts = map[string]any{"interleaved_thinking": true}
+
+	result := client.buildAdditionalModelRequestFields()
+	require.NotNil(t, result)
+
+	fields := decodeRequestFields(t, result)
+	assert.Equal(t, map[string]any{"type": "adaptive"}, fields["thinking"])
+	assert.NotContains(t, fields, "anthropic_beta")
 }
 
 func TestBuildInferenceConfig_DisablesTempTopPWhenThinkingEnabled(t *testing.T) {

@@ -392,12 +392,20 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 	// Configure thinking budget if present and valid
 	if budget := c.ModelConfig.ThinkingBudget; budget != nil {
 		if effortStr, ok := c.adaptiveThinkingEffort(); ok {
-			if !budget.IsAdaptive() {
+			switch {
+			case budget.Tokens > 0:
 				slog.Warn("Bedrock: model rejects token-based thinking budgets; switching to adaptive thinking",
 					"model", c.ModelConfig.Model,
 					"thinking_budget_tokens", budget.Tokens,
-					"thinking_budget_effort", budget.Effort,
 					"effort", effortStr)
+			case !budget.IsAdaptive():
+				slog.Debug("Bedrock: model rejects token-based thinking; mapping effort level to adaptive thinking",
+					"model", c.ModelConfig.Model,
+					"thinking_budget", budget.Effort,
+					"effort", effortStr)
+			case !modelinfo.RejectsTokenThinking(c.ModelConfig.Model):
+				slog.Warn("Bedrock: adaptive thinking is only supported by Claude Opus 4.6+; the request may be rejected",
+					"model", c.ModelConfig.Model)
 			}
 			slog.Debug("Bedrock request using adaptive thinking", "effort", effortStr)
 			fields["thinking"] = map[string]any{"type": "adaptive"}

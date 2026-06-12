@@ -27,8 +27,8 @@ docker-agent exposes this through a single `thinking_budget` field on any named 
 | OpenAI              | string     | `minimal`, `low`, `medium`, `high`, `xhigh`, `none`                                     | `medium` (API default) |
 | Anthropic           | int or str | 1024–32768 tokens, or `minimal`–`max`, `adaptive`, `adaptive/<effort>`, `none`          | off                |
 | Gemini 2.5          | int        | `0` (off), `-1` (dynamic), or token count (max 24576 / 32768)                           | `-1` (dynamic)     |
-| Gemini 3            | string     | `minimal`, `low`, `medium`, `high`                                                      | `high`             |
-| AWS Bedrock         | int or str | 1024–32768 tokens (`minimal`–`max` mapped to tokens); `adaptive`, `adaptive/<effort>` on Opus 4.6+ | off                |
+| Gemini 3            | string     | `minimal`, `low`, `medium`, `high`                                                      | API default (model-dependent) |
+| AWS Bedrock         | int or str | 1024–32768 tokens (`minimal`–`max` mapped to tokens); `adaptive`, `adaptive/<effort>` for Opus 4.6+ (rejected by older Claude models) | off                |
 | Docker Model Runner | int or str | token count, `minimal`–`max` (mapped to tokens), `adaptive` (unlimited), `none`         | engine default     |
 
 String values are case-insensitive. The full set of accepted strings is `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `adaptive`, and `adaptive/<effort>` — but each provider only honors the subset listed above. Unsupported values either fail at request time (OpenAI) or are mapped/ignored as described per provider below.
