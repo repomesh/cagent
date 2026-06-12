@@ -110,3 +110,39 @@ func TestNewClient_TransportWrapperInvokedGatewayPath(t *testing.T) {
 
 	assert.Positive(t, counter.calls.Load(), "transport wrapper RoundTrip should have been called at least once in gateway path")
 }
+
+// TestNewClient_WebSocketFallsBackToSSEWhenTransportWrapperSet verifies that
+// configuring transport=websocket together with a transport wrapper causes the
+// client to fall back to SSE (no wsPool created). gorilla/websocket bypasses
+// http.RoundTripper, so websocket would silently drop the wrapper; the fallback
+// ensures the wrapper covers every outbound request.
+func TestNewClient_WebSocketFallsBackToSSEWhenTransportWrapperSet(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSEResponse(w)
+	}))
+	defer server.Close()
+
+	var counter oaiCountingTransport
+
+	cfg := &latest.ModelConfig{
+		Provider:     "openai",
+		Model:        "gpt-4o-realtime-preview",
+		BaseURL:      server.URL,
+		TokenKey:     "OPENAI_API_KEY",
+		ProviderOpts: map[string]any{"transport": "websocket"},
+	}
+	env := environment.NewMapEnvProvider(map[string]string{
+		"OPENAI_API_KEY": "test-key",
+	})
+
+	client, err := NewClient(t.Context(), cfg, env,
+		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
+			counter.base = base
+			return &counter
+		}),
+	)
+	require.NoError(t, err)
+
+	// wsPool must not be created when a transport wrapper is registered.
+	assert.Nil(t, client.wsPool, "wsPool should be nil when a transport wrapper is set")
+}
