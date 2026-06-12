@@ -22,7 +22,7 @@ func NewPermissionsDialog(perms *runtime.PermissionsInfo, yoloEnabled bool) Dial
 		yoloEnabled: yoloEnabled,
 	}
 	d.readOnlyScrollDialog = newReadOnlyScrollDialog(
-		readOnlyScrollDialogSize{widthPercent: 60, minWidth: 40, maxWidth: 70, heightPercent: 70, heightMax: 30},
+		readOnlyScrollDialogSize{widthPercent: 60, minWidth: 40, maxWidth: 120, heightPercent: 70, heightMax: 30},
 		d.renderLines,
 	)
 	return d

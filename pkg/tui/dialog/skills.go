@@ -26,7 +26,7 @@ func NewSkillsDialog(skillList []skills.Skill) Dialog {
 		skills: skillList,
 	}
 	d.readOnlyScrollDialog = newReadOnlyScrollDialog(
-		readOnlyScrollDialogSize{widthPercent: 70, minWidth: 60, maxWidth: 100, heightPercent: 80, heightMax: 40},
+		readOnlyScrollDialogSize{widthPercent: 70, minWidth: 60, maxWidth: 120, heightPercent: 80, heightMax: 40},
 		d.renderLines,
 	)
 	return d

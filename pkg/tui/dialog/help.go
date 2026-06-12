@@ -28,7 +28,7 @@ func NewHelpDialog(bindings []key.Binding) Dialog {
 		readOnlyScrollDialogSize{
 			widthPercent:  70,
 			minWidth:      60,
-			maxWidth:      100,
+			maxWidth:      120,
 			heightPercent: 80,
 			heightMax:     40,
 		},

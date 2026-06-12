@@ -50,7 +50,7 @@ func defaultPickerKeyMap() pickerKeyMap {
 const (
 	pickerWidthPercent  = 80
 	pickerMinWidth      = 50
-	pickerMaxWidth      = 100
+	pickerMaxWidth      = 120
 	pickerHeightPercent = 70
 	pickerMaxHeight     = 150
 

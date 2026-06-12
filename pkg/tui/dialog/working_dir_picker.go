@@ -61,7 +61,7 @@ const (
 	// Dialog sizing
 	dirPickerWidthPercent  = 80
 	dirPickerMinWidth      = 50
-	dirPickerMaxWidth      = 100
+	dirPickerMaxWidth      = 120
 	dirPickerHeightPercent = 70
 	dirPickerMaxHeight     = 150
 

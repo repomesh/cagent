@@ -253,7 +253,7 @@ func (d *MCPPromptInputDialog) View() string {
 
 // mcpPromptDialogDimensions returns the dialog width and content width.
 func (d *MCPPromptInputDialog) mcpPromptDialogDimensions() (dialogWidth, contentWidth int) {
-	dialogWidth = max(min(d.Width()*80/100, 80), 60)
+	dialogWidth = max(min(d.Width()*80/100, 120), 60)
 	contentWidth = dialogWidth - styles.DialogStyle.GetHorizontalFrameSize()
 	return dialogWidth, contentWidth
 }
@@ -297,7 +297,7 @@ func (d *MCPPromptInputDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.M
 
 // Position calculates the position to center the dialog
 func (d *MCPPromptInputDialog) Position() (row, col int) {
-	dialogWidth := max(min(d.Width()*80/100, 80), 60)
+	dialogWidth := max(min(d.Width()*80/100, 120), 60)
 	dialogHeight := 15 + len(d.inputs)*3 // Approximate height
 	return CenterPosition(d.Width(), d.Height(), dialogWidth, dialogHeight)
 }

@@ -37,7 +37,7 @@ const (
 var filePickerLayout = pickerLayout{
 	WidthPercent:    80,
 	MinWidth:        60,
-	MaxWidth:        80,
+	MaxWidth:        120,
 	HeightPercent:   70,
 	MaxHeight:       30,
 	ListOverhead:    filePickerListOverhead,

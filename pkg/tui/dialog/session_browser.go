@@ -278,7 +278,7 @@ func (d *sessionBrowserDialog) mouseYToSessionIndex(y int) int {
 }
 
 func (d *sessionBrowserDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
-	dialogWidth = max(min(d.Width()*85/100, 96), 60)
+	dialogWidth = d.ComputeDialogWidth(85, 60, 120)
 	maxHeight = min(d.Height()*70/100, 30)
 	contentWidth = dialogWidth - 6 - d.scrollview.ReservedCols()
 	return dialogWidth, maxHeight, contentWidth

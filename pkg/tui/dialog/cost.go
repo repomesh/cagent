@@ -75,7 +75,7 @@ func (d *costDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 }
 
 func (d *costDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
-	dialogWidth = d.ComputeDialogWidth(70, 50, 80)
+	dialogWidth = d.ComputeDialogWidth(70, 50, 120)
 	maxHeight = min(d.Height()*70/100, 40)
 	contentWidth = d.ContentWidth(dialogWidth, 2) - d.scrollview.ReservedCols()
 	return dialogWidth, maxHeight, contentWidth

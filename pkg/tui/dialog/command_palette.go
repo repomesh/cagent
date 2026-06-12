@@ -39,7 +39,7 @@ type commandPaletteDialog struct {
 var commandPaletteLayout = pickerLayout{
 	WidthPercent:    80,
 	MinWidth:        50,
-	MaxWidth:        80,
+	MaxWidth:        120,
 	HeightPercent:   70,
 	MaxHeight:       30,
 	ListOverhead:    8,
