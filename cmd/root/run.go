@@ -384,8 +384,13 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	// working directory when they are built, so the worktree must already be
 	// the working directory by then for every tool — the shell included — to
 	// operate inside it rather than the user's checkout.
-	wd, _ := os.Getwd()
-	loadResult, createdWorktree, wd, err := f.loadTeamInWorktree(ctx, b, wd)
+	//
+	// The base directory is the process working directory, which already
+	// reflects --working-dir: addGatewayFlags' PersistentPreRunE chdirs there
+	// before the run. That is what lets --worktree and --working-dir compose —
+	// --working-dir selects the repository the worktree is branched from.
+	baseDir, _ := os.Getwd()
+	loadResult, createdWorktree, wd, err := f.loadTeamInWorktree(ctx, b, baseDir)
 	if err != nil {
 		return err
 	}

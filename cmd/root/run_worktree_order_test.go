@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,6 +74,40 @@ func TestLoadTeamInWorktreeSetsWorkingDirBeforeLoad(t *testing.T) {
 	// there.
 	assert.Equal(t, wt.Dir, b.workingDirSeen)
 	assert.Equal(t, wt.Dir, f.runConfig.WorkingDir)
+}
+
+// TestLoadTeamInWorktreeBranchesFromBaseDir proves --worktree and
+// --working-dir compose: the worktree is branched from the supplied base
+// directory (which --working-dir selects), not from the process working
+// directory. The worktree shares the base repository's object store, so its
+// HEAD matches the base repo's HEAD.
+func TestLoadTeamInWorktreeBranchesFromBaseDir(t *testing.T) {
+	baseRepo := initTestRepo(t)
+
+	paths.SetDataDir(t.TempDir())
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	f := &runExecFlags{worktree: true}
+	b := &workdirRecordingBackend{flags: f}
+
+	loadResult, wt, _, err := f.loadTeamInWorktree(t.Context(), b, baseRepo)
+	require.NoError(t, err)
+	require.Nil(t, loadResult)
+	require.NotNil(t, wt)
+	t.Cleanup(func() { _ = wt.Remove(context.WithoutCancel(t.Context())) })
+
+	assert.Equal(t, baseRepo, wt.SourceDir)
+
+	baseHead := gitHead(t, baseRepo)
+	assert.Equal(t, baseHead, gitHead(t, wt.Dir))
+}
+
+// gitHead returns the commit HEAD points at in dir.
+func gitHead(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.CommandContext(t.Context(), "git", "-C", dir, "rev-parse", "HEAD").CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
 }
 
 // initTestRepo creates a throwaway git repository with one commit and returns
