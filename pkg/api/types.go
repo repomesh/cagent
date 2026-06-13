@@ -167,6 +167,21 @@ type SteerSessionRequest struct {
 	Messages []Message `json:"messages"`
 }
 
+// FollowUpResponse is the response to POST /api/sessions/:id/followup.
+//
+// Status is one of:
+//   - "queued_streaming": delivered; a turn is running (or starting).
+//   - "queued_idle": delivered to an idle headless session; it will run on the
+//     next turn.
+//   - "duplicate": a request with the same Idempotency-Key already landed, so
+//     this one was acknowledged without delivering the follow-up again.
+//
+// Duplicate mirrors the "duplicate" status as a boolean for convenience.
+type FollowUpResponse struct {
+	Status    string `json:"status"`
+	Duplicate bool   `json:"duplicate"`
+}
+
 // UpdateSessionTitleRequest represents a request to update a session's title
 type UpdateSessionTitleRequest struct {
 	Title string `json:"title"`

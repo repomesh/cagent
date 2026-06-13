@@ -587,7 +587,12 @@ func (s *Server) followUpSession(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "at least one message is required")
 	}
 
-	streaming, err := s.sm.FollowUpSession(c.Request().Context(), sessionID, req.Messages)
+	// An optional Idempotency-Key makes the request safe to retry: a repeat
+	// with the same key for this session is acknowledged without delivering
+	// the follow-up twice.
+	idempotencyKey := c.Request().Header.Get("Idempotency-Key")
+
+	streaming, duplicate, err := s.sm.FollowUpSession(c.Request().Context(), sessionID, req.Messages, idempotencyKey)
 	if err != nil {
 		if strings.Contains(err.Error(), "queue full") {
 			c.Response().Header().Set("Retry-After", "1")
@@ -597,10 +602,13 @@ func (s *Server) followUpSession(c echo.Context) error {
 	}
 
 	status := "queued_streaming"
-	if !streaming {
+	switch {
+	case duplicate:
+		status = "duplicate"
+	case !streaming:
 		status = "queued_idle"
 	}
-	return c.JSON(http.StatusAccepted, map[string]string{"status": status})
+	return c.JSON(http.StatusAccepted, api.FollowUpResponse{Status: status, Duplicate: duplicate})
 }
 
 func (s *Server) addMessage(c echo.Context) error {

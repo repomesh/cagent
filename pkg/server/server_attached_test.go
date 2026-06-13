@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -569,4 +570,59 @@ func TestAttachedServer_DeleteEmitsSessionExited(t *testing.T) {
 	// The client must receive a terminal session_exited event.
 	_, types := readSSE(t, resp.Body, 1)
 	assert.Equal(t, []string{"session_exited"}, types)
+}
+
+// TestAttachedServer_FollowUpIdempotencyKeyDedupes verifies that two HTTP
+// follow-ups carrying the same Idempotency-Key deliver the prompt once; the
+// retry is acknowledged as a duplicate.
+func TestAttachedServer_FollowUpIdempotencyKeyDedupes(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(sess.ID, &fakeRuntime{}, sess)
+
+	var mu sync.Mutex
+	var delivered []string
+	sm.RegisterFollowUpInjector(sess.ID, func(_ context.Context, content string) {
+		mu.Lock()
+		delivered = append(delivered, content)
+		mu.Unlock()
+	})
+
+	srv := NewWithManager(sm, "")
+	ln, err := Listen(ctx, "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(ctx, ln) }()
+	addr := "http://" + ln.Addr().String()
+
+	post := func() api.FollowUpResponse {
+		body, mErr := json.Marshal(api.SteerSessionRequest{Messages: []api.Message{{Content: "do it"}}})
+		require.NoError(t, mErr)
+		req, rErr := http.NewRequestWithContext(ctx, http.MethodPost, addr+"/api/sessions/"+sess.ID+"/followup", bytes.NewReader(body))
+		require.NoError(t, rErr)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "retry-1")
+		resp, dErr := http.DefaultClient.Do(req)
+		require.NoError(t, dErr)
+		defer resp.Body.Close()
+		var out api.FollowUpResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+		return out
+	}
+
+	first := post()
+	assert.False(t, first.Duplicate)
+
+	second := post()
+	assert.True(t, second.Duplicate, "retry with same Idempotency-Key is a duplicate")
+	assert.Equal(t, "duplicate", second.Status)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"do it"}, delivered, "the follow-up is delivered exactly once")
 }

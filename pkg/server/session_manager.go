@@ -64,6 +64,11 @@ type SessionManager struct {
 	// the TUI and every SSE subscriber. Keyed by session ID; set via
 	// RegisterFollowUpInjector.
 	followUpInjectors *concurrent.Map[string, FollowUpInjector]
+
+	// followUpKeys deduplicates follow-up requests per session by their
+	// caller-supplied Idempotency-Key, so a retried request that already
+	// landed is not delivered twice. Created lazily per session.
+	followUpKeys *concurrent.Map[string, *idempotencyCache]
 }
 
 // EventSource pushes session events to send for the lifetime of ctx. The
@@ -88,6 +93,7 @@ func NewSessionManager(ctx context.Context, sources config.Sources, sessionStore
 		deletedSessions:   concurrent.NewMap[string, *activeRuntimes](),
 		eventLogs:         concurrent.NewMap[string, *pumpedEventLog](),
 		followUpInjectors: concurrent.NewMap[string, FollowUpInjector](),
+		followUpKeys:      concurrent.NewMap[string, *idempotencyCache](),
 		sessionStore:      sessionStore,
 		Sources:           loaders,
 		refreshInterval:   refreshInterval,
@@ -392,6 +398,7 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 		sm.eventLogs.Delete(sess.ID)
 	}
 	sm.followUpInjectors.Delete(sess.ID)
+	sm.followUpKeys.Delete(sess.ID)
 
 	return nil
 }
@@ -600,21 +607,40 @@ func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, mess
 // running session. Each message is popped one at a time after the current
 // turn finishes, giving each follow-up a full undivided agent turn.
 //
+// idempotencyKey, when non-empty, makes the call safe to retry: if a request
+// with the same key already landed for this session, this one is a no-op and
+// returns duplicate=true. The reservation is rolled back if delivery fails, so
+// a genuine failure stays retryable.
+//
 // When a follow-up injector is registered for the session (the --listen
 // control plane attaches one for the TUI App), messages are delivered through
-// it instead: the App submits them as normal user input, which starts a turn
-// even when the agent is idle and streams events to the TUI and every SSE
-// subscriber. The returned streaming flag is true in this case because a turn
-// is (or is about to be) running.
+// it: the App submits them as normal user input, which starts a turn even when
+// the agent is idle and streams events to the TUI and every SSE subscriber.
+// The returned streaming flag is true in this case because a turn is (or is
+// about to be) running.
 //
 // Without an injector (headless server-owned sessions) the messages go to the
 // runtime follow-up queue. If no stream is currently running the messages are
 // still enqueued but are not consumed until the next RunSession starts a
 // stream; the returned boolean indicates whether a stream is active.
-func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string, messages []api.Message) (streaming bool, err error) {
+func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string, messages []api.Message, idempotencyKey string) (streaming, duplicate bool, err error) {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
-		return false, ErrSessionNotRunning
+		return false, false, ErrSessionNotRunning
+	}
+
+	if idempotencyKey != "" {
+		cache, _ := sm.followUpKeys.LoadOrStore(sessionID, newIdempotencyCache(defaultIdempotencyCapacity))
+		if cache.reserve(idempotencyKey) {
+			return false, true, nil
+		}
+		// Roll the reservation back if we end up returning an error, so the
+		// caller can safely retry a failed request with the same key.
+		defer func() {
+			if err != nil {
+				cache.release(idempotencyKey)
+			}
+		}()
 	}
 
 	// Attached session: hand the follow-up to its owner (the TUI App) so a
@@ -623,7 +649,7 @@ func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string,
 		for _, msg := range messages {
 			inject(ctx, msg.Content)
 		}
-		return true, nil
+		return true, false, nil
 	}
 
 	for _, msg := range messages {
@@ -631,7 +657,7 @@ func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string,
 			Content:      msg.Content,
 			MultiContent: msg.MultiContent,
 		}); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 
@@ -642,7 +668,7 @@ func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string,
 		rt.streaming.Unlock()
 	}
 
-	return streaming, nil
+	return streaming, false, nil
 }
 
 // ResumeElicitation resumes an elicitation request.
@@ -1205,6 +1231,7 @@ func (sm *SessionManager) BatchDeleteSessions(ctx context.Context, sessionIDs []
 				sm.eventLogs.Delete(sessionID)
 			}
 			sm.followUpInjectors.Delete(sessionID)
+			sm.followUpKeys.Delete(sessionID)
 		}
 	}
 
