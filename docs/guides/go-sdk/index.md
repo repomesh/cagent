@@ -317,7 +317,10 @@ wrapper := options.WithHTTPTransportWrapper(
     },
 )
 
-client, err := openai.NewClient(ctx, modelCfg, env, wrapper)
+client, err := openai.NewClient(ctx, &latest.ModelConfig{
+    Provider: "openai",
+    Model:    "gpt-4o",
+}, env, wrapper)
 ```
 
 The wrapper receives the already-instrumented transport (OpenTelemetry, SSE decompression, Desktop proxy support) as its `base` argument, so wrapping it preserves all built-in behaviour.
@@ -331,7 +334,7 @@ The wrapper receives the already-instrumented transport (OpenTelemetry, SSE deco
 
 </div>
 
-In **gateway mode** the wrapper is called on every LLM request because gateway clients are rebuilt each call for short-lived auth tokens. In **direct mode** it is called once at client construction.
+In **gateway mode** the wrapper is called on every LLM request because gateway clients are rebuilt each call for short-lived auth tokens. In **direct mode** it is called once at client construction. Rate-limit responses (HTTP 429) are classified as non-retryable by the runtime and cause the model chain to skip to the next fallback, so wrappers that track per-request outcomes will observe these as failures rather than retried calls.
 
 Returning `nil` from your wrapper function is treated as a bug: docker-agent logs a warning and preserves the original transport instead.
 
