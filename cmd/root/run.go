@@ -139,7 +139,7 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().BoolVar(&flags.dryRun, "dry-run", false, "Initialize the agent without executing anything")
 	cmd.PersistentFlags().StringVar(&flags.remoteAddress, "remote", "", "Use remote runtime with specified address")
 	cmd.PersistentFlags().StringVarP(&flags.sessionDB, "session-db", "s", filepath.Join(paths.GetHomeDir(), ".cagent", "session.db"), "Path to the session database")
-	cmd.PersistentFlags().StringVar(&flags.sessionID, "session", "", "Continue from a previous session by ID or relative offset (e.g., -1 for last session)")
+	cmd.PersistentFlags().StringVar(&flags.sessionID, "session", "", "Continue from a previous session by ID or relative offset (e.g., -1 for last session). An explicit ID that does not exist yet is created with that ID.")
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
 	cmd.PersistentFlags().IntVar(&flags.fakeStreamDelay, "fake-stream", 0, "Simulate streaming with delay in ms between chunks (default 15ms if no value given)")
 	cmd.Flag("fake-stream").NoOptDefVal = "15" // --fake-stream without value uses 15ms
@@ -699,22 +699,33 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 
 		// Load existing session
 		sess, err = sessStore.GetSession(ctx, resolvedID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading session %q: %w", resolvedID, err)
-		}
-		sess.ToolsApproved = req.ToolsApproved
-		sess.HideToolResults = req.HideToolResults
+		switch {
+		case err == nil:
+			sess.ToolsApproved = req.ToolsApproved
+			sess.HideToolResults = req.HideToolResults
 
-		// Apply any stored model overrides from the session
-		if len(sess.AgentModelOverrides) > 0 && localRt.SupportsModelSwitching() {
-			for agentName, modelRef := range sess.AgentModelOverrides {
-				if err := localRt.SetAgentModel(ctx, agentName, modelRef); err != nil {
-					slog.WarnContext(ctx, "Failed to apply stored model override", "agent", agentName, "model", modelRef, "error", err)
+			// Apply any stored model overrides from the session
+			if len(sess.AgentModelOverrides) > 0 && localRt.SupportsModelSwitching() {
+				for agentName, modelRef := range sess.AgentModelOverrides {
+					if err := localRt.SetAgentModel(ctx, agentName, modelRef); err != nil {
+						slog.WarnContext(ctx, "Failed to apply stored model override", "agent", agentName, "model", modelRef, "error", err)
+					}
 				}
 			}
-		}
 
-		slog.DebugContext(ctx, "Loaded existing session", "session_id", resolvedID, "session_ref", req.ResumeSessionID, "agent", agentName)
+			slog.DebugContext(ctx, "Loaded existing session", "session_id", resolvedID, "session_ref", req.ResumeSessionID, "agent", agentName)
+		case errors.Is(err, session.ErrNotFound) && !session.IsRelativeSessionRef(req.ResumeSessionID):
+			// An explicit, caller-chosen ID that doesn't exist yet: create the
+			// session with that ID rather than failing. This lets a supervisor
+			// (e.g. a board reconnecting to a dead agent) own the ID up front and
+			// reuse it across runs — the first run creates, later runs resume.
+			// A relative ref (-1, -2, ...) never lands here: it must resolve
+			// against existing sessions.
+			sess = session.New(append(f.buildSessionOpts(agt, req), session.WithID(resolvedID))...)
+			slog.DebugContext(ctx, "Creating session with caller-supplied ID", "session_id", resolvedID, "agent", agentName)
+		default:
+			return nil, nil, fmt.Errorf("loading session %q: %w", resolvedID, err)
+		}
 	} else {
 		sess = session.New(f.buildSessionOpts(agt, req)...)
 		// Session is stored lazily on first UpdateSession call (when content is added)

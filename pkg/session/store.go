@@ -24,6 +24,16 @@ var (
 	ErrNewerDatabase = errors.New("session database was created by a newer version of docker-agent")
 )
 
+// IsRelativeSessionRef reports whether ref is a relative session reference
+// (e.g., "-1", "-2"). Explicit IDs (anything else, including UUIDs) return
+// false. Callers use this to distinguish a user-supplied concrete ID — which
+// may legitimately not exist yet — from a relative offset that must resolve
+// against existing sessions.
+func IsRelativeSessionRef(ref string) bool {
+	_, isRelative := parseRelativeSessionRef(ref)
+	return isRelative
+}
+
 // parseRelativeSessionRef checks if ref is a relative session reference (e.g., "-1", "-2")
 // and returns the offset and whether it's a relative reference.
 // Returns (1, true) for "-1", (2, true) for "-2", etc.

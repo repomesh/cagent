@@ -854,6 +854,14 @@ func TestMigration_ExistingMessagesToSessionItems(t *testing.T) {
 	assert.Equal(t, "legacy-agent", retrieved.Messages[1].Message.AgentName)
 }
 
+func TestIsRelativeSessionRef(t *testing.T) {
+	assert.True(t, IsRelativeSessionRef("-1"))
+	assert.True(t, IsRelativeSessionRef("-10"))
+	assert.False(t, IsRelativeSessionRef("550e8400-e29b-41d4-a716-446655440000"))
+	assert.False(t, IsRelativeSessionRef(""))
+	assert.False(t, IsRelativeSessionRef("abc123"))
+}
+
 func TestParseRelativeSessionRef(t *testing.T) {
 	tests := []struct {
 		name       string
