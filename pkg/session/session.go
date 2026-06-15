@@ -27,12 +27,6 @@ var nowFn = time.Now
 var newIDFn = func() string { return uuid.New().String() }
 
 const (
-	// DefaultMaxOldToolCallTokens is the default maximum number of tokens to keep from tool call
-	// arguments and results. Older tool calls beyond this budget will have their
-	// content replaced with a placeholder. Tokens are approximated by
-	// approximateTokens (len/4).
-	DefaultMaxOldToolCallTokens = 40000
-
 	// toolContentPlaceholder is the text used to replace truncated tool content
 	toolContentPlaceholder = "[content truncated]"
 )
@@ -128,9 +122,8 @@ type Session struct {
 	// MaxOldToolCallTokens is the maximum number of tokens to keep from old tool call
 	// arguments and results. Older tool calls beyond this budget will have their
 	// content replaced with a placeholder. Tokens are approximated by
-	// approximateTokens (len/4).
-	// Set to -1 to disable truncation (unlimited tool content).
-	// Default: 40000 (when not configured or set to 0).
+	// approximateTokens (len/4). Truncation is enabled only when this is positive;
+	// 0 (unset) and -1 both disable truncation (unlimited tool content).
 	MaxOldToolCallTokens int `json:"max_old_tool_call_tokens,omitempty"`
 
 	// Starred indicates if this session has been starred by the user
@@ -686,8 +679,7 @@ func WithMaxConsecutiveToolCalls(n int) Opt {
 }
 
 // WithMaxOldToolCallTokens sets the maximum token budget for old tool call content.
-// Set to -1 to disable truncation (unlimited tool content).
-// Set to 0 to use the default (40000).
+// Positive values enable truncation; 0 and -1 disable truncation (unlimited tool content).
 func WithMaxOldToolCallTokens(n int) Opt {
 	return func(s *Session) {
 		s.MaxOldToolCallTokens = n
@@ -1108,14 +1100,10 @@ func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Messag
 		messages = trimMessages(messages, maxItems)
 	}
 
-	// Use configured max tokens or fall back to default constant if zero or unset.
-	// -1 means unlimited (no truncation).
-	maxOldToolCallTokens := s.MaxOldToolCallTokens
-	if maxOldToolCallTokens == 0 {
-		maxOldToolCallTokens = DefaultMaxOldToolCallTokens
-	}
-	if maxOldToolCallTokens > 0 { // If maxOldToolCallTokens is -1, skip truncation (unlimited)
-		messages = truncateOldToolContent(messages, maxOldToolCallTokens)
+	// Truncation of old tool-call content is opt-in: only a positive token
+	// budget truncates. 0 (unset/omitted) and -1 both disable truncation.
+	if s.MaxOldToolCallTokens > 0 {
+		messages = truncateOldToolContent(messages, s.MaxOldToolCallTokens)
 	}
 
 	messages = normalizeMessageContent(messages)
