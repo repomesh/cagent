@@ -12,10 +12,24 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
+// renderCacheCap bounds the per-width render cache. Only a couple of widths are
+// ever live at once (the two-pass scrollbar layout renders at two widths), so a
+// small cap soaks up a window resize without letting the cache grow unbounded
+// between todo updates.
+const renderCacheCap = 8
+
 // SidebarComponent represents the todo display component for the sidebar
 type SidebarComponent struct {
 	todos []todo.Todo
 	width int
+
+	// renderCache memoizes the rendered todo list keyed by content width.
+	// Render() is called on every animation frame while the agent works (the
+	// sidebar rebuilds its whole cache on each spinner tick) and the two-pass
+	// scrollbar layout renders at two widths, so without this the O(todos)
+	// word-wrap+style work runs many times per second on long lists. Cleared
+	// when the todos change (SetTodos) or the theme changes (InvalidateCache).
+	renderCache map[int]string
 }
 
 func NewSidebarComponent() *SidebarComponent {
@@ -39,7 +53,14 @@ func (c *SidebarComponent) SetTodos(result *tools.ToolCallResult) error {
 	}
 
 	c.todos = todos
+	c.renderCache = nil // todos changed — drop the stale render cache
 	return nil
+}
+
+// InvalidateCache drops the memoized render. The sidebar calls this when the
+// theme changes, since the cached lines embed theme-dependent styling.
+func (c *SidebarComponent) InvalidateCache() {
+	c.renderCache = nil
 }
 
 func (c *SidebarComponent) Render() string {
@@ -47,12 +68,21 @@ func (c *SidebarComponent) Render() string {
 		return ""
 	}
 
+	if cached, ok := c.renderCache[c.width]; ok {
+		return cached
+	}
+
 	var lines []string
 	for _, todo := range c.todos {
 		lines = append(lines, c.renderTodoLine(todo))
 	}
+	rendered := c.renderTab("TO-DO", strings.Join(lines, "\n"))
 
-	return c.renderTab("TO-DO", strings.Join(lines, "\n"))
+	if c.renderCache == nil || len(c.renderCache) >= renderCacheCap {
+		c.renderCache = make(map[int]string, 2)
+	}
+	c.renderCache[c.width] = rendered
+	return rendered
 }
 
 func (c *SidebarComponent) renderTodoLine(todoItem todo.Todo) string {

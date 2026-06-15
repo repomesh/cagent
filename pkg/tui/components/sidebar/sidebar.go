@@ -805,7 +805,8 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			cmds = append(cmds, state.spinner.Init())
 		}
 
-		m.invalidateCache() // Theme affects all styling
+		m.todoComp.InvalidateCache() // Cached todo lines embed theme styling
+		m.invalidateCache()          // Theme affects all styling
 		return m, tea.Batch(cmds...)
 	default:
 		var cmds []tea.Cmd
