@@ -31,7 +31,7 @@ agents:
     code_mode_tools: boolean # Optional: enable code mode tool format
     max_iterations: int # Optional: max tool-calling loops
     max_consecutive_tool_calls: int # Optional: max identical consecutive tool calls
-    max_old_tool_call_tokens: int # Optional: token budget for old tool call content
+    max_old_tool_call_tokens: int # Optional: token budget for old tool call content (disabled unless positive)
     num_history_items: int # Optional: limit conversation history
     skills: boolean | [list] # Optional: enable skill discovery (true/false or list of names and/or sources)
     use_commands: [list] # Optional: names of top-level commands groups to merge into this agent
@@ -91,7 +91,7 @@ agents:
 | `code_mode_tools`           | boolean | ✗        | When `true`, formats tool responses in a code-optimized format with structured output schemas. Useful for MCP gateway and programmatic access.                                |
 | `max_iterations`            | int     | ✗        | Maximum number of tool-calling loops. Default: unlimited (0). Set this to prevent infinite loops.                                                                             |
 | `max_consecutive_tool_calls` | int     | ✗        | Maximum consecutive identical tool calls before the agent is terminated, preventing degenerate loops. Default: `5`.                                                          |
-| `max_old_tool_call_tokens`  | int     | ✗        | Maximum number of tokens to keep from old tool call arguments and results. Older tool calls beyond this budget have their content replaced with a placeholder, saving context space. Tokens are approximated as `len/4`. Set to `-1` to disable truncation (unlimited). Default: `40000`. |
+| `max_old_tool_call_tokens`  | int     | ✗        | Maximum number of tokens to keep from old tool call arguments and results. Older tool calls beyond this budget have their content replaced with a placeholder, saving context space. Tokens are approximated as `len/4`. Truncation is disabled by default; set a positive value to enable it. Set to `-1` to disable truncation (unlimited). |
 | `num_history_items`         | int     | ✗        | Limit the number of conversation history messages sent to the model. Useful for managing context window size with long conversations. Default: unlimited (all messages sent). |
 | `skills`                    | bool/array | ✗     | Enable automatic skill discovery. `true` loads all discovered local skills, `false` disables them. A list can mix skill sources (`local` or `https://…` URLs) and skill names to include — see [Skills]({{ '/features/skills/' | relative_url }}).                                                     |
 | `commands`                  | object  | ✗        | Named prompts that can be run with `docker agent run config.yaml /command_name`. Can be simple strings or objects with `instruction` and/or `agent` fields for agent switching. See [Named Commands](#named-commands) below. |

@@ -167,8 +167,7 @@ func WithMaxConsecutiveToolCalls(n int) Opt {
 }
 
 // WithMaxOldToolCallTokens sets the maximum token budget for old tool call content.
-// Set to -1 to disable truncation (unlimited tool content).
-// Set to 0 to use the default (40000).
+// Positive values enable truncation; 0 and -1 disable truncation (unlimited tool content).
 func WithMaxOldToolCallTokens(n int) Opt {
 	return func(a *Agent) {
 		a.maxOldToolCallTokens = n

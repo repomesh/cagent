@@ -603,7 +603,7 @@
         },
         "max_old_tool_call_tokens": {
           "type": "integer",
-          "description": "Maximum number of tokens to keep from old tool call arguments and results. Older tool calls beyond this budget will have their content replaced with a placeholder. Tokens are approximated as len/4. Set to -1 to disable truncation (unlimited tool content). Default: 40000.",
+          "description": "Maximum number of tokens to keep from old tool call arguments and results. Older tool calls beyond this budget will have their content replaced with a placeholder. Tokens are approximated as len/4. Truncation is disabled by default; set a positive value to enable it. Set to -1 to disable truncation (unlimited tool content).",
           "minimum": -1
         },
         "num_history_items": {
