@@ -37,8 +37,6 @@ func newTerminal(in, out *os.File) (*terminal, error) {
 		return nil, fmt.Errorf("enabling raw mode: %w", err)
 	}
 
-	lipgloss.EnableLegacyWindowsANSI(out)
-
 	reader, err := cancelreader.NewReader(in)
 	if err != nil {
 		_ = term.Restore(int(in.Fd()), state)
@@ -57,9 +55,10 @@ func newTerminal(in, out *os.File) (*terminal, error) {
 
 	t.width, t.height = normalizeTerminalSize(t.querySize())
 
-	t.startResizeWatcher()
+	lipgloss.EnableLegacyWindowsANSI(out)
 	t.writeString(seqEnableBracketedPaste)
 	t.flush()
+	t.startResizeWatcher()
 
 	return t, nil
 }
@@ -111,10 +110,7 @@ func sendLatestResize(ch chan [2]int, size [2]int) {
 	default:
 	}
 
-	select {
-	case ch <- size:
-	default:
-	}
+	ch <- size
 }
 
 func (t *terminal) querySize() (w, h int) {
