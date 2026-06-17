@@ -59,6 +59,21 @@ func (s *stubToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return s.tools, nil
 }
 
+// blockingToolSet models a toolset whose Tools() never returns on its own —
+// e.g. a wedged MCP stdio subprocess that does not even answer context
+// cancellation. It deliberately ignores ctx and blocks until release is
+// closed, which tests do on cleanup so the orphaned listing goroutine exits.
+type blockingToolSet struct {
+	release <-chan struct{}
+}
+
+var _ tools.ToolSet = (*blockingToolSet)(nil)
+
+func (b *blockingToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	<-b.release
+	return nil, nil
+}
+
 type mockStream struct {
 	responses []chat.MessageStreamResponse
 	idx       int
@@ -1070,6 +1085,64 @@ func TestEmitStartupInfo_SurfacesToolsetStartFailureAsWarning(t *testing.T) {
 	require.NotNil(t, warning, "EmitStartupInfo should emit a WarningEvent when a toolset fails to start")
 	assert.Contains(t, warning.Message, "App is not enabled for Slack MCP server access.",
 		"warning should include the toolset's actual error message so the user can see the real cause")
+}
+
+// TestEmitStartupInfo_SkipsToolsetWhoseListingHangs is the regression test for
+// issue #3137: a toolset whose Tools() blocks indefinitely must not stall the
+// whole startup tool-loading loop. Before the per-toolset timeout,
+// emitToolsProgressively blocked forever on the hung toolset, so the terminal
+// ToolsetInfo{Loading:false} was never emitted (sidebar stuck on "Loading
+// tools…") and EmitStartupInfo's goroutine leaked, also delaying /quit.
+func TestEmitStartupInfo_SkipsToolsetWhoseListingHangs(t *testing.T) {
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	// release is closed on cleanup so the orphaned listing goroutine (whose
+	// Tools() ignores context cancellation) exits instead of leaking.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	hanging := &blockingToolSet{release: release}
+	fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(hanging, fast),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm,
+		WithCurrentAgent("root"),
+		WithModelStore(mockModelStore{}),
+		WithToolListTimeout(50*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	done := make(chan struct{})
+	go func() {
+		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+		close(events)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EmitStartupInfo did not return: a hung toolset blocked startup tool loading")
+	}
+
+	var toolsetInfos []*ToolsetInfoEvent
+	for e := range events {
+		if ti, ok := e.(*ToolsetInfoEvent); ok {
+			toolsetInfos = append(toolsetInfos, ti)
+		}
+	}
+
+	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+	last := toolsetInfos[len(toolsetInfos)-1]
+	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar resolves")
+	assert.Equal(t, 1, last.AvailableTools,
+		"the hung toolset is skipped; the fast toolset's single tool is still counted")
 }
 
 // TestEmitStartupInfo_AuthRequiredIsSilent verifies that when a toolset's

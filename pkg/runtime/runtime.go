@@ -287,6 +287,12 @@ type LocalRuntime struct {
 	// succeeded" and "compaction exhausted" branches.
 	maxOverflowCompactions int
 
+	// toolListTimeout bounds how long EmitStartupInfo waits for a single
+	// toolset to enumerate its tools before skipping it, so one hung toolset
+	// cannot stall the sidebar's "Loading tools…" state forever. Defaults to
+	// defaultToolListTimeout; overridden via WithToolListTimeout.
+	toolListTimeout time.Duration
+
 	// pauseMu guards pauseCh.
 	pauseMu sync.Mutex
 	// pauseCh is non-nil and open while /pause has paused the run loop;
@@ -433,6 +439,19 @@ func WithMaxOverflowCompactions(n int) Opt {
 	}
 }
 
+// WithToolListTimeout overrides how long EmitStartupInfo waits for a single
+// toolset to enumerate its tools before skipping it. Defaults to
+// defaultToolListTimeout. A non-positive value is ignored so the default
+// stands. Tests pass a short timeout to exercise the skip path (a toolset
+// whose Tools() blocks) without a real-time wait.
+func WithToolListTimeout(d time.Duration) Opt {
+	return func(r *LocalRuntime) {
+		if d > 0 {
+			r.toolListTimeout = d
+		}
+	}
+}
+
 // WithRetryOnRateLimit enables automatic retry with backoff for HTTP 429 (rate limit)
 // errors when no fallback models are available. When enabled, the runtime will honor
 // the Retry-After header from the provider's response to determine wait time before
@@ -518,6 +537,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		now:                    time.Now,
 		telemetry:              defaultTelemetry{},
 		maxOverflowCompactions: defaultMaxOverflowCompactions,
+		toolListTimeout:        defaultToolListTimeout,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
 
@@ -1250,10 +1270,18 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 			}
 		}
 
-		// Get tools from this toolset
-		ts, err := toolset.Tools(ctx)
+		// Get tools from this toolset under a bounded deadline. A toolset
+		// whose Tools() blocks indefinitely would otherwise stall the whole
+		// loop: the terminal ToolsetInfo{Loading:false} below is never sent,
+		// so the sidebar stays on "Loading tools…" forever and /quit appears
+		// to hang. Time it out, skip it, and move on. The skip is only for
+		// this startup sidebar pass — the toolset is not torn down, so a
+		// slow-but-responsive one is listed (and counted) again on the next
+		// turn or tool-change refresh.
+		ts, err := listToolsWithTimeout(ctx, toolset, r.toolListTimeout)
 		if err != nil {
-			slog.WarnContext(ctx, "Failed to get tools from toolset", "agent", a.Name(), "error", err)
+			slog.WarnContext(ctx, "Failed to list tools from toolset; skipping",
+				"agent", a.Name(), "toolset", tools.DescribeToolSet(toolset), "error", err)
 			continue
 		}
 
@@ -1267,6 +1295,41 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 
 	// Emit final state (not loading)
 	send(ToolsetInfo(totalTools, false, r.CurrentAgentName()))
+}
+
+// listToolsWithTimeout enumerates a toolset's tools under a bounded deadline.
+// The (potentially blocking) Tools call runs in a goroutine and we select on
+// either its completion or the timeout, so a toolset whose Tools() ignores
+// context cancellation — e.g. a wedged MCP stdio subprocess — cannot block
+// startup. On timeout it returns the context error; the orphaned goroutine
+// sends into a buffered channel and exits if the call ever returns, so it does
+// not leak past the eventual (or never) return of Tools().
+func listToolsWithTimeout(ctx context.Context, toolset tools.ToolSet, timeout time.Duration) ([]tools.Tool, error) {
+	// Defend against a zero/negative timeout (e.g. a directly-constructed
+	// LocalRuntime that bypassed NewLocalRuntime) so we never collapse to an
+	// already-expired context that skips every toolset.
+	if timeout <= 0 {
+		timeout = defaultToolListTimeout
+	}
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	type listResult struct {
+		tools []tools.Tool
+		err   error
+	}
+	done := make(chan listResult, 1) // buffered so a late send never blocks
+	go func() {
+		ts, err := toolset.Tools(toolCtx)
+		done <- listResult{tools: ts, err: err}
+	}()
+
+	select {
+	case <-toolCtx.Done():
+		return nil, toolCtx.Err()
+	case res := <-done:
+		return res.tools, res.err
+	}
 }
 
 func (r *LocalRuntime) Resume(_ context.Context, req ResumeRequest) {
