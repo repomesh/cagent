@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,6 +135,56 @@ func TestAskpass_CancelledWhenHelperDies(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("prompt was not cancelled after the helper connection closed")
 	}
+}
+
+func TestCommandInvokesSudo(t *testing.T) {
+	assert.True(t, commandInvokesSudo("sudo apt update"))
+	assert.True(t, commandInvokesSudo("echo x && sudo ls"))
+	// Word boundary avoids false positives on similar substrings.
+	assert.False(t, commandInvokesSudo("echo pseudo"))
+	assert.False(t, commandInvokesSudo("ls /etc/sudoers"))
+	assert.False(t, commandInvokesSudo("play sudoku"))
+	assert.False(t, commandInvokesSudo("ls -la"))
+}
+
+// TestAskpass_PromptsSerialized verifies two concurrent sudo prompts never open
+// two dialogs at once (the runtime carries a single elicitation request).
+func TestAskpass_PromptsSerialized(t *testing.T) {
+	if !askpassSupported() {
+		t.Skip("sudo askpass unsupported on this platform")
+	}
+
+	var active, maxActive int32
+	srv, err := startAskpassServer(func() tools.ElicitationHandler {
+		return func(_ context.Context, _ *mcp.ElicitParams) (tools.ElicitationResult, error) {
+			n := atomic.AddInt32(&active, 1)
+			for {
+				m := atomic.LoadInt32(&maxActive)
+				if n <= m || atomic.CompareAndSwapInt32(&maxActive, m, n) {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			atomic.AddInt32(&active, -1)
+			return tools.ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"password": "pw"}}, nil
+		}
+	})
+	require.NoError(t, err)
+	defer srv.close()
+
+	t.Setenv(envAskpassSocket, srv.socket)
+	t.Setenv(envAskpassToken, srv.token)
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			var out bytes.Buffer
+			assert.NoError(t, RunAskpassClient(t.Context(), "p", &out))
+		})
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&maxActive), "prompts must be serialized to one at a time")
 }
 
 func TestWrapSudoCommand(t *testing.T) {

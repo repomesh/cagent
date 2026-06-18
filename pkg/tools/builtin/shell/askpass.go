@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -74,8 +75,26 @@ type askpassServer struct {
 	// current elicitation handler (it is re-applied each turn).
 	handler func() tools.ElicitationHandler
 
+	// promptSem serializes prompts to one at a time (buffered, size 1). The
+	// runtime elicitation pipe carries a single request, so two concurrent sudo
+	// calls (e.g. `sudo a & sudo b`) must not raise two dialogs at once.
+	promptSem chan struct{}
+
 	closeOnce sync.Once
 	closed    chan struct{} // closed by close() to cancel in-flight prompts
+}
+
+// sudoWordRe matches sudo as a whole word, so substrings like "pseudo",
+// "sudoku" or "sudoers" do not trigger the askpass wiring.
+var sudoWordRe = regexp.MustCompile(`\bsudo\b`)
+
+// commandInvokesSudo reports whether command appears to call sudo. It uses a
+// word boundary to avoid false positives on similar substrings. It can still
+// match a non-invoking mention (e.g. `grep sudo file`); in that case the
+// injected shell function is defined but never called and the bridge env is
+// unused, so the only cost is harmless extra env on that one command.
+func commandInvokesSudo(command string) bool {
+	return sudoWordRe.MatchString(command)
 }
 
 // resolveSelfExecutable returns the absolute path of the running binary,
@@ -152,13 +171,14 @@ func startAskpassServer(handler func() tools.ElicitationHandler) (*askpassServer
 	}
 
 	s := &askpassServer{
-		listener: listener,
-		dir:      dir,
-		socket:   socket,
-		script:   script,
-		token:    token,
-		handler:  handler,
-		closed:   make(chan struct{}),
+		listener:  listener,
+		dir:       dir,
+		socket:    socket,
+		script:    script,
+		token:     token,
+		handler:   handler,
+		promptSem: make(chan struct{}, 1),
+		closed:    make(chan struct{}),
 	}
 	go s.serve()
 	return s, nil
@@ -224,8 +244,13 @@ func (s *askpassServer) handleConn(conn net.Conn) {
 }
 
 // watchConn cancels the prompt when the connection closes (helper died) or the
-// server shuts down. It returns once ctx is done; the inner read goroutine
-// unblocks when handleConn closes the connection on return, so nothing leaks.
+// server shuts down. It uses an inner goroutine because a net.Conn read cannot
+// be selected on directly.
+//
+// Neither goroutine leaks: watchConn returns as soon as ctx is done (which
+// handleConn always triggers via its deferred cancel()), and the inner read
+// goroutine unblocks when handleConn's deferred conn.Close() runs on return,
+// which makes the blocked Read fail and close connClosed.
 func (s *askpassServer) watchConn(ctx context.Context, conn net.Conn, cancel context.CancelFunc) {
 	connClosed := make(chan struct{})
 	go func() {
@@ -249,6 +274,15 @@ func (s *askpassServer) watchConn(ctx context.Context, conn net.Conn, cancel con
 func (s *askpassServer) askUser(ctx context.Context, prompt string) (string, bool) {
 	handler := s.handler()
 	if handler == nil {
+		return "", false
+	}
+
+	// Only one prompt at a time. If a concurrent prompt is already open, wait
+	// for it (unless this request's helper goes away first, ctx cancellation).
+	select {
+	case s.promptSem <- struct{}{}:
+		defer func() { <-s.promptSem }()
+	case <-ctx.Done():
 		return "", false
 	}
 
@@ -298,7 +332,7 @@ func (s *askpassServer) close() {
 func writeAskpassResponse(conn net.Conn, resp askpassResponse) error {
 	// The password is the payload we must return to the askpass helper over
 	// the private local socket; this is the intended transmission, not a leak.
-	data, err := json.Marshal(resp) //nolint:gosec // G117: password is the intended socket payload
+	data, err := json.Marshal(resp) //nolint:gosec // the password is the intended payload returned to the askpass helper over the private local socket
 	if err != nil {
 		return err
 	}
@@ -370,9 +404,9 @@ func posixShellForFunc(shell string) bool {
 
 // wrapSudoCommand prepends a shell function that transparently adds `-A` to
 // every sudo invocation so sudo uses SUDO_ASKPASS instead of a TTY. It only
-// rewrites commands that actually mention sudo, and only for POSIX shells.
+// rewrites commands that invoke sudo, and only for POSIX shells.
 func wrapSudoCommand(command, shell string) string {
-	if !strings.Contains(command, "sudo") || !posixShellForFunc(shell) {
+	if !commandInvokesSudo(command) || !posixShellForFunc(shell) {
 		return command
 	}
 	return "sudo() { command sudo -A \"$@\"; }\n" + command
@@ -427,7 +461,7 @@ func (h *shellHandler) ensureAskpass() *askpassServer {
 // started. This keeps normal shell behaviour and the env surface untouched for
 // the common (non-sudo) case.
 func (h *shellHandler) applyAskpass(command string) (string, []string) {
-	if !h.askpassActive() || !strings.Contains(command, "sudo") {
+	if !h.askpassActive() || !commandInvokesSudo(command) {
 		return command, h.env
 	}
 	srv := h.ensureAskpass()
