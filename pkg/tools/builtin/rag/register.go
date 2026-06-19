@@ -14,6 +14,8 @@ import (
 // pkg/rag), so the "rag" toolset is only linked into binaries that blank-import
 // this package. The docker-agent CLI does so; embedders that don't need RAG can
 // omit it and build without the cgo dependency.
+//
+//nolint:gochecknoinits // Intentional: self-registers the optional rag toolset so a blank import enables it without pulling cgo into teamloader's import graph.
 func init() {
 	teamloader.RegisterToolsetCreator("rag", func(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 		return CreateToolSet(ctx, toolset, parentDir, runConfig)

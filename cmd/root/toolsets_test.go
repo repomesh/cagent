@@ -1,7 +1,6 @@
 package root
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -22,7 +21,7 @@ func TestRAGToolsetRegistered(t *testing.T) {
 	// A rag toolset with no config fails inside the creator with a config
 	// error — not with "unknown toolset type". Reaching that creator-level
 	// error proves the "rag" creator is registered.
-	_, err := registry.CreateTool(context.Background(), latest.Toolset{Type: "rag"}, "", &config.RuntimeConfig{}, "")
+	_, err := registry.CreateTool(t.Context(), latest.Toolset{Type: "rag"}, "", &config.RuntimeConfig{}, "")
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "unknown toolset type",
 		"the rag toolset is not registered; check the blank import in cmd/root/toolsets.go")

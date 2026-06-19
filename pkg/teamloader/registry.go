@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -118,9 +119,7 @@ func NewDefaultToolsetRegistry() ToolsetRegistry {
 		},
 	}
 	// Merge in creators contributed via RegisterToolsetCreator (e.g. "rag").
-	for toolsetType, creator := range extraCreators {
-		r.creators[toolsetType] = creator
-	}
+	maps.Copy(r.creators, extraCreators)
 	return r
 }
 

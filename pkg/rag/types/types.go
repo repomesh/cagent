@@ -50,5 +50,5 @@ type EventForwarder interface {
 	// Name returns the toolset's user-facing name.
 	Name() string
 	// SetEventCallback registers the callback; must be called before Start.
-	SetEventCallback(EventCallback)
+	SetEventCallback(callback EventCallback)
 }
