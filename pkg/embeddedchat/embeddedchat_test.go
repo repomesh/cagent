@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	dagentcfg "github.com/docker/docker-agent/pkg/config"
 	dagentruntime "github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/stretchr/testify/require"
 )
 
 func TestNewLoadsAgentAndWelcomeMessage(t *testing.T) {

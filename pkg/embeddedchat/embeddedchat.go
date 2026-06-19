@@ -78,9 +78,9 @@ type ToolActivity struct {
 
 // runtimeRunner is the subset of runtime.Runtime the headless session needs.
 type runtimeRunner interface {
-	RunStream(context.Context, *session.Session) <-chan dagentruntime.Event
-	Resume(context.Context, dagentruntime.ResumeRequest)
-	ResumeElicitation(context.Context, tools.ElicitationAction, map[string]any) error
+	RunStream(ctx context.Context, sess *session.Session) <-chan dagentruntime.Event
+	Resume(ctx context.Context, req dagentruntime.ResumeRequest)
+	ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any) error
 	Close() error
 }
 
