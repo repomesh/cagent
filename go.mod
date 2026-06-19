@@ -30,7 +30,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/docker/aijson v0.1.0
-	github.com/docker/cli v29.5.3+incompatible
+	github.com/docker/cli v29.6.0+incompatible
 	github.com/docker/go-units v0.5.0
 	github.com/docker/portcullis v0.0.0-20260610113232-24775d73cb04
 	github.com/dop251/goja v0.0.0-20260607120635-348e6bea910d
