@@ -22,6 +22,7 @@ import (
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/version"
 )
 
@@ -46,7 +47,7 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		return err
 	}
 
-	t, err := teamloader.Load(ctx, agentSource, runConfig)
+	t, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 	if err != nil {
 		return fmt.Errorf("failed to load agents: %w", err)
 	}

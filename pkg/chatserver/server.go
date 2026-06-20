@@ -43,6 +43,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
 
 // Options configures the chat completions server. Future improvements
@@ -152,7 +153,7 @@ func loadTeam(ctx context.Context, agentFilename string, runConfig *config.Runti
 	if err != nil {
 		return nil, err
 	}
-	t, err := teamloader.Load(ctx, src, runConfig)
+	t, err := teamloader.Load(ctx, src, runConfig, loaderdefaults.Opts()...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load agents: %w", err)
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -91,7 +92,7 @@ func createMCPServer(ctx context.Context, agentFilename, agentName string, runCo
 		return nil, nil, err
 	}
 
-	t, err := teamloader.Load(ctx, agentSource, runConfig)
+	t, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load agents: %w", err)
 	}

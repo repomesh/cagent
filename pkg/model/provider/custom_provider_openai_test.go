@@ -70,7 +70,7 @@ func TestCustomProvider_WithProvidersOption(t *testing.T) {
 	})
 
 	// Create provider with WithProviders option (as teamloader does)
-	provider, err := New(t.Context(), modelCfg, env, options.WithProviders(customProviders))
+	provider, err := fullTestRegistry().New(t.Context(), modelCfg, env, options.WithProviders(customProviders))
 	require.NoError(t, err)
 
 	stream, err := provider.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, []tools.Tool{})
@@ -152,7 +152,7 @@ func TestCustomProvider_RequestReachesServer(t *testing.T) {
 		customTokenKey: expectedToken,
 	})
 
-	provider, err := New(t.Context(), modelCfg, env)
+	provider, err := fullTestRegistry().New(t.Context(), modelCfg, env)
 	require.NoError(t, err)
 
 	stream, err := provider.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hello"}}, []tools.Tool{})
@@ -213,7 +213,7 @@ func TestCustomProvider_ResponsesAPIType(t *testing.T) {
 
 	env := environment.NewMapEnvProvider(map[string]string{"API_KEY": "test"})
 
-	provider, err := New(t.Context(), modelCfg, env)
+	provider, err := fullTestRegistry().New(t.Context(), modelCfg, env)
 	require.NoError(t, err)
 
 	stream, err := provider.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hello"}}, []tools.Tool{})
@@ -273,7 +273,7 @@ func TestCustomProvider_ChatCompletionsAPIType(t *testing.T) {
 
 	env := environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"})
 
-	provider, err := New(t.Context(), modelCfg, env)
+	provider, err := fullTestRegistry().New(t.Context(), modelCfg, env)
 	require.NoError(t, err)
 
 	stream, err := provider.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Test"}}, []tools.Tool{})
@@ -308,7 +308,7 @@ func TestCustomProvider_MissingAPIKey(t *testing.T) {
 
 	env := environment.NewNoEnvProvider() // key not set
 
-	_, err := New(t.Context(), modelCfg, env)
+	_, err := fullTestRegistry().New(t.Context(), modelCfg, env)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MISSING_API_KEY", "Error should mention the missing env var")
 }

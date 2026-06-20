@@ -31,6 +31,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tui"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -693,9 +694,7 @@ func (f *runExecFlags) dispatchWorktreeCreate(ctx context.Context, out *cli.Prin
 }
 
 func (f *runExecFlags) loadAgentFrom(ctx context.Context, req runtime.LoadTeamRequest) (*teamloader.LoadResult, error) {
-	opts := []teamloader.Opt{
-		teamloader.WithModelOverrides(req.ModelOverrides),
-	}
+	opts := append(loaderdefaults.Opts(), teamloader.WithModelOverrides(req.ModelOverrides))
 	if len(req.PromptFiles) > 0 {
 		opts = append(opts, teamloader.WithPromptFiles(req.PromptFiles))
 	}
@@ -712,6 +711,7 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 		Providers:          loadResult.Providers,
 		ModelsGateway:      runConfig.ModelsGateway,
 		EnvProvider:        runConfig.EnvProvider(),
+		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
 	}
 	opts := []runtime.Opt{

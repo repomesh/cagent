@@ -13,6 +13,7 @@ import (
 	dagentruntime "github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -38,7 +39,7 @@ type Config struct {
 	// config is used.
 	RuntimeConfig *dagentcfg.RuntimeConfig
 	// ToolsetRegistry resolves toolsets declared by AgentSource. When nil,
-	// docker-agent's default registry is used.
+	// docker-agent's full YAML-loading registry is used.
 	ToolsetRegistry teamloader.ToolsetRegistry
 	// RuntimeOptions are appended when constructing the runtime.
 	RuntimeOptions []dagentruntime.Opt
@@ -108,7 +109,7 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 		runConfig = &dagentcfg.RuntimeConfig{}
 	}
 
-	var loadOpts []teamloader.Opt
+	loadOpts := loaderdefaults.Opts()
 	if cfg.ToolsetRegistry != nil {
 		loadOpts = append(loadOpts, teamloader.WithToolsetRegistry(cfg.ToolsetRegistry))
 	}
@@ -122,6 +123,7 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 		Providers:          loaded.Providers,
 		ModelsGateway:      runConfig.ModelsGateway,
 		EnvProvider:        runConfig.EnvProvider(),
+		ProviderRegistry:   loaded.ProviderRegistry,
 		AgentDefaultModels: loaded.AgentDefaultModels,
 	}
 
