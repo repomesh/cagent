@@ -108,13 +108,13 @@ models:
 
 **Adaptive effort levels and per-model support:**
 
-| Level     | Opus 4.5 | Sonnet 4.5 / Haiku | Sonnet 4.6 | Opus 4.6 | Opus 4.7 / 4.8 | Fable 5 / Mythos 5 |
-| --------- | :------: | :----------------: | :--------: | :------: | :------------: | :----------------: |
-| `low`     | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓                  |
-| `medium`  | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓                  |
-| `high`    | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓                  |
-| `xhigh`   | —        | —                  | —          | —        | ✓              | ✓                  |
-| `max`     | —        | —                  | ✓          | ✓        | ✓              | ✓                  |
+| Level     | Opus 4.5 | Sonnet 4.5 / Haiku | Sonnet 4.6 | Opus 4.6 | Opus 4.7 / 4.8 | Fable 5 | Mythos 5 | Mythos preview |
+| --------- | :------: | :----------------: | :--------: | :------: | :------------: | :-----: | :------: | :------------: |
+| `low`     | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
+| `medium`  | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
+| `high`    | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
+| `xhigh`   | —        | —                  | —          | —        | ✓              | ✓       | ✓        | —              |
+| `max`     | —        | —                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
 
 `minimal` is treated as `low` (bare form only). `high` is the default when `adaptive` is used without an effort level.
 

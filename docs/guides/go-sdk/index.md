@@ -55,14 +55,16 @@ When building custom UIs on top of docker-agent's TUI primitives, four packages 
 ```go
 import (
     "context"
+    "strings"
 
     dagentcfg "github.com/docker/docker-agent/pkg/config"
+    dagentruntime "github.com/docker/docker-agent/pkg/runtime"
     "github.com/docker/docker-agent/pkg/embeddedchat"
 )
 
 chat, err := embeddedchat.New(ctx, embeddedchat.Config{
     // AgentSource can be a file path, raw YAML bytes, or an OCI reference.
-    AgentSource: dagentcfg.BytesSource([]byte(agentYAML)),
+    AgentSource: dagentcfg.NewBytesSource("agent", []byte(agentYAML)),
 })
 if err != nil {
     return err
@@ -87,7 +89,9 @@ for ev := range events {
         response.WriteString(ev.Text)
     case ev.Tool != nil && ev.Tool.NeedsConfirmation:
         // Approve or reject the pending tool call.
-        chat.Confirm(ctx, dagentruntime.ResumeApproveSession())
+        if err := chat.Confirm(ctx, dagentruntime.ResumeApproveSession()); err != nil {
+            return err
+        }
     case ev.Tool != nil && ev.Tool.Finished:
         fmt.Printf("[tool %s finished]\n", ev.Tool.Def.Name)
     case ev.Err != nil:
