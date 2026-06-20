@@ -37,9 +37,10 @@ import (
 var defaultMaxTokens int64 = 32000
 
 type loadOptions struct {
-	modelOverrides  []string
-	promptFiles     []string
-	toolsetRegistry ToolsetRegistry
+	modelOverrides   []string
+	promptFiles      []string
+	toolsetRegistry  ToolsetRegistry
+	providerRegistry *provider.Registry
 }
 
 type Opt func(*loadOptions) error
@@ -60,10 +61,20 @@ func WithPromptFiles(files []string) Opt {
 	}
 }
 
-// WithToolsetRegistry allows using a custom toolset registry instead of the default
+// WithToolsetRegistry allows using a custom toolset registry instead of the default.
 func WithToolsetRegistry(registry ToolsetRegistry) Opt {
 	return func(opts *loadOptions) error {
 		opts.toolsetRegistry = registry
+		return nil
+	}
+}
+
+// WithProviderRegistry allows using a custom model provider registry instead of the default.
+func WithProviderRegistry(registry *provider.Registry) Opt {
+	return func(opts *loadOptions) error {
+		if registry != nil {
+			opts.providerRegistry = registry
+		}
 		return nil
 	}
 }
@@ -74,6 +85,8 @@ type LoadResult struct {
 	Team      *team.Team
 	Models    map[string]latest.ModelConfig
 	Providers map[string]latest.ProviderConfig
+	// ProviderRegistry is the registry used to instantiate model providers for this load.
+	ProviderRegistry *provider.Registry
 	// AgentDefaultModels maps agent names to their configured default model references
 	AgentDefaultModels map[string]string
 }
@@ -92,6 +105,7 @@ func Load(ctx context.Context, agentSource config.Source, runConfig *config.Runt
 func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *config.RuntimeConfig, opts ...Opt) (*LoadResult, error) {
 	var loadOpts loadOptions
 	loadOpts.toolsetRegistry = NewDefaultToolsetRegistry()
+	loadOpts.providerRegistry = provider.DefaultRegistry()
 
 	for _, o := range opts {
 		if err := o(&loadOpts); err != nil {
@@ -200,7 +214,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			}
 			opts = append(opts, agent.WithHarness(&harnessCfg))
 		} else {
-			models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, runConfig)
+			models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, runConfig, loadOpts.providerRegistry)
 			if err != nil {
 				// Return auto model fallback errors and DMR not installed errors directly
 				// without wrapping to provide cleaner messages
@@ -216,7 +230,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			// Load fallback models if configured
 			fallbackModelRefs := agentConfig.GetFallbackModels()
 			if len(fallbackModelRefs) > 0 {
-				fallbackModels, err := getFallbackModelsForAgent(ctx, cfg, &agentConfig, runConfig)
+				fallbackModels, err := getFallbackModelsForAgent(ctx, cfg, &agentConfig, runConfig, loadOpts.providerRegistry)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get fallback models: %w", err)
 				}
@@ -230,7 +244,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			}
 
 			// A model may delegate session-title generation to another model.
-			titleModel, err := getTitleModelForAgent(ctx, cfg, &agentConfig, runConfig)
+			titleModel, err := getTitleModelForAgent(ctx, cfg, &agentConfig, runConfig, loadOpts.providerRegistry)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get title model: %w", err)
 			}
@@ -321,11 +335,12 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		),
 		Models:             cfg.Models,
 		Providers:          cfg.Providers,
+		ProviderRegistry:   loadOpts.providerRegistry,
 		AgentDefaultModels: agentDefaultModels,
 	}, nil
 }
 
-func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, autoModelFn func() latest.ModelConfig, runConfig *config.RuntimeConfig) ([]provider.Provider, error) {
+func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, autoModelFn func() latest.ModelConfig, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry) ([]provider.Provider, error) {
 	var models []provider.Provider
 
 	// Obtain the singleton store once, outside the loop.
@@ -368,7 +383,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 		}
 
 		// Pass the full models map for routing rules to resolve model references
-		model, err := provider.NewWithModels(ctx,
+		model, err := providerRegistry.NewWithModels(ctx,
 			&modelCfg,
 			cfg.Models,
 			runConfig.EnvProvider(),
@@ -389,7 +404,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 
 // getFallbackModelsForAgent returns fallback providers for an agent based on its fallback configuration.
 // It uses the same resolution logic as primary models (named model, inline provider/model format).
-func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig) ([]provider.Provider, error) {
+func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry) ([]provider.Provider, error) {
 	var fallbackModels []provider.Provider
 
 	// Obtain the singleton store once, outside the loop.
@@ -431,7 +446,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 		}
 
 		// Pass the full models map for routing rules to resolve model references
-		model, err := provider.NewWithModels(ctx,
+		model, err := providerRegistry.NewWithModels(ctx,
 			&modelCfg,
 			cfg.Models,
 			runConfig.EnvProvider(),
@@ -449,7 +464,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 // getTitleModelForAgent resolves the dedicated title-generation model for an
 // agent, if any. It returns the model named by the `title_model` field of the
 // first of the agent's configured models that sets it, or nil when none do.
-func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig) (provider.Provider, error) {
+func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry) (provider.Provider, error) {
 	var titleRef string
 	for name := range strings.SplitSeq(a.Model, ",") {
 		if modelCfg, ok := cfg.Models[name]; ok && modelCfg.TitleModel != "" {
@@ -495,7 +510,7 @@ func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.Ag
 		opts = append(opts, options.WithModelsDevStore(modelsStore))
 	}
 
-	model, err := provider.NewWithModels(ctx, &modelCfg, cfg.Models, runConfig.EnvProvider(), opts...)
+	model, err := providerRegistry.NewWithModels(ctx, &modelCfg, cfg.Models, runConfig.EnvProvider(), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create title model '%s': %w", titleRef, err)
 	}
@@ -741,6 +756,10 @@ func loadExternalAgent(ctx context.Context, ref string, runConfig *config.Runtim
 	var opts []Opt
 	if loadOpts.toolsetRegistry != nil {
 		opts = append(opts, WithToolsetRegistry(loadOpts.toolsetRegistry))
+	}
+
+	if loadOpts.providerRegistry != nil {
+		opts = append(opts, WithProviderRegistry(loadOpts.providerRegistry))
 	}
 
 	result, err := Load(contextWithExternalDepth(ctx, depth+1), source, runConfig, opts...)

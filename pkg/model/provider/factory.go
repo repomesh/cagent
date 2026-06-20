@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
@@ -14,101 +15,89 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
 )
 
-// createRuleBasedRouter creates a rule-based routing provider.
-func createRuleBasedRouter(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	return rulebased.NewClient(ctx, cfg, models, env, resolveRoutedModel, opts...)
+type Factory func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error)
+
+type Registry struct {
+	factories map[string]Factory
 }
 
-// resolveRoutedModel is the rulebased.ProviderFactory used by
-// createRuleBasedRouter. It resolves a routing target — which is either a name
-// from the models map or an inline "provider/model" spec — and returns the
-// provider for it. Routing targets cannot themselves have routing rules.
-//
-// Defined as a package-level function (rather than an inline closure) so the
-// recursion-prevention, parse-error and factory-error paths can be unit-tested
-// directly without going through rulebased.NewClient.
-func resolveRoutedModel(
-	ctx context.Context,
-	modelSpec string,
-	models map[string]latest.ModelConfig,
-	env environment.Provider,
-	factoryOpts ...options.Opt,
-) (rulebased.Provider, error) {
-	// Check if modelSpec is a reference to a model in the models map.
+func NewRegistry(factories map[string]Factory) *Registry {
+	copied := make(map[string]Factory, len(factories)+1)
+	copied["dmr"] = dmrFactory
+	maps.Copy(copied, factories)
+	return &Registry{factories: copied}
+}
+
+func (r *Registry) New(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	return r.NewWithModels(ctx, cfg, nil, env, opts...)
+}
+
+func (r *Registry) NewWithModels(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	slog.DebugContext(ctx, "Creating model provider", "type", cfg.Provider, "model", cfg.Model)
+	if len(cfg.Routing) > 0 {
+		p, err := r.createRuleBasedRouter(ctx, cfg, models, env, opts...)
+		if err != nil {
+			return nil, err
+		}
+		if setter, ok := p.(interface{ SetProviderRegistry(registry any) }); ok {
+			setter.SetProviderRegistry(r)
+		}
+		return p, nil
+	}
+	return r.createDirectProvider(ctx, cfg, env, opts...)
+}
+
+func (r *Registry) createRuleBasedRouter(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	return rulebased.NewClient(ctx, cfg, models, env, r.resolveRoutedModel, opts...)
+}
+
+func (r *Registry) resolveRoutedModel(ctx context.Context, modelSpec string, models map[string]latest.ModelConfig, env environment.Provider, factoryOpts ...options.Opt) (rulebased.Provider, error) {
 	if modelCfg, exists := models[modelSpec]; exists {
-		// Prevent infinite recursion - referenced models cannot have routing rules.
 		if len(modelCfg.Routing) > 0 {
 			return nil, fmt.Errorf("model %q has routing rules and cannot be used as a routing target", modelSpec)
 		}
-		return createDirectProvider(ctx, &modelCfg, env, factoryOpts...)
+		return r.createDirectProvider(ctx, &modelCfg, env, factoryOpts...)
 	}
-
-	// Otherwise, treat as an inline model spec (e.g., "openai/gpt-4o").
 	inlineCfg, parseErr := latest.ParseModelRef(modelSpec)
 	if parseErr != nil {
 		return nil, fmt.Errorf("invalid model spec %q: expected 'provider/model' format or a model reference", modelSpec)
 	}
-	return createDirectProvider(ctx, &inlineCfg, env, factoryOpts...)
+	return r.createDirectProvider(ctx, &inlineCfg, env, factoryOpts...)
 }
 
-// createDirectProvider creates a provider without routing (direct model access).
-func createDirectProvider(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	if r == nil {
+		r = DefaultRegistry()
+	}
 	var globalOptions options.ModelOptions
 	for _, opt := range opts {
 		opt(&globalOptions)
 	}
-
-	// Apply defaults from custom providers (from config) or built-in aliases
 	enhancedCfg := applyProviderDefaults(cfg, globalOptions.Providers())
-
 	providerType := resolveProviderType(enhancedCfg)
-
-	factory, ok := providerFactories[providerType]
+	factory, ok := r.factories[providerType]
 	if !ok {
 		slog.ErrorContext(ctx, "Unknown provider type", "type", providerType)
 		return nil, unknownProviderError(providerType)
 	}
-	return factory(ctx, enhancedCfg, env, opts...)
-}
-
-// unknownProviderError builds the error returned when no factory is registered
-// for providerType. The provider may be genuinely unknown, or it may have been
-// compiled out via a `no_<provider>` build tag (openai/anthropic/google/bedrock
-// are optional). The message hints at the latter so trimmed builds are easy to
-// diagnose.
-func unknownProviderError(providerType string) error {
-	return fmt.Errorf("unknown provider type %q (it may not be compiled into this build)", providerType)
-}
-
-// providerFactory builds a Provider from a fully-resolved ModelConfig.
-// Tests may swap entries in providerFactories to exercise dispatch logic
-// without spinning up real provider clients.
-type providerFactory func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error)
-
-// providerFactories maps a resolved provider type (the value returned by
-// resolveProviderType) to its constructor.
-//
-// Entries are contributed by per-provider files via registerProviderFactory in
-// their init(). The optional providers (openai, anthropic, google,
-// amazon-bedrock) each live behind a `no_<provider>` build tag so embedders can
-// drop them — and their transitive SDK dependencies — from a build. The map is
-// package-private but modifiable; tests must restore the original entries with
-// t.Cleanup.
-var providerFactories = map[string]providerFactory{}
-
-// registerProviderFactory records f under name in providerFactories. It is
-// called from the init() of each per-provider file; duplicate registration of
-// the same name panics to surface wiring mistakes at startup.
-func registerProviderFactory(name string, f providerFactory) {
-	if _, exists := providerFactories[name]; exists {
-		panic("provider: duplicate factory registration for " + name)
+	p, err := factory(ctx, enhancedCfg, env, opts...)
+	if err != nil {
+		return nil, err
 	}
-	providerFactories[name] = f
+	if setter, ok := p.(interface{ SetProviderRegistry(registry any) }); ok {
+		setter.SetProviderRegistry(r)
+	}
+	return p, nil
 }
 
-//nolint:gochecknoinits // Intentional: providers self-register so optional ones can be dropped via build tags.
-func init() {
-	registerProviderFactory("dmr", dmrFactory)
+var defaultFactories map[string]Factory
+
+func DefaultRegistry() *Registry {
+	return NewRegistry(defaultFactories)
+}
+
+func unknownProviderError(providerType string) error {
+	return fmt.Errorf("unknown provider type %q (register it with provider.NewRegistry or use providers.NewDefaultRegistry)", providerType)
 }
 
 func dmrFactory(ctx context.Context, cfg *latest.ModelConfig, _ environment.Provider, opts ...options.Opt) (Provider, error) {

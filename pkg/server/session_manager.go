@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -829,6 +830,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		Providers:          loadResult.Providers,
 		ModelsGateway:      rc.ModelsGateway,
 		EnvProvider:        rc.EnvProvider(),
+		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
 	}
 
@@ -867,7 +869,7 @@ func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, ru
 		return nil, fmt.Errorf("agent not found: %s", agentFilename)
 	}
 
-	return teamloader.Load(ctx, agentSource, runConfig)
+	return teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 }
 
 // loadTeamWithConfig is like loadTeam but also returns the loaded model and
@@ -878,7 +880,7 @@ func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename 
 		return nil, fmt.Errorf("agent not found: %s", agentFilename)
 	}
 
-	return teamloader.LoadWithConfig(ctx, agentSource, runConfig)
+	return teamloader.LoadWithConfig(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 }
 
 // applyRunModelOverride applies modelRef as the per-agent model override

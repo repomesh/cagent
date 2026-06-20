@@ -14,52 +14,16 @@
 //   - factory.go: shared dispatch from a resolved provider type to the
 //     concrete client constructor, plus the always-available dmr provider
 //     and the rule-based router.
-//   - factory_<name>.go: one file per optional provider (openai, anthropic,
-//     google, amazon-bedrock); each registers itself with the dispatch table
-//     and is gated by a build tag (see "Build tags" below).
 //
-// # Build tags
-//
-// The openai, anthropic, google and amazon-bedrock providers are optional.
-// Each lives behind a negative build tag so a project embedding docker-agent
-// can compile a provider out — together with its transitive SDK dependencies —
-// to shrink the binary and dependency graph. All providers are included by
-// default; pass the relevant tag(s) to opt out.
-//
-// Build tags are global to a build, not scoped per module: a tag set by the
-// top-level project applies to every dependency too. The tags are therefore
-// prefixed with "docker_agent_" so an embedding project can use its own build
-// tags (even a plain "no_openai") without accidentally toggling these
-// providers.
-//
-// The available tags are:
-//
-//   - docker_agent_no_openai: drop the OpenAI provider (github.com/openai/openai-go).
-//   - docker_agent_no_anthropic: drop the Anthropic provider
-//     (github.com/anthropics/anthropic-sdk-go). The google provider's Vertex
-//     Model Garden support also imports the anthropic package, so the
-//     dependency is only fully removed when combined with docker_agent_no_google.
-//   - docker_agent_no_google: drop the Google provider (google.golang.org/genai, the
-//     Vertex AI / cloud auth stack, and — via Vertex Model Garden — the
-//     anthropic and openai SDKs). Vertex AI is unsupported either way under
-//     js/wasm.
-//   - docker_agent_no_bedrock: drop the Amazon Bedrock provider
-//     (the github.com/aws/aws-sdk-go-v2 stack), the largest provider-specific
-//     dependency tree.
-//
-// For example, to build without Bedrock and OpenAI:
-//
-//	go build -tags 'docker_agent_no_bedrock docker_agent_no_openai' ...
-//
-// Requesting a model whose provider was compiled out fails at construction
-// time with a clear "not compiled into this build" error rather than at
-// compile time. The dmr provider and the rule-based router are always
-// compiled in (except under js/wasm, which has its own slim factory).
+// Optional SDK-backed providers live outside this package's default import
+// graph. YAML-loading applications that need Docker Agent's full provider set
+// should import pkg/model/provider/providers and pass its explicit registry;
+// embedders that build agents manually can import only the concrete provider
+// packages they use and pass their factories to [NewRegistry].
 package provider
 
 import (
 	"context"
-	"log/slog"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -117,21 +81,16 @@ type RerankingProvider interface {
 	Rerank(ctx context.Context, query string, documents []types.Document, criteria string) ([]float64, error)
 }
 
-// New creates a new provider from a model config.
-// This is a convenience wrapper for NewWithModels with no models map.
+// New creates a new provider from a model config using the default registry.
+// The default registry only contains providers that the core package can expose
+// without optional SDK dependencies. YAML-loading applications that need all
+// docker-agent providers should use pkg/model/provider/providers.NewDefaultRegistry.
 func New(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	return NewWithModels(ctx, cfg, nil, env, opts...)
+	return DefaultRegistry().New(ctx, cfg, env, opts...)
 }
 
 // NewWithModels creates a new provider from a model config with access to the full models map.
 // The models map is used to resolve model references in routing rules.
 func NewWithModels(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	slog.DebugContext(ctx, "Creating model provider", "type", cfg.Provider, "model", cfg.Model)
-
-	// Check if this model has routing rules - if so, create a rule-based router
-	if len(cfg.Routing) > 0 {
-		return createRuleBasedRouter(ctx, cfg, models, env, opts...)
-	}
-
-	return createDirectProvider(ctx, cfg, env, opts...)
+	return DefaultRegistry().NewWithModels(ctx, cfg, models, env, opts...)
 }

@@ -57,13 +57,14 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "new", args, commandErr)
 	}()
 
-	t, err := creator.Agent(ctx, &f.runConfig, f.modelParam)
+	loadResult, err := creator.Load(ctx, &f.runConfig, f.modelParam)
 	if err != nil {
 		return err
 	}
+	t := loadResult.Team
 	defer stopToolSets(t)
 
-	rt, err := runtime.New(t)
+	rt, err := runtime.New(t, runtime.WithProviderRegistry(loadResult.ProviderRegistry))
 	if err != nil {
 		return err
 	}

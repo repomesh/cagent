@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -209,6 +210,7 @@ type LocalRuntime struct {
 	workingDir                string   // Working directory for hooks execution
 	env                       []string // Environment variables for hooks execution
 	modelSwitcherCfg          *ModelSwitcherConfig
+	providerRegistry          *provider.Registry
 	gatewayModels             gatewayModelsCache
 
 	// hooksRegistry is the runtime-private hooks.Registry used to build
@@ -369,6 +371,14 @@ func WithFollowUpQueue(q MessageQueue) Opt {
 func WithSessionCompaction(sessionCompaction bool) Opt {
 	return func(r *LocalRuntime) {
 		r.sessionCompaction = sessionCompaction
+	}
+}
+
+func WithProviderRegistry(registry *provider.Registry) Opt {
+	return func(r *LocalRuntime) {
+		if registry != nil {
+			r.providerRegistry = registry
+		}
 	}
 }
 
@@ -536,6 +546,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		fallback:               newFallbackExecutor(),
 		now:                    time.Now,
 		telemetry:              defaultTelemetry{},
+		providerRegistry:       provider.DefaultRegistry(),
 		maxOverflowCompactions: defaultMaxOverflowCompactions,
 		toolListTimeout:        defaultToolListTimeout,
 	}
@@ -575,7 +586,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	if err := builtins.Register(r.hooksRegistry); err != nil {
 		return nil, fmt.Errorf("register builtin hooks: %w", err)
 	}
-	registerModelHook(r.hooksRegistry)
+	registerModelHook(r.hooksRegistry, r.providerRegistry)
 
 	// cache_response is registered here (not in pkg/hooks/builtins)
 	// because it needs to capture the runtime to resolve the agent
