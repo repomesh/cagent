@@ -127,6 +127,8 @@ MCP and LSP toolsets are managed by a supervisor that auto-restarts them when th
 - `/tools` — the unified tools dialog. Its top section lists every toolset with its current state (`Stopped`, `Starting`, `Ready`, `Degraded`, `Restarting`, `Failed`), restart count, and last error; the bottom section lists every tool the agent can call. Start here whenever a tool seems missing or stuck.
 - `/toolset-restart <name>` — force a supervisor-driven reconnect of the named toolset. Useful after completing OAuth, when a remote MCP server has been redeployed, or when a language server like `gopls` is unresponsive.
 
+Remote MCP servers that return `401 invalid_token` (e.g. because the stored OAuth token was revoked or rotated) are now self-healing: docker-agent silently exchanges the refresh token for a new one when possible, or surfaces an OAuth re-authentication prompt on your next message when refresh is not possible. No more stuck toolsets that require a process restart — but if you want to trigger re-auth immediately, `/toolset-restart <name>` forces it right away.
+
 MCP tools using stdio transport must complete the initialization handshake before becoming available. If tools fail silently:
 
 1. Run `/tools` to see whether the toolset is `Failed` or stuck in `Restarting`, and what the last error was.
