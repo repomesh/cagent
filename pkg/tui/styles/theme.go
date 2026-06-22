@@ -140,9 +140,9 @@ func readThemeData(fsys fs.FS, ref string) ([]byte, bool) {
 // masking "default" with their own — and a later RegisterBuiltinThemes call wins
 // a name collision with an earlier one (last-wins).
 func readRegisteredThemeData(ref string) ([]byte, bool) {
-	fses := registeredThemeFSes()
-	for i := len(fses) - 1; i >= 0; i-- { // reverse: last-registered wins
-		if data, ok := readThemeData(fses[i], ref); ok {
+	// Iterate newest-first so a later RegisterBuiltinThemes call wins (last-wins).
+	for _, fsys := range slices.Backward(registeredThemeFSes()) {
+		if data, ok := readThemeData(fsys, ref); ok {
 			return data, true
 		}
 	}
