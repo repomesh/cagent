@@ -482,6 +482,16 @@ type clientConnector struct {
 func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error) {
 	ts := c.ts
 
+	// Background reconnects (watcher goroutine retrying after a disconnect)
+	// must not block on interactive flows such as OAuth prompts, because the
+	// elicitation bridge is not reliably available outside of a user turn.
+	// Marking the context non-interactive here ensures a background 401
+	// returns AuthorizationRequiredError → lifecycle.ErrAuthRequired →
+	// StateFailed immediately, and the next interactive turn recovers cleanly.
+	if lifecycle.IsBackgroundReconnect(ctx) {
+		ctx = WithoutInteractivePrompts(ctx)
+	}
+
 	// The MCP toolset connection needs to persist beyond the initial HTTP
 	// request that triggered its creation. When OAuth succeeds, subsequent
 	// agent requests should reuse the already-authenticated MCP connection.
@@ -557,6 +567,19 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 					"error", err,
 				)
 				return nil, errServerUnavailable
+			}
+			// Map auth-related transport failures to ErrAuthRequired so the
+			// supervisor treats them as permanent (no retry storm) and the
+			// toolset lands in StateFailed for clean interactive recovery on
+			// the next turn. Two signals to check:
+			//
+			// 1. AuthorizationRequiredError / OAuthDeclinedError from the
+			//    transport: enrichConnectError re-emits these through the SDK's
+			//    %v wrapping so errors.As still works.
+			// 2. lifecycle.Classify detected "invalid_token" in the error
+			//    message, which also resolves to ErrAuthRequired.
+			if IsAuthorizationRequired(err) || IsOAuthDeclined(err) || errors.Is(classified, lifecycle.ErrAuthRequired) {
+				return nil, fmt.Errorf("%w: %w", lifecycle.ErrAuthRequired, err)
 			}
 			slog.ErrorContext(ctx, "Failed to initialize MCP client", "error", err)
 			return nil, fmt.Errorf("failed to initialize MCP client: %w", err)
