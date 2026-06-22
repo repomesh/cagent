@@ -2002,6 +2002,40 @@ func TestUnmanagedOAuthFlow_DriveFlow_TimesOutWhenNoReplyArrives(t *testing.T) {
 		"token endpoint must NOT be hit on timeout")
 }
 
+// TestRegisterClient_GrantTypesIncludeRefreshToken verifies that dynamic
+// client registration (RFC 7591) advertises both grant types the client
+// uses. Strict authorization servers like Miro reject registrations that
+// omit refresh_token.
+func TestRegisterClient_GrantTypesIncludeRefreshToken(t *testing.T) {
+	var registrationBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&registrationBody); err != nil {
+			t.Fatalf("failed to decode registration request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"client_id":"test-client","client_secret":"test-secret"}`))
+	}))
+	defer srv.Close()
+
+	meta := &AuthorizationServerMetadata{
+		RegistrationEndpoint: srv.URL,
+	}
+	clientID, clientSecret, err := RegisterClient(t.Context(), meta, "https://example.test/oauth/cb", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "test-client", clientID)
+	assert.Equal(t, "test-secret", clientSecret)
+
+	grantTypes, _ := registrationBody["grant_types"].([]any)
+	require.Len(t, grantTypes, 2, "grant_types must list both grants the client uses")
+	assert.Contains(t, grantTypes, "authorization_code", "grant_types must include authorization_code")
+	assert.Contains(t, grantTypes, "refresh_token", "grant_types must include refresh_token (RFC 7591; required by strict servers such as Miro)")
+
+	responseTypes, _ := registrationBody["response_types"].([]any)
+	assert.Contains(t, responseTypes, "code", "response_types must include code")
+}
+
 // TestUnmanagedRedirectURI_PerToolsetTakesPrecedence verifies the precedence
 // order: per-toolset RemoteOAuthConfig.CallbackRedirectURL overrides the
 // runtime-wide --mcp-oauth-redirect-uri.

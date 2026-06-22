@@ -333,12 +333,10 @@ func registerClient(ctx context.Context, client *http.Client, authMetadata *Auth
 	}
 
 	reqBody := map[string]any{
-		"redirect_uris": []string{redirectURI},
-		"client_name":   "docker-agent",
-		"grant_types":   []string{"authorization_code"},
-		"response_types": []string{
-			"code",
-		},
+		"redirect_uris":  []string{redirectURI},
+		"client_name":    "docker-agent",
+		"grant_types":    []string{"authorization_code", "refresh_token"},
+		"response_types": []string{"code"},
 	}
 	if len(scopes) > 0 {
 		reqBody["scope"] = strings.Join(scopes, " ")
