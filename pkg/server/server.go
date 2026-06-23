@@ -77,6 +77,7 @@ func (s *Server) registerRoutes() {
 	group.PATCH("/sessions/:id/starred", s.setSessionStarred)
 	group.GET("/sessions/:id/models", s.getSessionModels)
 	group.POST("/sessions", s.createSession)
+	group.POST("/sessions/:id/fork", s.forkSession)
 	group.DELETE("/sessions/:id", s.deleteSession)
 	group.POST("/sessions/:id/agent/:agent", s.runAgent)
 	group.POST("/sessions/:id/agent/:agent/:agent_name", s.runAgent)
@@ -238,6 +239,42 @@ func (s *Server) createSession(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, sess)
+}
+
+// forkSession creates a new session whose history is a deep copy of an
+// existing session up to (but excluding) the message at MessageIndex. The
+// fork point must be a user message; the new session uses a
+// fork-numbered title derived from the parent and starts with no runtime
+// attached. Clients are expected to prefill the excluded user message into
+// their chat input for the user to edit and resubmit.
+func (s *Server) forkSession(c echo.Context) error {
+	var req api.ForkSessionRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	}
+
+	forked, err := s.sm.ForkSession(c.Request().Context(), c.Param("id"), req.MessageIndex)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrForkInvalidMessage),
+			errors.Is(err, ErrForkOutOfRange),
+			errors.Is(err, ErrForkInSubSession):
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to fork session: %v", err))
+	}
+
+	return c.JSON(http.StatusOK, api.SessionResponse{
+		ID:            forked.ID,
+		Title:         forked.Title,
+		CreatedAt:     forked.CreatedAt,
+		Messages:      forked.GetAllMessages(),
+		ToolsApproved: forked.ToolsApproved,
+		InputTokens:   forked.InputTokens,
+		OutputTokens:  forked.OutputTokens,
+		WorkingDir:    forked.WorkingDir,
+		Permissions:   forked.Permissions,
+	})
 }
 
 func (s *Server) getSession(c echo.Context) error {
