@@ -239,10 +239,16 @@ const (
 type ErrorEvent struct {
 	AgentContext
 
-	Type  string `json:"type"`
-	Error string `json:"error"`
-	Code  string `json:"code,omitempty"`
+	Type      string `json:"type"`
+	SessionID string `json:"session_id,omitempty"`
+	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
 }
+
+// GetSessionID makes ErrorEvent satisfy [SessionScoped] so the existing
+// isRootEvent check in the platform runner correctly distinguishes root-session
+// errors from child-session errors forwarded by runForwarding.
+func (e *ErrorEvent) GetSessionID() string { return e.SessionID }
 
 func Error(msg string) Event {
 	return &ErrorEvent{
@@ -256,6 +262,29 @@ func ErrorWithCode(code, msg string) Event {
 		Type:  "error",
 		Error: msg,
 		Code:  code,
+	}
+}
+
+// ErrorForSession creates an error event tagged with the session ID that
+// produced it. Use this inside the runtime run loop where sess.ID is
+// available so that isRootEvent can distinguish root-session errors from
+// child-session errors forwarded by runForwarding.
+func ErrorForSession(sessionID, msg string) Event {
+	return &ErrorEvent{
+		Type:      "error",
+		SessionID: sessionID,
+		Error:     msg,
+	}
+}
+
+// ErrorWithCodeForSession creates an error event with a code and session ID.
+// See ErrorForSession for the session-tagging rationale.
+func ErrorWithCodeForSession(sessionID, code, msg string) Event {
+	return &ErrorEvent{
+		Type:      "error",
+		SessionID: sessionID,
+		Error:     msg,
+		Code:      code,
 	}
 }
 

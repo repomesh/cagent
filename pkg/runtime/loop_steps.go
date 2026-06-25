@@ -184,7 +184,7 @@ func (r *LocalRuntime) handleStreamError(
 	slog.ErrorContext(ctx, "All models failed", "agent", a.Name(), "error", err)
 	r.telemetry.RecordError(ctx, err.Error())
 	errMsg := modelerrors.FormatError(err)
-	events.Emit(ErrorWithCode(classifyErrorCode(err), errMsg))
+	events.Emit(ErrorWithCodeForSession(sess.ID, classifyErrorCode(err), errMsg))
 	r.notifyError(ctx, a, sess.ID, errMsg)
 	return streamErrorFatal
 }

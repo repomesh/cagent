@@ -157,7 +157,7 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 		// block without a reason.
 		message = "Agent terminated by a hook."
 	}
-	events.Emit(ErrorWithCode(ErrorCodeHookBlocked, message))
+	events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeHookBlocked, message))
 	r.notifyError(ctx, a, sess.ID, message)
 }
 
@@ -286,7 +286,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	agentTools, err := r.getTools(ctx, a, sessionSpan, sink, true)
 	if err != nil {
-		sink.Emit(ErrorWithCode(ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
+		sink.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
 		return
 	}
 	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
@@ -380,7 +380,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 		agentTools, err := r.getTools(ctx, a, sessionSpan, sink, true)
 		if err != nil {
-			sink.Emit(ErrorWithCode(ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
+			sink.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
 			return
 		}
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
@@ -722,7 +722,7 @@ func (r *LocalRuntime) runTurn(
 			attribute.Int("cagent.loop.consecutive_calls", consecutive),
 		)
 		sessionSpan.SetStatus(codes.Error, errMsg)
-		events.Emit(ErrorWithCode(ErrorCodeLoopDetected, errMsg))
+		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeLoopDetected, errMsg))
 		r.notifyError(ctx, a, sess.ID, errMsg)
 		ls.loopDetector.Reset()
 		endReason = turnEndReasonLoopDetected
