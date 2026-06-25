@@ -9,9 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tools"
+	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
 func TestInlineImagesFromToolResultIncludesImagesAndImageDocuments(t *testing.T) {
@@ -40,7 +42,17 @@ func TestRenderToolIncludesKittyImageSequence(t *testing.T) {
 	})
 	require.Len(t, images, 1)
 
-	lines := renderTool(toolView{name: "read_file", output: "Read image file sample.png", images: images, done: true}, 80)
+	tv := newToolView("root", tools.ToolCall{
+		ID: "call-1",
+		Function: tools.FunctionCall{
+			Name:      "image_tool",
+			Arguments: `{"file":"sample.png"}`,
+		},
+	}, tools.Tool{Name: "image_tool"}, tuitypes.ToolStatusCompleted)
+	tv.message.Content = "Read image file sample.png"
+	tv.images = images
+
+	lines := renderTool(*tv, 80)
 	joined := strings.Join(lines, "\n")
 
 	assert.Contains(t, joined, "Read image file sample.png")

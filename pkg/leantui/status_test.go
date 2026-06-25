@@ -2,7 +2,6 @@ package leantui
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -53,10 +52,4 @@ func TestRenderStatusFitsWidth(t *testing.T) {
 	for _, l := range lines {
 		assert.LessOrEqual(t, displayWidth(l), 80)
 	}
-}
-
-func TestFormatDuration(t *testing.T) {
-	assert.Equal(t, "500ms", formatDuration(500*time.Millisecond))
-	assert.Equal(t, "1.5s", formatDuration(1500*time.Millisecond))
-	assert.Equal(t, "1m30s", formatDuration(90*time.Second))
 }

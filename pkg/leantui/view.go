@@ -33,8 +33,12 @@ func (m *model) buildLines() (lines []string, cursorLine, cursorCol int) {
 
 	inputStart := len(lines)
 	if m.confirm != nil {
-		lines = append(lines, m.confirm.render(width)...)
-		cursorLine = inputStart
+		confirmLines := m.confirm.render(width)
+		lines = append(lines, confirmLines...)
+		cursorLine = inputStart + max(len(confirmLines)-1, 0)
+		if len(confirmLines) > 0 {
+			cursorCol = min(displayWidth(confirmLines[len(confirmLines)-1]), max(width-1, 0))
+		}
 	} else {
 		editorLines, row, col := m.editor.layout(width)
 		lines = append(lines, editorLines...)
@@ -62,8 +66,10 @@ func (m *model) conversationLines(width int) []string {
 		lines = append(lines, "")
 	}
 	for _, id := range m.toolOrder {
-		lines = append(lines, renderTool(*m.tools[id], width)...)
-		lines = append(lines, "")
+		if tv := m.tools[id]; tv != nil {
+			lines = append(lines, renderToolWithState(*tv, width, m.spinnerFrame, m.sessionState)...)
+			lines = append(lines, "")
+		}
 	}
 	if m.busy && m.pending == nil && len(m.toolOrder) == 0 {
 		lines = append(lines, m.spinnerLine(), "")
@@ -93,25 +99,13 @@ func (m *model) spinnerLine() string {
 
 // confirmState holds a pending tool-approval prompt.
 type confirmState struct {
-	name    string // display name
-	tool    string // raw tool name, used to scope "always allow"
-	command string
-	summary string
+	tool     string // raw tool name, used to scope "always allow"
+	toolView toolView
 }
 
 func (c *confirmState) render(width int) []string {
-	lines := []string{
-		truncate(stWarning().Render("● Approve tool call")+"  "+stBold().Render(c.name), width),
-	}
-	if detail := c.command; detail != "" {
-		for _, l := range wrapANSI("$ "+detail, width-2) {
-			lines = append(lines, "  "+stSecondary().Render(l))
-		}
-	} else if c.summary != "" {
-		for _, l := range wrapANSI(c.summary, width-2) {
-			lines = append(lines, "  "+stMuted().Render(l))
-		}
-	}
+	lines := []string{truncate(stWarning().Render("● Approve tool call"), width)}
+	lines = append(lines, renderTool(c.toolView, width)...)
 	lines = append(lines, truncate(stMuted().Render("[y] yes   [a] always this tool   [s] whole session   [n] no"), width))
 	return lines
 }

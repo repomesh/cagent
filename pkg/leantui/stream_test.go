@@ -3,13 +3,17 @@ package leantui
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // bareModel builds a model with just the pieces buildLines needs, so the
@@ -18,14 +22,14 @@ func bareModel(width, height int) *model {
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 	return &model{
-		width:     width,
-		height:    height,
-		r:         newRenderer(w, width, height),
-		editor:    newEditor("type here"),
-		ac:        newAutocomplete(),
-		tools:     map[string]*toolView{},
-		toolStart: map[string]time.Time{},
-		status:    statusData{workingDir: "/tmp/project"},
+		width:        width,
+		height:       height,
+		r:            newRenderer(w, width, height),
+		editor:       newEditor("type here"),
+		ac:           newAutocomplete(),
+		tools:        map[string]*toolView{},
+		status:       statusData{workingDir: "/tmp/project"},
+		sessionState: service.NewSessionState(nil),
 	}
 }
 
@@ -70,4 +74,33 @@ func TestConversationLinesShowsSpinnerWhenBusy(t *testing.T) {
 	m.busy = true
 	lines := m.conversationLines(80)
 	assert.Contains(t, strings.Join(lines, ""), "Working")
+}
+
+func TestToolConfirmationReplacesRunningTool(t *testing.T) {
+	m := bareModel(80, 24)
+	tv := shellToolView(tuitypes.ToolStatusRunning)
+	m.upsertTool("root", tv.message.ToolCall, tv.message.ToolDefinition, tuitypes.ToolStatusRunning)
+	require.Len(t, m.toolOrder, 1)
+
+	event := runtime.ToolCallConfirmation(tv.message.ToolCall, tv.message.ToolDefinition, "root")
+	m.handleEvent(context.Background(), event)
+
+	assert.Empty(t, m.toolOrder)
+	assert.Empty(t, m.tools)
+	require.NotNil(t, m.confirm)
+}
+
+func TestBuildLinesConfirmCursorSitsOnOptions(t *testing.T) {
+	m := bareModel(80, 24)
+	m.confirm = &confirmState{
+		tool:     "shell",
+		toolView: *shellToolView(tuitypes.ToolStatusConfirmation),
+	}
+
+	lines, cursorLine, cursorCol := m.buildLines()
+	require.NotEmpty(t, lines)
+	require.GreaterOrEqual(t, cursorLine, 0)
+	require.Less(t, cursorLine, len(lines))
+	assert.Contains(t, lines[cursorLine], "[y] yes")
+	assert.Greater(t, cursorCol, 0)
 }

@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
 // Config wires the lean TUI to a prepared App and the initial run parameters.
@@ -154,7 +155,8 @@ type model struct {
 	editor *editor
 	ac     *autocomplete
 
-	status statusData
+	status       statusData
+	sessionState *service.SessionState
 
 	blocks       []*block
 	busy         bool
@@ -162,7 +164,6 @@ type model struct {
 	pending      *pendingBlock
 	tools        map[string]*toolView
 	toolOrder    []string
-	toolStart    map[string]time.Time
 
 	runCancel context.CancelFunc
 	queue     []string
@@ -185,6 +186,11 @@ func newModel(term *terminal, cfg Config) *model {
 		disabled[strings.TrimPrefix(c, "/")] = true
 	}
 
+	sessionState := service.NewSessionState(nil)
+	if cfg.App != nil {
+		sessionState = service.NewSessionState(cfg.App.Session())
+	}
+
 	return &model{
 		app:              cfg.App,
 		term:             term,
@@ -194,8 +200,8 @@ func newModel(term *terminal, cfg Config) *model {
 		editor:           newEditor("Type a message, / for commands"),
 		ac:               newAutocomplete(),
 		tools:            make(map[string]*toolView),
-		toolStart:        make(map[string]time.Time),
 		status:           statusData{workingDir: cfg.WorkingDir, branch: gitBranch(cfg.WorkingDir)},
+		sessionState:     sessionState,
 		appName:          appName,
 		disabledCommands: disabled,
 	}
