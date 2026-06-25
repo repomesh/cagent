@@ -3,7 +3,6 @@ package leantui
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,7 +17,9 @@ import (
 
 // bareModel builds a model with just the pieces buildLines needs, so the
 // rendering pipeline can be exercised without a real App or terminal.
-func bareModel(width, height int) *model {
+func bareModel(height int) *model {
+	const width = 80
+
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 	return &model{
@@ -34,7 +35,7 @@ func bareModel(width, height int) *model {
 }
 
 func TestStreamingGrowthScrollsAndRendersMarkdown(t *testing.T) {
-	m := bareModel(80, 10)
+	m := bareModel(10)
 	m.busy = true
 	m.render() // initial frame
 
@@ -59,7 +60,7 @@ func TestStreamingGrowthScrollsAndRendersMarkdown(t *testing.T) {
 }
 
 func TestBuildLinesPlacesCursorOnInput(t *testing.T) {
-	m := bareModel(80, 24)
+	m := bareModel(24)
 	m.editor.setText("hello")
 
 	lines, cursorLine, cursorCol := m.buildLines()
@@ -70,20 +71,20 @@ func TestBuildLinesPlacesCursorOnInput(t *testing.T) {
 }
 
 func TestConversationLinesShowsSpinnerWhenBusy(t *testing.T) {
-	m := bareModel(80, 24)
+	m := bareModel(24)
 	m.busy = true
 	lines := m.conversationLines(80)
 	assert.Contains(t, strings.Join(lines, ""), "Working")
 }
 
 func TestToolConfirmationReplacesRunningTool(t *testing.T) {
-	m := bareModel(80, 24)
+	m := bareModel(24)
 	tv := shellToolView(tuitypes.ToolStatusRunning)
 	m.upsertTool("root", tv.message.ToolCall, tv.message.ToolDefinition, tuitypes.ToolStatusRunning)
 	require.Len(t, m.toolOrder, 1)
 
 	event := runtime.ToolCallConfirmation(tv.message.ToolCall, tv.message.ToolDefinition, "root")
-	m.handleEvent(context.Background(), event)
+	m.handleEvent(t.Context(), event)
 
 	assert.Empty(t, m.toolOrder)
 	assert.Empty(t, m.tools)
@@ -91,7 +92,7 @@ func TestToolConfirmationReplacesRunningTool(t *testing.T) {
 }
 
 func TestBuildLinesConfirmCursorSitsOnOptions(t *testing.T) {
-	m := bareModel(80, 24)
+	m := bareModel(24)
 	m.confirm = &confirmState{
 		tool:     "shell",
 		toolView: *shellToolView(tuitypes.ToolStatusConfirmation),
@@ -102,5 +103,5 @@ func TestBuildLinesConfirmCursorSitsOnOptions(t *testing.T) {
 	require.GreaterOrEqual(t, cursorLine, 0)
 	require.Less(t, cursorLine, len(lines))
 	assert.Contains(t, lines[cursorLine], "[y] yes")
-	assert.Greater(t, cursorCol, 0)
+	assert.Positive(t, cursorCol)
 }
