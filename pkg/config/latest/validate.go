@@ -33,6 +33,18 @@ func (t *Config) Validate() error {
 		}
 	}
 
+	// Re-validate reusable, named toolset definitions here so they are
+	// checked even when no agent references them, and when a Config is
+	// constructed programmatically rather than parsed from YAML. (When
+	// parsed, each value is already validated by Toolset.UnmarshalYAML.)
+	// Mirrors the agent-toolset validation loop below.
+	for name := range t.Toolsets {
+		ts := t.Toolsets[name]
+		if err := ts.validate(); err != nil {
+			return fmt.Errorf("toolsets.%s: %w", name, err)
+		}
+	}
+
 	for i := range t.Agents {
 		agent := &t.Agents[i]
 

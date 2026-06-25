@@ -84,6 +84,13 @@
         "$ref": "#/definitions/SkillsConfig"
       }
     },
+    "toolsets": {
+      "type": "object",
+      "description": "Map of reusable, named toolset definitions. Define a toolset here and reference it by name from an agent's use_toolsets to share the same toolset across multiple agents.",
+      "additionalProperties": {
+        "$ref": "#/definitions/Toolset"
+      }
+    },
     "metadata": {
       "$ref": "#/definitions/Metadata",
       "description": "Configuration metadata"
@@ -779,6 +786,13 @@
         "use_skills": {
           "type": "array",
           "description": "Names of reusable skill groups (defined in the top-level skills section) to merge into this agent. Inline skills on the agent take precedence on name conflicts.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "use_toolsets": {
+          "type": "array",
+          "description": "Names of reusable toolset definitions (defined in the top-level toolsets section) to append to this agent's toolsets. Inline toolsets on the agent come first, followed by each referenced toolset in order.",
           "items": {
             "type": "string"
           }

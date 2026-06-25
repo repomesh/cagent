@@ -110,7 +110,7 @@ func (r *LocalRuntime) cacheResponseBuiltin(ctx context.Context, in *hooks.Input
 	}
 	a, err := r.team.Agent(in.AgentName)
 	if err != nil || a == nil {
-		slog.Debug("cache_response: agent lookup failed",
+		slog.DebugContext(ctx, "cache_response: agent lookup failed",
 			"agent", in.AgentName, "error", err)
 		return nil, nil
 	}

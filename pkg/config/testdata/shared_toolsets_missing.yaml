@@ -1,0 +1,9 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+
+agents:
+  dev:
+    model: model
+    use_toolsets: [nonexistent]

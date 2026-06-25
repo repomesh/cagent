@@ -31,11 +31,17 @@ type Config struct {
 	// or AgentConfig.UseSkills; the group is merged into the agent during config
 	// resolution (see resolveCommandDefinitions / resolveSkillDefinitions). This
 	// mirrors the top-level MCPs/RAG reference-by-name convention.
-	Commands    map[string]types.Commands `json:"commands,omitempty"`
-	Skills      map[string]SkillsConfig   `json:"skills,omitempty"`
-	Metadata    Metadata                  `json:"metadata"`
-	Permissions *PermissionsConfig        `json:"permissions,omitempty"`
-	Runtime     *RuntimeDefaults          `json:"runtime,omitempty"`
+	Commands map[string]types.Commands `json:"commands,omitempty"`
+	Skills   map[string]SkillsConfig   `json:"skills,omitempty"`
+	// Toolsets is a map of reusable, named toolset definitions shared across
+	// agents. An agent opts in by listing a name in AgentConfig.UseToolsets;
+	// the named toolset is appended to the agent during config resolution
+	// (see resolveToolsetDefinitions). This mirrors the top-level MCPs/RAG
+	// reference-by-name convention but works for any toolset type.
+	Toolsets    map[string]Toolset `json:"toolsets,omitempty"`
+	Metadata    Metadata           `json:"metadata"`
+	Permissions *PermissionsConfig `json:"permissions,omitempty"`
+	Runtime     *RuntimeDefaults   `json:"runtime,omitempty"`
 }
 
 // RuntimeDefaults captures execution-time defaults the agent author
@@ -473,8 +479,13 @@ type AgentConfig struct {
 	// top-level Config.Commands / Config.Skills sections. The referenced
 	// groups are merged into Commands / Skills during config resolution;
 	// inline entries on the agent take precedence on name conflicts.
-	UseCommands []string     `json:"use_commands,omitempty"`
-	UseSkills   []string     `json:"use_skills,omitempty"`
+	UseCommands []string `json:"use_commands,omitempty"`
+	UseSkills   []string `json:"use_skills,omitempty"`
+	// UseToolsets references reusable toolset definitions defined in the
+	// top-level Config.Toolsets section. The referenced toolsets are appended
+	// to the agent's own Toolsets during config resolution (see
+	// resolveToolsetDefinitions). Inline toolsets on the agent come first.
+	UseToolsets []string     `json:"use_toolsets,omitempty"`
 	Hooks       *HooksConfig `json:"hooks,omitempty"`
 	Cache       *CacheConfig `json:"cache,omitempty"`
 }

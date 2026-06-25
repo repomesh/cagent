@@ -46,7 +46,7 @@ func StartPprofServer(ctx context.Context, addr string) error {
 
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Warn("pprof server error", "error", err)
+			slog.WarnContext(ctx, "pprof server error", "error", err)
 		}
 	}()
 
