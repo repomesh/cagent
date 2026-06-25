@@ -2569,10 +2569,10 @@ func TestBuildAuthorizationURL(t *testing.T) {
 			},
 		},
 		{
-			name:        "empty scopes omits scope param",
+			name:         "empty scopes omits scope param",
 			authEndpoint: "https://auth.example.com/authorize",
-			scopes:      nil,
-			wantNoScope: true,
+			scopes:       nil,
+			wantNoScope:  true,
 		},
 		{
 			name:         "multiple scopes are space-joined",
