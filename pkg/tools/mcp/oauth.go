@@ -390,7 +390,7 @@ func (t *oauthTransport) handleServerRejectedToken(ctx context.Context, prev *OA
 
 	// Refresh not possible or failed: fall back to interactive OAuth if the
 	// context allows it.
-	if !interactivePromptsAllowed(ctx) {
+	if !InteractivePromptsAllowed(ctx) {
 		slog.DebugContext(ctx, "Non-interactive context: deferring re-auth after server-side token rejection", "url", t.baseURL)
 		t.mu.Lock()
 		t.lastAuthRequired = true
