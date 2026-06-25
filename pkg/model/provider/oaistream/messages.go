@@ -28,22 +28,30 @@ func (j JSONSchema) MarshalJSON() ([]byte, error) {
 }
 
 // ConvertMultiContent converts chat.MessagePart slices to OpenAI content
-// parts using the provided modelsdev.Store for capability lookups. A non-nil
-// override declares the model's attachment capabilities explicitly, bypassing
-// the models.dev lookup (issue #2741).
+// parts, resolving attachment capabilities from the provided modelsdev.Store.
+// A non-nil override declares the model's attachment capabilities explicitly,
+// bypassing the models.dev lookup (issue #2741).
 func ConvertMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionContentPartUnionParam {
-	return convertMultiContentWithStore(ctx, multiContent, id, store, override)
+	return convertMultiContentWithCaps(ctx, multiContent, modelinfo.ResolveCaps(ctx, store, id, override))
 }
 
-// ConvertMessages converts chat.Message slices to OpenAI message params
-// using the provided modelsdev.Store for capability lookups. A non-nil
-// override declares the model's attachment capabilities explicitly, bypassing
-// the models.dev lookup (issue #2741).
+// ConvertMessages converts chat.Message slices to OpenAI message params,
+// resolving attachment capabilities from the provided modelsdev.Store. A
+// non-nil override declares the model's attachment capabilities explicitly,
+// bypassing the models.dev lookup (issue #2741).
 func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionMessageParamUnion {
-	return convertMessagesWithStore(ctx, messages, id, store, override)
+	return convertMessagesWithCaps(ctx, messages, modelinfo.ResolveCaps(ctx, store, id, override))
 }
 
-func convertMultiContentWithStore(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionContentPartUnionParam {
+// ConvertMessagesWithCaps is the caps-injectable variant of [ConvertMessages].
+// It is used by providers whose models are not in the models.dev catalog (e.g.
+// Docker Model Runner), which must supply attachment capabilities explicitly
+// rather than resolving them from a store.
+func ConvertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities) []openai.ChatCompletionMessageParamUnion {
+	return convertMessagesWithCaps(ctx, messages, mc)
+}
+
+func convertMultiContentWithCaps(ctx context.Context, multiContent []chat.MessagePart, mc modelinfo.ModelCapabilities) []openai.ChatCompletionContentPartUnionParam {
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(multiContent))
 	for _, part := range multiContent {
 		switch part.Type {
@@ -59,7 +67,7 @@ func convertMultiContentWithStore(ctx context.Context, multiContent []chat.Messa
 			}
 		case chat.MessagePartTypeDocument:
 			if part.Document != nil {
-				docParts, err := convertDocument(ctx, *part.Document, id, store, override)
+				docParts, err := convertDocumentWithCaps(ctx, *part.Document, mc)
 				if err != nil {
 					slog.WarnContext(ctx, "failed to convert document attachment", "error", err, "doc", part.Document.Name)
 					continue
@@ -71,7 +79,7 @@ func convertMultiContentWithStore(ctx context.Context, multiContent []chat.Messa
 	return parts
 }
 
-func convertMessagesWithStore(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionMessageParamUnion {
+func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities) []openai.ChatCompletionMessageParamUnion {
 	openaiMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
 	for i := range messages {
 		msg := &messages[i]
@@ -104,7 +112,7 @@ func convertMessagesWithStore(ctx context.Context, messages []chat.Message, id m
 			if len(msg.MultiContent) == 0 {
 				openaiMessage = openai.UserMessage(msg.Content)
 			} else {
-				openaiMessage = openai.UserMessage(convertMultiContentWithStore(ctx, msg.MultiContent, id, store, override))
+				openaiMessage = openai.UserMessage(convertMultiContentWithCaps(ctx, msg.MultiContent, mc))
 			}
 
 		case chat.MessageRoleAssistant:
@@ -194,7 +202,7 @@ func convertMessagesWithStore(ctx context.Context, messages []chat.Message, id m
 					}
 				case chat.MessagePartTypeDocument:
 					if part.Document != nil {
-						docParts, err := convertDocument(ctx, *part.Document, id, store, override)
+						docParts, err := convertDocumentWithCaps(ctx, *part.Document, mc)
 						if err != nil {
 							slog.WarnContext(ctx, "failed to convert tool result document attachment", "error", err, "doc", part.Document.Name)
 							continue

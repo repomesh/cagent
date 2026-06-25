@@ -81,6 +81,43 @@ func TestClassify_AlreadyClassifiedPasses(t *testing.T) {
 	assert.Check(t, errors.Is(got, lifecycle.ErrAuthRequired))
 }
 
+func TestClassify_InvalidToken(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"rfc6750_error_code", `401 Unauthorized: {"error":"invalid_token","error_description":"Invalid access token"}`},
+		{"space_variant", "server rejected token: invalid token"},
+		{"upper_case", "INVALID_TOKEN: token expired"},
+	}
+	for _, tc := range cases {
+		got := lifecycle.Classify(errors.New(tc.msg))
+		assert.Check(t, errors.Is(got, lifecycle.ErrAuthRequired), "msg=%q", tc.msg)
+		assert.Check(t, lifecycle.IsPermanent(got), "msg=%q: must be permanent", tc.msg)
+	}
+}
+
+func TestClassify_BareUnauthorizedIsNotAuth(t *testing.T) {
+	t.Parallel()
+	// A bare "unauthorized" without "invalid_token" must NOT be classified as
+	// ErrAuthRequired to avoid misreading application-level 401s as permanent
+	// auth failures (see human decision Q3 in the implementation plan).
+	got := lifecycle.Classify(errors.New("401 Unauthorized"))
+	assert.Check(t, !errors.Is(got, lifecycle.ErrAuthRequired), "bare unauthorized must not map to ErrAuthRequired")
+}
+
+func TestClassify_InvalidToken_Idempotent(t *testing.T) {
+	t.Parallel()
+	// Classify must be idempotent: an already-wrapped ErrAuthRequired that
+	// also contains "invalid_token" in its message must not be double-wrapped.
+	inner := errors.New("invalid_token: expired")
+	first := lifecycle.Classify(inner)
+	second := lifecycle.Classify(first)
+	assert.Check(t, errors.Is(second, lifecycle.ErrAuthRequired))
+	assert.Check(t, errors.Is(second, inner))
+}
+
 func TestClassify_UnknownPassthrough(t *testing.T) {
 	t.Parallel()
 	in := errors.New("totally unrelated")

@@ -180,6 +180,9 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	// Make model definitions available to toolset creators (e.g., RAG reranking)
 	runConfig.Models = cfg.Models
 	runConfig.Providers = cfg.Providers
+	// Share the resolved provider registry so toolsets that build providers at
+	// load time (e.g. RAG embeddings/reranking) use the same one as agent models.
+	runConfig.ProviderRegistry = loadOpts.providerRegistry
 
 	// Load agents
 	parentDir := cmp.Or(agentSource.ParentDir(), runConfig.WorkingDir)
@@ -188,7 +191,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	agentsByName := make(map[string]*agent.Agent)
 
 	autoModel := sync.OnceValue(func() latest.ModelConfig {
-		return config.AutoModelConfig(ctx, runConfig.ModelsGateway, env, runConfig.DefaultModel)
+		return config.AutoModelConfig(ctx, runConfig.ModelsGateway, env, runConfig.DefaultModel, dmr.ListModels)
 	})
 
 	expander := js.NewJsExpander(env)
@@ -417,9 +420,11 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			opts...,
 		)
 		if err != nil {
-			// Return a cleaner error message for auto model selection failures
+			// Return a cleaner error message for auto model selection failures,
+			// keeping the underlying cause (e.g. a declined DMR pull) so the
+			// message can explain why selection fell through.
 			if isAutoModel {
-				return nil, &config.AutoModelFallbackError{}
+				return nil, &config.AutoModelFallbackError{Cause: err}
 			}
 			return nil, err
 		}
@@ -568,6 +573,7 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 		}
 
 		wrapped := WithToolsFilter(tool, toolset.Tools...)
+		wrapped = WithReadOnlyFilter(wrapped, toolset.ReadOnly || a.ReadOnly)
 		wrapped = WithInstructions(wrapped, expander.Expand(ctx, toolset.Instruction, nil))
 		wrapped = WithToon(wrapped, toolset.Toon)
 		wrapped = WithModelOverride(wrapped, toolset.Model)

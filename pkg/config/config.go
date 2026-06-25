@@ -135,6 +135,10 @@ func validateConfig(cfg *latest.Config) error {
 		return err
 	}
 
+	if err := resolveToolsetDefinitions(cfg); err != nil {
+		return err
+	}
+
 	if err := resolveMCPDefinitions(cfg); err != nil {
 		return err
 	}

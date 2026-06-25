@@ -154,19 +154,92 @@ Requesting a model whose provider was compiled out fails at construction time wi
   <p>The Google provider's Vertex Model Garden support also imports the Anthropic SDK, so the Anthropic dependency is only fully removed when <em>both</em> <code>docker_agent_no_anthropic</code> and <code>docker_agent_no_google</code> are set.</p>
 </div>
 
-## RAG Toolset (cgo-free builds)
+## RAG Toolset (opt-out)
 
-The RAG toolset (`type: rag`) uses a tree-sitter code parser that requires cgo. When building without cgo — or when you want to drop the cgo dependency entirely — do not import the `pkg/rag` package in your binary.
+The RAG toolset (`type: rag`) is included in `NewDefaultToolsetRegistry()` (from `pkg/teamloader/toolsets`) and `loaderdefaults.Opts()` (from `pkg/teamloader/defaults`, using the conventional import alias `loaderdefaults`).
 
-By default the RAG toolset is **opt-in**: it is only linked when you blank-import its package:
+The underlying tree-sitter code parser uses cgo, but build-tag guards in `pkg/rag/treesitter` mean importing the package is safe regardless of `CGO_ENABLED`: with `CGO_ENABLED=0` the parser stub compiles in and returns a runtime error on first use rather than failing at compile time.
+
+If you want to exclude the RAG toolset from your binary entirely — surfacing a load-time warning on the agent rather than a deferred runtime error from the `!cgo` stub — remove it from the registry before passing it to `teamloader.Load`:
 
 ```go
 import (
-    _ "github.com/docker/docker-agent/pkg/tools/builtin/rag" // register RAG toolset
+    "github.com/docker/docker-agent/pkg/teamloader"
+    loadertoolsets "github.com/docker/docker-agent/pkg/teamloader/toolsets"
 )
+
+// Opt out of the RAG toolset; a config that declares type: rag attaches
+// a load-time warning to the agent instead of failing at document processing.
+creators := loadertoolsets.DefaultToolsetCreators()
+delete(creators, "rag")
+registry := teamloader.NewToolsetRegistry(creators)
 ```
 
-Without this import, a config that declares `type: rag` fails with a "toolset type not registered" error at startup. If your application does not use RAG, simply omit the blank import; the rest of docker-agent works without cgo.
+Pass the custom registry via `teamloader.WithToolsetRegistry(registry)` when calling `teamloader.Load`. Note that `teamloader.Load()` does not return an error for unknown toolset types — the failure is recorded as a load-time warning and can be retrieved with `agent.DrainWarnings()`; it is also surfaced via logging and TUI notifications.
+
+## Registering Custom Built-in Themes
+
+When embedding docker-agent, you can contribute your own built-in themes via `styles.RegisterBuiltinThemes`. Registered themes integrate seamlessly with the existing theme picker, `/theme` command, and `settings.theme` config key — they behave exactly like docker-agent's own bundled themes.
+
+```go
+import (
+    "embed"
+
+    "github.com/docker/docker-agent/pkg/tui/styles"
+)
+
+//go:embed themes/*.yaml
+var brandThemes embed.FS
+
+// Call at startup, before applying any persisted theme:
+if err := styles.RegisterBuiltinThemes(brandThemes); err != nil {
+    return err
+}
+```
+
+Each theme file lives at `themes/<name>.yaml` inside the embedded filesystem and is a **partial override** — only the colors you want to change are required; everything else falls back to `DefaultTheme()`.
+
+```yaml
+# themes/brand.yaml
+name: Brand
+colors:
+  accent: "#FF6A00"
+  background: "#1A0F0A"
+```
+
+If `name:` is omitted, docker-agent uses the filename stem as the display name in the theme picker (e.g. `brand` from `themes/brand.yaml`).
+
+To replace docker-agent's default theme entirely, ship the file as `themes/default.yaml` — it masks the bundled default while inheriting any colors you don't set.
+
+**Semantics:**
+
+- Registered sources take precedence over bundled themes; a registered ref overrides a bundled theme of the same name.
+- Among multiple registered sources, last-registered wins on a collision.
+- `RegisterBuiltinThemes` validates eagerly (nil fs, missing `themes/` dir) so errors surface at registration time, not at picker time.
+
+## MCP OAuth Token Persistence
+
+By default, MCP OAuth tokens are stored in-memory only and are not persisted across process restarts. The CLI registers a keyring-backed store automatically at startup; when embedding docker-agent as a library you must do this yourself if you want tokens to survive restarts.
+
+Call `keyringstore.Register()` **before** any MCP toolset is initialised to enable the OS keyring-backed token store:
+
+```go
+import "github.com/docker/docker-agent/pkg/tools/mcp/keyringstore"
+
+func main() {
+    // Must be called before teamloader.Load() on configs with remote MCP
+    // toolsets; calling it after the store is created panics.
+    keyringstore.Register()
+    // ... rest of your startup code
+}
+```
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Call order matters</div>
+  <p>If <code>keyringstore.Register()</code> is called after the default token store has already been lazily initialised, docker-agent panics. The store is initialised when any remote MCP toolset is constructed — which happens inside <code>teamloader.Load()</code>. Always call <code>keyringstore.Register()</code> before calling <code>teamloader.Load()</code> on a config that includes remote MCP toolsets.</p>
+</div>
+
+If you do not need persistent OAuth tokens (for example, in short-lived batch jobs or tests), omit the call and tokens will be kept in-memory for the process lifetime.
 
 ## Basic Example
 

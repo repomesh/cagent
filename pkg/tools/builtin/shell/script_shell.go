@@ -95,7 +95,14 @@ func (t *ScriptToolSet) Instructions() string {
 	var sb strings.Builder
 	sb.WriteString("## Custom Shell Tools\n\n")
 
-	for name, tool := range t.shellTools {
+	names := make([]string, 0, len(t.shellTools))
+	for name := range t.shellTools {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, name := range names {
+		tool := t.shellTools[name]
 		fmt.Fprintf(&sb, "### %s\n", name)
 		if tool.Description != "" {
 			fmt.Fprintf(&sb, "%s\n", tool.Description)
@@ -103,7 +110,13 @@ func (t *ScriptToolSet) Instructions() string {
 			fmt.Fprintf(&sb, "Runs: `%s`\n", tool.Cmd)
 		}
 
-		for argName, argDef := range tool.Args {
+		argNames := make([]string, 0, len(tool.Args))
+		for argName := range tool.Args {
+			argNames = append(argNames, argName)
+		}
+		slices.Sort(argNames)
+		for _, argName := range argNames {
+			argDef := tool.Args[argName]
 			description := ""
 			if m, ok := argDef.(map[string]any); ok {
 				if d, ok := m["description"].(string); ok {
@@ -129,9 +142,14 @@ func (t *ScriptToolSet) Instructions() string {
 func (t *ScriptToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	var toolsList []tools.Tool
 
-	for name, toolConfig := range t.shellTools {
-		cfg := toolConfig
-		toolName := name
+	names := make([]string, 0, len(t.shellTools))
+	for name := range t.shellTools {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, name := range names {
+		cfg := t.shellTools[name]
 
 		description := cmp.Or(cfg.Description, "Execute shell command: "+cfg.Cmd)
 
@@ -141,11 +159,11 @@ func (t *ScriptToolSet) Tools(context.Context) ([]tools.Tool, error) {
 			"required":   cfg.Required,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("invalid schema for tool %s: %w", toolName, err)
+			return nil, fmt.Errorf("invalid schema for tool %s: %w", name, err)
 		}
 
 		toolsList = append(toolsList, tools.Tool{
-			Name:         toolName,
+			Name:         name,
 			Category:     "shell",
 			Description:  description,
 			Parameters:   inputSchema,

@@ -3,6 +3,7 @@ package shell
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -281,6 +282,73 @@ func TestScriptToolSet_InstructionsNonMapArgDef(t *testing.T) {
 
 	instructions := tool.Instructions()
 	assert.Contains(t, instructions, "`name`")
+}
+
+func TestScriptToolSet_DeterministicOrdering(t *testing.T) {
+	// Three tools whose names sort as: alpha < beta < gamma.
+	// Each tool has multiple args to also exercise arg-level sorting in Instructions().
+	// Because Go map iteration is random, without explicit sorting the
+	// returned order could be anything — this test catches regressions.
+	shellTools := map[string]latest.ScriptShellToolConfig{
+		"gamma": {
+			Description: "Third tool",
+			Cmd:         "echo $z $a",
+			Args: map[string]any{
+				"z": map[string]any{"type": "string", "description": "last arg"},
+				"a": map[string]any{"type": "string", "description": "first arg"},
+			},
+			Required: []string{"z", "a"},
+		},
+		"alpha": {
+			Description: "First tool",
+			Cmd:         "echo $m $b",
+			Args: map[string]any{
+				"m": map[string]any{"type": "string", "description": "middle arg"},
+				"b": map[string]any{"type": "string", "description": "earlier arg"},
+			},
+			Required: []string{"m", "b"},
+		},
+		"beta": {Description: "Second tool", Cmd: "echo beta"},
+	}
+
+	tool, err := NewScript(shellTools, nil)
+	require.NoError(t, err)
+
+	// Tools() must return tools in alphabetical order.
+	allTools, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, allTools, 3)
+	assert.Equal(t, "alpha", allTools[0].Name)
+	assert.Equal(t, "beta", allTools[1].Name)
+	assert.Equal(t, "gamma", allTools[2].Name)
+
+	// Instructions() must list tool sections in alphabetical order.
+	instructions := tool.Instructions()
+	alphaPos := strings.Index(instructions, "### alpha")
+	betaPos := strings.Index(instructions, "### beta")
+	gammaPos := strings.Index(instructions, "### gamma")
+	assert.Greater(t, alphaPos, -1, "alpha heading not found")
+	assert.Greater(t, betaPos, -1, "beta heading not found")
+	assert.Greater(t, gammaPos, -1, "gamma heading not found")
+	assert.Less(t, alphaPos, betaPos, "alpha must appear before beta")
+	assert.Less(t, betaPos, gammaPos, "beta must appear before gamma")
+
+	// Instructions() must also list args in alphabetical order within each tool.
+	// For "alpha": arg "b" must appear before arg "m".
+	alphaSection := instructions[alphaPos:betaPos]
+	bArgPos := strings.Index(alphaSection, "`b`")
+	mArgPos := strings.Index(alphaSection, "`m`")
+	assert.Greater(t, bArgPos, -1, "arg b not found in alpha section")
+	assert.Greater(t, mArgPos, -1, "arg m not found in alpha section")
+	assert.Less(t, bArgPos, mArgPos, "arg b must appear before arg m in alpha section")
+
+	// For "gamma": arg "a" must appear before arg "z".
+	gammaSection := instructions[gammaPos:]
+	aArgPos := strings.Index(gammaSection, "`a`")
+	zArgPos := strings.Index(gammaSection, "`z`")
+	assert.Greater(t, aArgPos, -1, "arg a not found in gamma section")
+	assert.Greater(t, zArgPos, -1, "arg z not found in gamma section")
+	assert.Less(t, aArgPos, zArgPos, "arg a must appear before arg z in gamma section")
 }
 
 func TestNewScript_ArgWithoutType(t *testing.T) {

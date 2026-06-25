@@ -1,0 +1,23 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+    max_tokens: 64000
+
+toolsets:
+  fs:
+    type: filesystem
+  web:
+    type: fetch
+    allowed_domains:
+      - docker.com
+
+agents:
+  dev:
+    model: model
+    use_toolsets: [fs, web]
+    toolsets:
+      - type: think
+  ops:
+    model: model
+    use_toolsets: [fs]

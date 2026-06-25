@@ -70,7 +70,7 @@ $ docker agent run [config] [message...] [flags]
 | `--record [path]`                       | Record AI API interactions to a cassette file (auto-generates filename if no path given)                                                  |
 | `-d, --debug`                           | Enable debug logging                                                                                                                      |
 | `--log-file <path>`                     | Custom debug log location                                                                                                                 |
-| `-o, --otel`                            | Enable OpenTelemetry tracing                                                                                                              |
+| `-o, --otel`                            | Enable OpenTelemetry observability: traces, metrics, and logs. Requires `OTEL_EXPORTER_OTLP_ENDPOINT` to export to a collector. |
 
 ```bash
 # Examples
@@ -218,6 +218,8 @@ $ docker agent serve api <agent-file>|<agents-dir>|<registry-ref> [flags]
 | `--fake <path>`             | (none)             | Replay AI responses from a cassette file (for testing). Mutually exclusive with `--record`.               |
 | `--record [path]`           | (none)             | Record AI API interactions to a cassette file.                                                            |
 | `--mcp-oauth-redirect-uri <url>` | (none)        | OAuth redirect URI for the unmanaged MCP OAuth flow in server mode. When set, the runtime drives PKCE and code exchange in-process and sends the full authorize URL to the client via elicitation. See [Remote MCP]({{ '/features/remote-mcp/' | relative_url }}) for details. |
+
+> **Diagnostics:** Set `CAGENT_PPROF_ADDR=127.0.0.1:6060` (or `--pprof-addr`, a hidden flag) to start a live Go pprof server at `/debug/pprof/`. Use a loopback address; a non-loopback binding logs a security warning.
 
 All [runtime configuration flags](#runtime-configuration-flags) (`--working-dir`, `--env-from-file`, `--models-gateway`, `--hook-*`, …) are also accepted.
 
@@ -521,11 +523,20 @@ These flags are available on every `docker agent` command:
 | ------------------------- | -------------------------------------------------------------------------------------- |
 | `-d, --debug`             | Enable debug logging (default location: `~/.cagent/cagent.debug.log`)                  |
 | `--log-file <path>`       | Custom debug log location (only used with `--debug`)                                   |
-| `-o, --otel`              | Enable OpenTelemetry tracing                                                           |
+| `-o, --otel`              | Enable OpenTelemetry observability: traces, metrics, and logs. Requires `OTEL_EXPORTER_OTLP_ENDPOINT` to export to a collector. |
 | `--cache-dir <path>`      | Override the cache directory (default: `~/Library/Caches/cagent` on macOS)             |
 | `--config-dir <path>`     | Override the config directory (default: `~/.config/cagent`)                            |
 | `--data-dir <path>`       | Override the data directory (default: `~/.cagent`)                                     |
 | `--help`                  | Show help for any command                                                              |
+
+### OpenTelemetry environment variables
+
+When `--otel` is enabled, the standard [OTel SDK env vars](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) are honored (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`, etc.). Two additional docker-agent-specific variables control GenAI instrumentation:
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `false` | Set to `true` to capture prompt text, model responses, tool arguments, and tool results as span attributes. Off by default because these fields may contain PII. |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | (dual-emit) | Set to `gen_ai_latest_experimental` to emit only the spec-defined `gen_ai.*` keys from the [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). The default dual-emit mode emits both `gen_ai.*` and legacy keys so existing dashboards continue working. |
 
 ## Runtime Configuration Flags
 

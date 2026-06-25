@@ -8,6 +8,8 @@
 //     `commands: { name: { ... } }`.
 //   - Toolsets use the label as the `type` field:
 //     `toolset "mcp" { ... }` becomes `toolsets: [{ type: mcp, ... }]`.
+//     At the top level, `toolsets "name" { ... }` instead defines a reusable,
+//     named toolset under `toolsets: { name: { ... } }`.
 //   - Multi-line strings should use heredocs. Because HCL templates expand
 //     `${...}` interpolation, any literal `${...}` (such as
 //     `${shell({cmd: "..."})}`) must be escaped as `$${...}`.
@@ -64,7 +66,7 @@ func LooksLikeHCL(data []byte) bool {
 // topLevelHCLKeywords lists the block names that may legitimately appear at
 // the top level of a docker-agent HCL document.
 var topLevelHCLKeywords = []string{
-	"agent", "model", "provider", "mcp", "rag", "metadata", "permissions",
+	"agent", "model", "provider", "mcp", "rag", "metadata", "permissions", "toolsets",
 }
 
 // ToYAML parses an HCL document and returns an equivalent YAML document
@@ -140,6 +142,10 @@ var blockRules = map[string]blockRule{
 	"rag":      {mode: modeMapByLabel, outKey: "rag"},
 	"command":  {mode: modeMapByLabel, outKey: "commands"},
 	"skill":    {mode: modeMapByLabel, outKey: "skills"},
+	// Top-level reusable toolset definitions: `toolsets "name" { ... }` becomes
+	// toolsets: { name: { ... } }. Distinct from the agent-level `toolset`
+	// (singular) block, which aggregates into a list under the same key.
+	"toolsets": {mode: modeMapByLabel, outKey: "toolsets"},
 	// `shell "name" { ... }` is used inside script toolsets as a map of
 	// scripted shell commands.
 	"shell": {mode: modeMapByLabel, outKey: "shell"},

@@ -27,7 +27,7 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	provider, err := codingharness.NewProvider(a.Harness())
 	if err != nil {
 		msg := fmt.Sprintf("failed to configure harness: %v", err)
-		events.Emit(ErrorWithCode(ErrorCodeModelError, msg))
+		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeModelError, msg))
 		r.notifyError(ctx, a, sess.ID, msg)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "harness configuration error")
@@ -170,7 +170,7 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		}
 		msg := fmt.Sprintf("harness %s failed: %v", provider.Name(), err)
 		completeRemainingToolCalls(tools.ResultError(msg))
-		events.Emit(ErrorWithCode(ErrorCodeModelError, msg))
+		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeModelError, msg))
 		r.notifyError(ctx, a, sess.ID, msg)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "harness run error")

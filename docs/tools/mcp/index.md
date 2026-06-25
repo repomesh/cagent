@@ -79,7 +79,7 @@ toolsets:
 
 ## Remote MCP (Streamable HTTP / SSE)
 
-Connect to MCP servers over the network. OAuth flows (including [Dynamic Client Registration](https://datatracker.ietf.org/doc/html/rfc7591)) are handled automatically — docker-agent opens your browser when authentication is required and caches tokens for subsequent sessions.
+Connect to MCP servers over the network. OAuth flows (including [Dynamic Client Registration](https://datatracker.ietf.org/doc/html/rfc7591)) are handled automatically — docker-agent opens your browser when authentication is required and caches tokens for subsequent sessions. Tokens are refreshed silently when they expire or are revoked server-side; if a silent refresh is not possible, the OAuth prompt reappears on the next message.
 
 ```yaml
 toolsets:

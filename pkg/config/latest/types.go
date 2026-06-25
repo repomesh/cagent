@@ -31,11 +31,17 @@ type Config struct {
 	// or AgentConfig.UseSkills; the group is merged into the agent during config
 	// resolution (see resolveCommandDefinitions / resolveSkillDefinitions). This
 	// mirrors the top-level MCPs/RAG reference-by-name convention.
-	Commands    map[string]types.Commands `json:"commands,omitempty"`
-	Skills      map[string]SkillsConfig   `json:"skills,omitempty"`
-	Metadata    Metadata                  `json:"metadata"`
-	Permissions *PermissionsConfig        `json:"permissions,omitempty"`
-	Runtime     *RuntimeDefaults          `json:"runtime,omitempty"`
+	Commands map[string]types.Commands `json:"commands,omitempty"`
+	Skills   map[string]SkillsConfig   `json:"skills,omitempty"`
+	// Toolsets is a map of reusable, named toolset definitions shared across
+	// agents. An agent opts in by listing a name in AgentConfig.UseToolsets;
+	// the named toolset is appended to the agent during config resolution
+	// (see resolveToolsetDefinitions). This mirrors the top-level MCPs/RAG
+	// reference-by-name convention but works for any toolset type.
+	Toolsets    map[string]Toolset `json:"toolsets,omitempty"`
+	Metadata    Metadata           `json:"metadata"`
+	Permissions *PermissionsConfig `json:"permissions,omitempty"`
+	Runtime     *RuntimeDefaults   `json:"runtime,omitempty"`
 }
 
 // RuntimeDefaults captures execution-time defaults the agent author
@@ -441,6 +447,10 @@ type AgentConfig struct {
 
 	AddDate            bool `json:"add_date,omitempty"`
 	AddEnvironmentInfo bool `json:"add_environment_info,omitempty"`
+	// ReadOnly makes every one of the agent's toolsets read-only: only
+	// tools whose annotations carry a read-only hint are listed and
+	// callable. Equivalent to setting `readonly: true` on each toolset.
+	ReadOnly bool `json:"readonly,omitempty" yaml:"readonly,omitempty"`
 	// RedactSecrets enables every leg of the redact_secrets feature:
 	// the pre_tool_use builtin (scrubs tool arguments), the
 	// before_llm_call hook (scrubs outgoing chat content), and the
@@ -469,8 +479,13 @@ type AgentConfig struct {
 	// top-level Config.Commands / Config.Skills sections. The referenced
 	// groups are merged into Commands / Skills during config resolution;
 	// inline entries on the agent take precedence on name conflicts.
-	UseCommands []string     `json:"use_commands,omitempty"`
-	UseSkills   []string     `json:"use_skills,omitempty"`
+	UseCommands []string `json:"use_commands,omitempty"`
+	UseSkills   []string `json:"use_skills,omitempty"`
+	// UseToolsets references reusable toolset definitions defined in the
+	// top-level Config.Toolsets section. The referenced toolsets are appended
+	// to the agent's own Toolsets during config resolution (see
+	// resolveToolsetDefinitions). Inline toolsets on the agent come first.
+	UseToolsets []string     `json:"use_toolsets,omitempty"`
 	Hooks       *HooksConfig `json:"hooks,omitempty"`
 	Cache       *CacheConfig `json:"cache,omitempty"`
 }
@@ -1019,6 +1034,11 @@ type Toolset struct {
 	Tools       []string `json:"tools,omitempty"`
 	Instruction string   `json:"instruction,omitempty"`
 	Toon        string   `json:"toon,omitempty"`
+
+	// ReadOnly restricts the toolset to tools whose annotations carry a
+	// read-only hint. Every other tool is filtered out, so the agent can
+	// list and call only the non-mutating subset of the toolset.
+	ReadOnly bool `json:"readonly,omitempty" yaml:"readonly,omitempty"`
 
 	// Model overrides the LLM used for the turn that processes tool results
 	// from this toolset, enabling per-toolset model routing. Value can be a

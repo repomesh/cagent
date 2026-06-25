@@ -1,0 +1,16 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+
+# allow_list is only valid on filesystem toolsets; this top-level definition
+# must be rejected even though no agent references it.
+toolsets:
+  bad:
+    type: shell
+    allow_list:
+      - "."
+
+agents:
+  dev:
+    model: model
