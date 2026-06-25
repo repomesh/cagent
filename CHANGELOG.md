@@ -3,6 +3,64 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.87.0] - 2026-06-25
+
+This release adds shared toolsets, a new `plan` builtin toolset for multi-agent collaboration, and a `readonly` attribute for toolsets and agents, alongside several MCP OAuth reliability fixes and improvements to attachment forwarding and deterministic prompt ordering.
+
+## What's New
+
+- Adds a top-level `toolsets` map to the config schema, allowing toolset definitions to be shared and referenced by name from any agent via a new `use_toolsets` field
+- Adds a `plan` builtin toolset that provides agents a shared, persistent scratchpad (`write_plan`, `read_plan`, and related tools) for multi-agent collaboration across turns
+- Adds a `readonly` boolean attribute to both `Toolset` and `AgentConfig`, restricting agents or toolsets to read-only tools when set
+- Adds `styles.RegisterBuiltinThemes(fsys fs.FS)` for Go SDK embedders to contribute additional built-in themes from a filesystem
+- Adds `SessionID` to `ErrorEvent` and session-aware constructors so `isRootEvent` correctly filters child-session errors
+
+## Bug Fixes
+
+- Fixes image and PDF attachments being silently dropped for DMR-hosted models that are absent from the models.dev catalog
+- Fixes MCP OAuth auto-recovery: a server-side `401 invalid_token` rejection now evicts and refreshes the token instead of burning all reconnect attempts and entering `StateFailed`
+- Fixes a retry storm on permanent OAuth reconnect errors in MCP
+- Fixes non-interactive sessions stalling silently when an OAuth-protected MCP server has no cached token; now fails fast with an error
+- Fixes `BuildAuthorizationURL` incorrectly appending a second `?` when the OAuth authorization endpoint already contains a query string
+- Fixes eval runs failing with `unknown provider type "anthropic"` by building the judge model from the populated provider registry
+- Fixes a TUI dialog being silently dropped when a nested sub-agent stream started in the same session, leaving the run blocked on user input
+- Fixes non-deterministic prompt ordering in `ScriptToolSet` by sorting `shellTools` and `tool.Args` keys before iteration, preventing Anthropic prompt-cache misses
+- Fixes provider registry being empty for RAG toolsets and other code paths after an earlier refactor emptied the default registry
+- Fixes a compile error caused by a call site using the old unexported name `interactivePromptsAllowed` after it was renamed to `InteractivePromptsAllowed`
+
+## Technical Changes
+
+- Converts bug and feature GitHub issue templates from markdown to issue forms (`.yml`)
+- Makes registered theme precedence last-wins, using `slices.Backward` for iteration
+- Surfaces re-auth notices and ensures background MCP OAuth reconnects are non-interactive
+### Pull Requests
+
+- [#3134](https://github.com/docker/docker-agent/pull/3134) - chore: convert bug/feature issue templates to issue forms
+- [#3182](https://github.com/docker/docker-agent/pull/3182) - Let embedders register built-in themes via RegisterBuiltinThemes
+- [#3196](https://github.com/docker/docker-agent/pull/3196) - fix: restore provider registry after cf5a430d2 emptied the default
+- [#3197](https://github.com/docker/docker-agent/pull/3197) - fix: forward image and PDF attachments for DMR models
+- [#3199](https://github.com/docker/docker-agent/pull/3199) - feat(server): expose session forking over HTTP
+- [#3201](https://github.com/docker/docker-agent/pull/3201) - feat(serve): add live pprof HTTP server to serve api command
+- [#3206](https://github.com/docker/docker-agent/pull/3206) - fix(dmr): detect and use locally-installed Docker Model Runner models
+- [#3207](https://github.com/docker/docker-agent/pull/3207) - fix(mcp): auto-recover remote MCP OAuth on server-side invalid_token
+- [#3212](https://github.com/docker/docker-agent/pull/3212) - docs: update CHANGELOG.md for v1.86.0
+- [#3213](https://github.com/docker/docker-agent/pull/3213) - fix: fail fast on OAuth MCP auth in non-interactive sessions
+- [#3214](https://github.com/docker/docker-agent/pull/3214) - chore: bump docker-agent-action to v2.0.1
+- [#3215](https://github.com/docker/docker-agent/pull/3215) - docs: update API server, CLI, DMR provider, and Go SDK for PRs #3199 #3201 #3206 #3182
+- [#3218](https://github.com/docker/docker-agent/pull/3218) - docs: add Snapshots feature page
+- [#3221](https://github.com/docker/docker-agent/pull/3221) - fix(tui): keep pending dialog when a nested sub-agent stream starts
+- [#3222](https://github.com/docker/docker-agent/pull/3222) - fix(eval): build judge model from the populated provider registry
+- [#3224](https://github.com/docker/docker-agent/pull/3224) - Add SessionID to ErrorEvent so isRootEvent correctly filters child errors
+- [#3225](https://github.com/docker/docker-agent/pull/3225) - fix: correct exported name InteractivePromptsAllowed in OAuth MCP handler
+- [#3226](https://github.com/docker/docker-agent/pull/3226) - feat: add readonly attribute for toolsets and agents
+- [#3227](https://github.com/docker/docker-agent/pull/3227) - feat: add plan builtin toolset for shared multi-agent collaboration
+- [#3228](https://github.com/docker/docker-agent/pull/3228) - ci: don't cancel in-progress runs on main
+- [#3229](https://github.com/docker/docker-agent/pull/3229) - fix(mcp/oauth): merge query params when building authorize URL (#3229)
+- [#3230](https://github.com/docker/docker-agent/pull/3230) - fix(mcp/oauth): merge query params when building authorize URL (#3229)
+- [#3232](https://github.com/docker/docker-agent/pull/3232) - feat: add top-level shared toolsets with use_toolsets agent field
+- [#3235](https://github.com/docker/docker-agent/pull/3235) - fix: sort script toolset keys for deterministic prompt ordering
+
+
 ## [v1.86.0] - 2026-06-23
 
 This release adds comprehensive OpenTelemetry instrumentation following GenAI semantic conventions, exposes session forking over HTTP, and includes several bug fixes for model streaming, local model detection, and OAuth registration.
@@ -3744,3 +3802,5 @@ This release improves the terminal user interface with better error handling and
 [v1.85.0]: https://github.com/docker/docker-agent/releases/tag/v1.85.0
 
 [v1.86.0]: https://github.com/docker/docker-agent/releases/tag/v1.86.0
+
+[v1.87.0]: https://github.com/docker/docker-agent/releases/tag/v1.87.0
