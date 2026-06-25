@@ -53,13 +53,9 @@ func TestMergeCloneOptions_MaxTokensOverride(t *testing.T) {
 }
 
 // TestMergeCloneOptions_NoThinking covers the option-merge branch that
-// disables thinking when WithNoThinking is set.
-//
-// The clone records "disabled" as an explicit sentinel (Effort: "none") rather
-// than nil so the subsequent applyProviderDefaults pass cannot revive a
-// provider-level thinking_budget via its setIfNil merge. applyModelDefaults
-// normalises this sentinel back to nil before the provider client sees the
-// config, so the wire-level behaviour is identical to a real nil.
+// disables thinking when WithNoThinking is set. The clone writes the
+// disabled sentinel rather than nil so the subsequent applyProviderDefaults
+// pass cannot revive a provider-level thinking_budget.
 func TestMergeCloneOptions_NoThinking(t *testing.T) {
 	t.Parallel()
 

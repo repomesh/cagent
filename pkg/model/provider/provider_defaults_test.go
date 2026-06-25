@@ -415,18 +415,10 @@ func TestApplyProviderDefaults_AliasFallback(t *testing.T) {
 	assert.Empty(t, cfg.TokenKey)
 }
 
-// TestApplyProviderDefaults_NoThinkingSentinelBlocksProviderBudget is the
-// regression test for the title-generation failure caused by a clone calling
-// WithNoThinking on a model whose custom provider sets thinking_budget at the
-// provider level (e.g. Gordon's anthropic provider).
-//
-// CloneWithOptions writes the disabled sentinel (Effort: "none") on the
-// cloned ModelConfig so the subsequent applyProviderDefaults pass cannot
-// revive the provider-level budget via mergeFromProviderConfig's
-// setIfNil(&dst.ThinkingBudget, src.ThinkingBudget) merge. applyModelDefaults
-// then normalises the sentinel back to nil. End result: thinking really is
-// off when WithNoThinking is set, no matter where thinking_budget was
-// declared in the user's config.
+// TestApplyProviderDefaults_NoThinkingSentinelBlocksProviderBudget verifies
+// that the disabled sentinel written by CloneWithOptions(WithNoThinking())
+// survives mergeFromProviderConfig and is normalised back to nil by
+// applyModelDefaults, even when the custom provider sets thinking_budget.
 func TestApplyProviderDefaults_NoThinkingSentinelBlocksProviderBudget(t *testing.T) {
 	t.Parallel()
 
