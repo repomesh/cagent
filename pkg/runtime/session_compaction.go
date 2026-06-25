@@ -81,7 +81,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 		if contextLimit <= 0 {
 			slog.ErrorContext(ctx, "Failed to generate session summary",
 				"error", "model definition unavailable")
-			events.Emit(Error("Failed to get model definition"))
+			events.Emit(ErrorForSession(sess.ID, "Failed to get model definition"))
 			return
 		}
 
@@ -95,7 +95,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 		})
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
-			events.Emit(Error(err.Error()))
+			events.Emit(ErrorForSession(sess.ID, err.Error()))
 			return
 		}
 		if result == nil {
