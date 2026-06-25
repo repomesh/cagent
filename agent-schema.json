@@ -1832,6 +1832,7 @@
             "filesystem",
             "shell",
             "tasks",
+            "plan",
             "todo",
             "fetch",
             "api",
@@ -1898,7 +1899,7 @@
         },
         "path": {
           "type": "string",
-          "description": "Path for memory tool"
+          "description": "Storage path for the memory or tasks toolset"
         },
         "shell": {
           "type": "object",
@@ -2153,6 +2154,7 @@
                 "filesystem",
                 "shell",
                 "tasks",
+                "plan",
                 "todo",
                 "fetch",
                 "api",
