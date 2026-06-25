@@ -76,6 +76,15 @@ func classifyByMessage(err error) error {
 		strings.Contains(lower, "broken pipe"),
 		strings.Contains(msg, "EOF"):
 		return wrap(ErrTransport, err)
+	// Map server-side OAuth token rejection to ErrAuthRequired. We match
+	// "invalid_token" (RFC 6750 §3.1 canonical error code) and its space-
+	// separated variant. We deliberately do NOT match bare "unauthorized"
+	// here to avoid classifying application-level 401s (unrelated to OAuth)
+	// as permanent auth failures; the token-was-attached gating in
+	// oauthTransport.roundTrip is the correct place for that check.
+	case strings.Contains(lower, "invalid_token"),
+		strings.Contains(lower, "invalid token"):
+		return wrap(ErrAuthRequired, err)
 	}
 	return err
 }

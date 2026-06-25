@@ -32,6 +32,19 @@ import (
 // resourceMetadataFromWWWAuth extracts resource metadata URL from WWW-Authenticate header
 var re = regexp.MustCompile(`resource="([^"]+)"`)
 
+// errorCodeRe extracts the RFC 6750 error= parameter from a WWW-Authenticate header.
+var errorCodeRe = regexp.MustCompile(`error="([^"]+)"`)
+
+// errorCodeFromWWWAuth returns the RFC 6750 error code from a WWW-Authenticate
+// header value (e.g. "invalid_token"), or an empty string when absent.
+func errorCodeFromWWWAuth(wwwAuth string) string {
+	matches := errorCodeRe.FindStringSubmatch(wwwAuth)
+	if len(matches) == 2 {
+		return matches[1]
+	}
+	return ""
+}
+
 // unmanagedOAuthWaitTimeout is the upper bound on how long the unmanaged
 // OAuth flow blocks waiting for a reply (elicitation result or
 // out-of-band callback). Generous enough to accommodate a user clicking
@@ -329,24 +342,78 @@ func (t *oauthTransport) oauthClient() *http.Client {
 	return oauthHTTPClient
 }
 
-func (t *oauthTransport) authorizeOnce(ctx context.Context, authServer, wwwAuth string) error {
+// handleServerRejectedToken is called when the server returned 401 for a
+// request that carried a Bearer token we believed valid. It attempts to
+// silently recover by:
+//
+//  1. Taking oauthFlowMu to serialise concurrent initialize-stage RPCs that
+//     all hit the same 401 at roughly the same time.
+//  2. Re-checking: if another goroutine already refreshed the token (its
+//     AccessToken differs from prev), return nil so roundTrip replays with
+//     the new token.
+//  3. Evicting the stale token from the store.
+//  4. Attempting a refresh-token grant (if prev.RefreshToken != "").
+//  5. On success: store the new token and return nil.
+//  6. On failure / no refresh token: fall back to interactive OAuth when
+//     the context allows it, else return AuthorizationRequiredError.
+//
+// The isRetry flag in roundTrip prevents a second call to this handler
+// within one request so there is no infinite recursion.
+func (t *oauthTransport) handleServerRejectedToken(ctx context.Context, prev *OAuthToken, wwwAuth string) error {
 	t.oauthFlowMu.Lock()
 	defer t.oauthFlowMu.Unlock()
 
-	if token := t.getValidToken(ctx); token != nil {
+	// Coalesce: if another goroutine already refreshed successfully, the
+	// stored token is now different. Return nil so the caller replays.
+	if current, err := t.tokenStore.GetToken(t.baseURL); err == nil && current.AccessToken != prev.AccessToken {
+		slog.DebugContext(ctx, "Token already refreshed by concurrent request; reusing", "url", t.baseURL)
 		return nil
 	}
 
-	// Sticky decline: the MCP SDK's Connect() runs several
-	// initialize-stage RPCs concurrently. Each one that gets a 401
-	// queues here on oauthFlowMu. Without this short-circuit, the
-	// goroutine that wins the mutex runs the full OAuth flow; when
-	// the user clicks Cancel, this goroutine returns OAuthDeclinedError
-	// and releases the mutex — at which point the NEXT queued
-	// goroutine sees no valid token and fires a fresh OAuth flow,
-	// re-popping the dialog the user just dismissed. Latching the
-	// decline state under the same mutex makes the queued callers
-	// see the prior decline before they can start a new flow.
+	// Evict the stale token; the refresh or interactive flow will store a
+	// fresh one.
+	if err := t.tokenStore.RemoveToken(t.baseURL); err != nil {
+		slog.DebugContext(ctx, "Failed to evict stale token", "url", t.baseURL, "error", err)
+	}
+
+	// Attempt a silent refresh when we have a refresh token.
+	if prev.RefreshToken != "" {
+		_, err := t.refreshStoredToken(ctx, prev)
+		if err == nil {
+			slog.DebugContext(ctx, "Silently refreshed server-rejected token", "url", t.baseURL)
+			t.client.oauthSuccess()
+			return nil
+		}
+		slog.DebugContext(ctx, "Refresh failed after server-side token rejection; falling back to interactive auth",
+			"url", t.baseURL, "error", err)
+	}
+
+	// Refresh not possible or failed: fall back to interactive OAuth if the
+	// context allows it.
+	if !interactivePromptsAllowed(ctx) {
+		slog.DebugContext(ctx, "Non-interactive context: deferring re-auth after server-side token rejection", "url", t.baseURL)
+		t.mu.Lock()
+		t.lastAuthRequired = true
+		t.mu.Unlock()
+		return &AuthorizationRequiredError{URL: t.baseURL}
+	}
+
+	// Route through startInteractiveFlowLocked so the sticky-decline latch is
+	// honored: a prior user cancel short-circuits here, and a new cancel is
+	// latched so concurrent callers queued on oauthFlowMu observe it too.
+	return t.startInteractiveFlowLocked(ctx, t.baseURL, wwwAuth)
+}
+
+// startInteractiveFlowLocked runs the interactive OAuth flow while oauthFlowMu
+// is already held. It enforces the sticky-decline guard: a prior user cancel
+// short-circuits immediately and returns OAuthDeclinedError, and a new cancel
+// is latched so subsequent callers queued on oauthFlowMu observe it too.
+//
+// This is the single call-site for launching an interactive flow so that both
+// authorizeOnce (first-contact 401) and handleServerRejectedToken (recovery
+// after failed refresh) share the same decline-guard logic without risk of
+// double-locking oauthFlowMu.
+func (t *oauthTransport) startInteractiveFlowLocked(ctx context.Context, authServer, wwwAuth string) error {
 	t.mu.Lock()
 	declined := t.lastOAuthDeclined
 	t.mu.Unlock()
@@ -357,13 +424,11 @@ func (t *oauthTransport) authorizeOnce(ctx context.Context, authServer, wwwAuth 
 
 	err := t.handleOAuthFlow(ctx, authServer, wwwAuth)
 	if err != nil {
-		// Latch the decline state BEFORE the deferred Unlock fires so
-		// any goroutine queued on oauthFlowMu observes it on its next
-		// iteration of the getValidToken / declined / handleOAuthFlow
-		// dance. Setting this in roundTrip (after we return) would
-		// race: the queued goroutine would acquire the mutex first
-		// and start a fresh flow while we are still bubbling the
-		// error up the stack.
+		// Latch the decline state BEFORE the deferred Unlock on oauthFlowMu
+		// fires so any goroutine queued on oauthFlowMu observes it on its
+		// next iteration. Setting this after returning would race: the queued
+		// goroutine could acquire the mutex first and start a fresh flow while
+		// we are still bubbling the error up the stack.
 		var declinedErr *OAuthDeclinedError
 		if errors.As(err, &declinedErr) {
 			t.mu.Lock()
@@ -372,6 +437,22 @@ func (t *oauthTransport) authorizeOnce(ctx context.Context, authServer, wwwAuth 
 		}
 	}
 	return err
+}
+
+func (t *oauthTransport) authorizeOnce(ctx context.Context, authServer, wwwAuth string) error {
+	t.oauthFlowMu.Lock()
+	defer t.oauthFlowMu.Unlock()
+
+	if token := t.getValidToken(ctx); token != nil {
+		return nil
+	}
+
+	// Sticky decline: the MCP SDK's Connect() runs several initialize-stage
+	// RPCs concurrently. Each one that gets a 401 queues here on oauthFlowMu.
+	// startInteractiveFlowLocked checks the latch so concurrent callers that
+	// arrive after a user-cancel observe the prior decline and short-circuit
+	// without re-popping the dialog.
+	return t.startInteractiveFlowLocked(ctx, authServer, wwwAuth)
 }
 
 func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Response, error) {
@@ -388,8 +469,10 @@ func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Respo
 	reqClone := req.Clone(req.Context())
 
 	// Attach a valid token if available, silently refreshing if expired.
+	var attachedToken *OAuthToken
 	if token := t.getValidToken(req.Context()); token != nil {
 		reqClone.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		attachedToken = token
 	}
 
 	resp, err := t.base.RoundTrip(reqClone)
@@ -400,6 +483,42 @@ func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Respo
 	if resp.StatusCode == http.StatusUnauthorized && !isRetry {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
 		if wwwAuth != "" {
+			// If a Bearer token was attached and the server is signalling a
+			// credential rejection (RFC 6750 invalid_token or any 401 against
+			// a token we believed valid), attempt silent eviction + refresh
+			// before falling back to interactive OAuth. This handles the common
+			// "token was rotated/revoked server-side" case without user
+			// interaction.
+			if attachedToken != nil {
+				errorCode := errorCodeFromWWWAuth(wwwAuth)
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				resp.Body = io.NopCloser(bytes.NewReader(body))
+				serverMsg := extractServerMessage(body)
+				// Signal is: RFC 6750 error="invalid_token" in the header, or
+				// "invalid_token" / "invalid token" in the response body.
+				isInvalidToken := strings.Contains(strings.ToLower(errorCode), "invalid_token") ||
+					strings.Contains(strings.ToLower(serverMsg), "invalid_token") ||
+					strings.Contains(strings.ToLower(serverMsg), "invalid token")
+				if isInvalidToken {
+					if len(bodyBytes) > 0 {
+						req.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
+					}
+					if err := t.handleServerRejectedToken(req.Context(), attachedToken, wwwAuth); err != nil {
+						// Refresh or re-auth deferred; caller will surface the error.
+						return nil, err
+					}
+					// Token refreshed successfully; replay the request.
+					return t.roundTrip(req, true)
+				}
+				// Token was attached but the server returned a bare 401 without
+				// invalid_token. This is an app-level authorization failure
+				// (wrong permissions, revoked app access, etc.) the transport
+				// cannot silently recover from. Return the 401 as-is: no
+				// eviction, no /token call, stored credential untouched.
+				return resp, nil
+			}
+
 			// If the caller asked for non-interactive operation (e.g. the
 			// runtime is populating sidebar tool counts during startup),
 			// don't block on an OAuth elicitation that the TUI is not yet
@@ -657,13 +776,28 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 		return nil
 	}
 
+	newToken, err := t.refreshStoredToken(ctx, token)
+	if err != nil {
+		return nil
+	}
+	return newToken
+}
+
+// refreshStoredToken attempts a silent refresh-token grant for prev. It
+// honours the 30-second refreshFailedAt backoff to avoid hammering the
+// token endpoint on repeated failures, and resets it on success.
+//
+// On success the new token is stored and returned; on failure nil and the
+// error are returned and refreshFailedAt is stamped. The caller is
+// responsible for ensuring prev.RefreshToken is non-empty before calling.
+func (t *oauthTransport) refreshStoredToken(ctx context.Context, prev *OAuthToken) (*OAuthToken, error) {
 	// Avoid hammering the token endpoint if a recent refresh already failed.
 	const refreshBackoff = 30 * time.Second
 	t.mu.Lock()
 	failedAt := t.refreshFailedAt
 	t.mu.Unlock()
 	if !failedAt.IsZero() && time.Since(failedAt) < refreshBackoff {
-		return nil
+		return nil, fmt.Errorf("skipping refresh: last attempt failed %s ago", time.Since(failedAt).Round(time.Second))
 	}
 
 	slog.DebugContext(ctx, "Attempting silent token refresh", "url", t.baseURL)
@@ -688,23 +822,23 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 	defer refreshSpan.End()
 
 	o := &oauth{metadataClient: t.oauthClient()}
-	authServer := cmp.Or(token.AuthServer, t.baseURL)
+	authServer := cmp.Or(prev.AuthServer, t.baseURL)
 	metadata, err := o.getAuthorizationServerMetadata(ctx, authServer)
 	if err != nil {
 		slog.DebugContext(ctx, "Failed to fetch auth server metadata for refresh", "auth_server", authServer, "error", err)
 		refreshSpan.RecordError(err)
 		refreshSpan.SetStatus(codes.Error, "metadata fetch failed")
 		refreshSpan.SetAttributes(attribute.String("error.type", "metadata"))
-		return nil
+		return nil, err
 	}
 
 	newToken, err := refreshAccessToken(
 		ctx,
 		t.oauthClient(),
 		metadata.TokenEndpoint,
-		token.RefreshToken,
-		token.ClientID,
-		token.ClientSecret,
+		prev.RefreshToken,
+		prev.ClientID,
+		prev.ClientSecret,
 	)
 	if err != nil {
 		slog.DebugContext(ctx, "Token refresh failed, will require interactive auth", "error", err)
@@ -714,10 +848,10 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 		t.mu.Lock()
 		t.refreshFailedAt = time.Now()
 		t.mu.Unlock()
-		return nil
+		return nil, err
 	}
 	newToken.AuthServer = authServer
-	newToken.RequestedScopes = token.RequestedScopes
+	newToken.RequestedScopes = prev.RequestedScopes
 
 	t.mu.Lock()
 	t.refreshFailedAt = time.Time{} // reset on success
@@ -728,7 +862,7 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 	}
 
 	slog.DebugContext(ctx, "Token refreshed successfully", "url", t.baseURL)
-	return newToken
+	return newToken, nil
 }
 
 // tokenCoversConfiguredScopes reports whether the stored token was obtained

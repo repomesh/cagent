@@ -64,6 +64,17 @@ Set `allow_private_ips: true` on a remote MCP toolset only when the MCP server o
   <p>Remote MCP connections (Streamable HTTP / SSE) automatically reconnect after the server closes an idle connection — no configuration needed. Services like Notion and Linear close idle connections periodically; docker-agent detects the clean close and reconnects with exponential backoff. To tune reconnect behaviour or disable reconnection entirely, use the <a href="{{ '/configuration/tools/#toolset-lifecycle' | relative_url }}"><code>lifecycle</code> block</a>.</p>
 </div>
 
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">Automatic recovery from revoked or rotated OAuth tokens
+</div>
+  <p>If a remote MCP server rejects the cached token with a <code>401 invalid_token</code> error (for example, because the token was revoked or rotated server-side), docker-agent handles the failure automatically:</p>
+  <ul>
+    <li><strong>Silent refresh:</strong> when a refresh token is available, docker-agent silently exchanges it for a new access token and replays the request — no user interaction required.</li>
+    <li><strong>Re-authentication prompt:</strong> when the refresh token is absent or has also expired, the toolset transitions to a "needs re-auth" state and surfaces an OAuth prompt on your next message (exactly like the first-time flow).</li>
+  </ul>
+  <p>Either way, the agent never burns 5 reconnect attempts on an auth failure — it fails fast and either refreshes silently or defers to interactive re-auth. If you want to trigger re-auth immediately without waiting for the next message, run <code>/toolset-restart &lt;name&gt;</code> from the TUI.</p>
+</div>
+
 ### OAuth for servers without Dynamic Client Registration
 
 Most remote MCP servers that require OAuth support [Dynamic Client Registration (RFC 7591)]({{ 'https://datatracker.ietf.org/doc/html/rfc7591' }}) — no configuration is needed, docker-agent handles the flow for you.

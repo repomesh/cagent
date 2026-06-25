@@ -2054,3 +2054,483 @@ func TestUnmanagedRedirectURI_PerToolsetTakesPrecedence(t *testing.T) {
 	transport.unmanagedOAuthRedirectURI = ""
 	assert.Empty(t, transport.unmanagedRedirectURI())
 }
+
+// --------- Server-side invalid_token eviction + refresh tests ---------
+
+// newInvalidTokenTestServer creates an httptest mux emulating a server that:
+//   - Returns 401 + WWW-Authenticate: Bearer error="invalid_token" for the
+//     stale bearer token "old-at".
+//   - Returns 200 for any request bearing a valid bearer token "fresh-at".
+//   - Serves OAuth authorization-server metadata and a /token refresh endpoint.
+func newInvalidTokenTestServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var tokenCalls atomic.Int32
+	mux := http.NewServeMux()
+
+	// Use NewUnstartedServer so we can reference srv.URL in handler closures
+	// before the server is started.
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls.Add(1)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "fresh-at",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+			"refresh_token": "fresh-rt",
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer fresh-at" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		// All other tokens (including the stale "old-at") → invalid_token.
+		w.Header().Set("WWW-Authenticate", `Bearer realm="test", error="invalid_token"`)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token","error_description":"Invalid access token"}`))
+	})
+
+	return srv, &tokenCalls
+}
+
+// newTransportWithStaleToken builds an oauthTransport pre-populated with a
+// non-expired stale token "old-at" that the server will reject with
+// invalid_token. The token carries a refresh_token and client credentials so
+// the silent refresh path can be exercised.
+func newTransportWithStaleToken(t *testing.T, baseURL string) *oauthTransport {
+	t.Helper()
+	store := NewInMemoryTokenStore()
+	err := store.StoreToken(baseURL, &OAuthToken{
+		AccessToken:  "old-at",
+		TokenType:    "Bearer",
+		RefreshToken: "old-rt",
+		// Non-expired so getValidToken returns it without local-expiry refresh.
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+		ClientID:     "cid",
+		ClientSecret: "csec",
+		AuthServer:   baseURL, // metadata discovery goes to the same server
+	})
+	require.NoError(t, err)
+	return &oauthTransport{
+		base:       http.DefaultTransport,
+		client:     &remoteMCPClient{},
+		tokenStore: store,
+		baseURL:    baseURL,
+		// Allow private IPs so the httptest 127.0.0.1 server is reachable.
+		oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
+	}
+}
+
+// TestRoundTrip_ServerInvalidTokenEvictsAndRefreshes is the primary regression
+// test for #3198: when the server rejects a non-expired stored token with
+// invalid_token, the transport must silently evict the stale token, call the
+// token endpoint exactly once to refresh it, and replay the request with the
+// new bearer so the caller sees a 200 response.
+func TestRoundTrip_ServerInvalidTokenEvictsAndRefreshes(t *testing.T) {
+	srv, tokenCalls := newInvalidTokenTestServer(t)
+
+	var oauthSuccessFired atomic.Bool
+	transport := newTransportWithStaleToken(t, srv.URL)
+	transport.client.SetOAuthSuccessHandler(func() { oauthSuccessFired.Store(true) })
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int32(1), tokenCalls.Load(), "token endpoint must be called exactly once")
+
+	// The stored token must now be the freshly-obtained one.
+	stored, err := transport.tokenStore.GetToken(srv.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh-at", stored.AccessToken)
+
+	assert.True(t, oauthSuccessFired.Load(), "oauthSuccess must be called after silent refresh")
+}
+
+// TestRoundTrip_ServerInvalidToken_RefreshFails_DefersWhenNonInteractive
+// verifies that when the server rejects the token with invalid_token but the
+// token-endpoint refresh fails, a non-interactive context returns
+// IsAuthorizationRequired and the stale token is evicted from the store.
+func TestRoundTrip_ServerInvalidToken_RefreshFails_DefersWhenNonInteractive(t *testing.T) {
+	var tokenCalls atomic.Int32
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		tokenCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="test", error="invalid_token"`)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token"}`))
+	})
+
+	transport := newTransportWithStaleToken(t, srv.URL)
+
+	ctx := WithoutInteractivePrompts(t.Context())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, strings.NewReader("{}"))
+	require.NoError(t, err)
+
+	resp, rtErr := transport.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	require.Error(t, rtErr)
+	assert.True(t, IsAuthorizationRequired(rtErr), "must return AuthorizationRequiredError; got: %v", rtErr)
+
+	// Stale token must have been evicted.
+	_, storeErr := transport.tokenStore.GetToken(srv.URL)
+	require.Error(t, storeErr, "stale token must be evicted from the store")
+
+	// The token endpoint was hit at most once (backoff not yet active).
+	assert.Equal(t, int32(1), tokenCalls.Load())
+
+	// A second request within the backoff window must NOT hit the token
+	// endpoint again (refreshFailedAt is set).
+	req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, strings.NewReader("{}"))
+	// Re-populate the store with a stale token so roundTrip tries to attach it again.
+	_ = transport.tokenStore.StoreToken(srv.URL, &OAuthToken{
+		AccessToken:  "old-at",
+		RefreshToken: "old-rt",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		ClientID:     "cid",
+		ClientSecret: "csec",
+		AuthServer:   srv.URL,
+	})
+	resp2, _ := transport.RoundTrip(req2)
+	if resp2 != nil {
+		resp2.Body.Close()
+	}
+	assert.Equal(t, int32(1), tokenCalls.Load(), "backoff must prevent a second token-endpoint hit")
+}
+
+// TestRoundTrip_ServerInvalidToken_NoRefreshToken_NonInteractive verifies
+// that when the stored token has no refresh_token, a non-interactive context
+// returns IsAuthorizationRequired without hitting the token endpoint.
+func TestRoundTrip_ServerInvalidToken_NoRefreshToken_NonInteractive(t *testing.T) {
+	mux := http.NewServeMux()
+	var tokenCalls atomic.Int32
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="test", error="invalid_token"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		tokenCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	})
+
+	store := NewInMemoryTokenStore()
+	err := store.StoreToken(srv.URL, &OAuthToken{
+		AccessToken: "old-at",
+		TokenType:   "Bearer",
+		// No RefreshToken → refresh path must not be attempted.
+		ExpiresAt:  time.Now().Add(time.Hour),
+		AuthServer: srv.URL,
+	})
+	require.NoError(t, err)
+
+	transport := &oauthTransport{
+		base:            http.DefaultTransport,
+		client:          &remoteMCPClient{},
+		tokenStore:      store,
+		baseURL:         srv.URL,
+		oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
+	}
+
+	ctx := WithoutInteractivePrompts(t.Context())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, strings.NewReader("{}"))
+	resp, rtErr := transport.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	require.Error(t, rtErr)
+	assert.True(t, IsAuthorizationRequired(rtErr))
+	assert.Equal(t, int32(0), tokenCalls.Load(), "no refresh token → token endpoint must never be hit")
+}
+
+// TestRoundTrip_FirstContact401Unchanged is a regression guard: when no
+// token is stored (first-contact), the transport must take the existing
+// interactive OAuth flow unchanged — it must NOT treat the first-contact
+// 401 as an invalid_token rejection.
+func TestRoundTrip_FirstContact401Unchanged(t *testing.T) {
+	srv := newUnmanagedOAuthTestServer(t)
+
+	var elicitCalls atomic.Int32
+	capture := &elicitCaptured{}
+	capture.replyFn = func(_ *gomcp.ElicitParams) tools.ElicitationResult {
+		elicitCalls.Add(1)
+		return tools.ElicitationResult{
+			Action: tools.ElicitationActionAccept,
+			Content: map[string]any{
+				"access_token": "first-at",
+				"token_type":   "Bearer",
+			},
+		}
+	}
+	transport, _ := newUnmanagedTestTransport(t, srv.URL, "", capture)
+	// No pre-stored token → first-contact path.
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+	require.NoError(t, err)
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int32(1), elicitCalls.Load(), "first-contact must go through the interactive OAuth flow")
+	// Token endpoint was NOT hit for first-contact (client supplied the token directly).
+	assert.Equal(t, int32(0), srv.tokenCalls.Load())
+}
+
+// TestRoundTrip_ConcurrentInvalidToken_RefreshesOnce verifies the
+// coalescing behaviour: when N concurrent roundTrips all see the stale
+// token and hit 401 + invalid_token simultaneously, exactly one refresh
+// is issued and all N requests eventually succeed with the fresh token.
+func TestRoundTrip_ConcurrentInvalidToken_RefreshesOnce(t *testing.T) {
+	srv, tokenCalls := newInvalidTokenTestServer(t)
+
+	transport := newTransportWithStaleToken(t, srv.URL)
+	transport.client.SetOAuthSuccessHandler(func() {})
+
+	const n = 6
+	results := make(chan error, n)
+
+	for range n {
+		go func() {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+			if err != nil {
+				results <- err
+				return
+			}
+			resp, err := transport.RoundTrip(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			results <- err
+		}()
+	}
+
+	for range n {
+		select {
+		case err := <-results:
+			require.NoError(t, err, "all concurrent requests must eventually succeed")
+		case <-time.After(10 * time.Second):
+			t.Fatal("timeout waiting for concurrent round-trips")
+		}
+	}
+
+	assert.Equal(t, int32(1), tokenCalls.Load(),
+		"oauthFlowMu coalescing must ensure the token endpoint is hit exactly once")
+}
+
+// TestRoundTrip_Bare401WithAttachedTokenUnchanged is the regression guard for
+// blocking issue 1: when a token WAS attached to the request and the server
+// returns a plain 401 (no error="invalid_token" in the WWW-Authenticate
+// header and no invalid_token in the body), the transport MUST return the 401
+// response as-is — no eviction, no /token call, stored credential untouched.
+//
+// This covers the "app-level authorization failure" case (wrong permissions,
+// revoked app access, etc.) where the server rejects the bearer for a reason
+// that isn't a stale/revoked token we can silently refresh.
+func TestRoundTrip_Bare401WithAttachedTokenUnchanged(t *testing.T) {
+	var tokenCalls atomic.Int32
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// Main endpoint: 401 with Bearer realm but NO error= code.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="test"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"forbidden"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		tokenCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	})
+
+	store := NewInMemoryTokenStore()
+	require.NoError(t, store.StoreToken(srv.URL, &OAuthToken{
+		AccessToken:  "good-at",
+		TokenType:    "Bearer",
+		RefreshToken: "good-rt", // has a refresh token — must NOT be used
+		ExpiresAt:    time.Now().Add(time.Hour),
+		AuthServer:   srv.URL,
+		ClientID:     "cid",
+		ClientSecret: "csec",
+	}))
+
+	transport := &oauthTransport{
+		base:            http.DefaultTransport,
+		client:          &remoteMCPClient{},
+		tokenStore:      store,
+		baseURL:         srv.URL,
+		oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+	require.NoError(t, err)
+
+	resp, rtErr := transport.RoundTrip(req)
+	require.NoError(t, rtErr, "bare 401 must be returned as a normal response, not an error")
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"bare 401 without invalid_token must be returned unchanged")
+	assert.Equal(t, int32(0), tokenCalls.Load(),
+		"token endpoint must NOT be called for a bare 401 without invalid_token")
+
+	// Stored token must be untouched.
+	stored, storeErr := transport.tokenStore.GetToken(srv.URL)
+	require.NoError(t, storeErr, "token must still be in the store")
+	assert.Equal(t, "good-at", stored.AccessToken,
+		"stored token must not be evicted or replaced on a bare 401")
+}
+
+// TestRoundTrip_ConcurrentInvalidToken_NoRefresh_StickyDecline is the
+// regression guard for blocking issue 2: when concurrent requests all hit a
+// 401 + error="invalid_token" for a token that has NO refresh_token, the
+// transport must fall back to interactive OAuth. The first goroutine runs the
+// OAuth flow; the user declines. The sticky-decline latch (lastOAuthDeclined)
+// must be observed by all subsequently-queued goroutines so that exactly ONE
+// elicitation dialog is popped and all callers surface OAuthDeclinedError.
+func TestRoundTrip_ConcurrentInvalidToken_NoRefresh_StickyDecline(t *testing.T) {
+	var tokenCalls atomic.Int32
+	mux := http.NewServeMux()
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	// OAuth discovery: needed by handleUnmanagedOAuthFlow before it sends the
+	// elicitation. Both endpoints must succeed for the flow to reach elicitation.
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              srv.URL,
+			"authorization_servers": []string{srv.URL},
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		tokenCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="test", error="invalid_token"`)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token"}`))
+	})
+
+	// Token without a refresh_token: no silent refresh, must fall back to
+	// interactive OAuth.
+	store := NewInMemoryTokenStore()
+	require.NoError(t, store.StoreToken(srv.URL, &OAuthToken{
+		AccessToken: "old-at",
+		TokenType:   "Bearer",
+		// No RefreshToken.
+		ExpiresAt:  time.Now().Add(time.Hour),
+		AuthServer: srv.URL,
+	}))
+
+	var elicitCount atomic.Int32
+	capture := &elicitCaptured{}
+	capture.replyFn = func(_ *gomcp.ElicitParams) tools.ElicitationResult {
+		elicitCount.Add(1)
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}
+	}
+
+	client := newRemoteClient(srv.URL, "streamable", nil, store, nil, false)
+	client.SetElicitationHandler(capture.handler)
+	client.allowPrivateIPs = true
+
+	transport := &oauthTransport{
+		base:            http.DefaultTransport,
+		client:          client,
+		tokenStore:      store,
+		baseURL:         srv.URL,
+		managed:         false,
+		oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
+	}
+
+	const n = 5
+	results := make(chan error, n)
+	for range n {
+		go func() {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+			if err != nil {
+				results <- err
+				return
+			}
+			resp, err := transport.RoundTrip(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			results <- err
+		}()
+	}
+
+	for range n {
+		select {
+		case err := <-results:
+			require.Error(t, err)
+			assert.True(t, IsOAuthDeclined(err),
+				"all concurrent requests must surface OAuthDeclinedError after the user declined; got: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("timeout waiting for concurrent round-trips to complete")
+		}
+	}
+
+	assert.Equal(t, int32(1), elicitCount.Load(),
+		"sticky-decline must ensure exactly one elicitation dialog is shown")
+	assert.Equal(t, int32(0), tokenCalls.Load(),
+		"token endpoint must NOT be hit: no refresh token exists")
+}

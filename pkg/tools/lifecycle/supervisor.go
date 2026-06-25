@@ -10,6 +10,31 @@ import (
 	"time"
 )
 
+// backgroundReconnectKey is a context key that the supervisor attaches to
+// connector.Connect calls made during background watcher reconnect attempts,
+// distinguishing them from the initial interactive Start. Connector
+// implementations (e.g. the MCP clientConnector) use this to apply
+// non-interactive constraints on background reconnects so a 401 defers
+// cleanly rather than blocking on a dead elicitation bridge.
+type backgroundReconnectKey struct{}
+
+// withBackgroundReconnect returns a copy of ctx marked as a background
+// reconnect attempt. It is set by tryRestart before calling
+// connector.Connect so the connector can distinguish watcher reconnects
+// from the initial interactive Start.
+func withBackgroundReconnect(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundReconnectKey{}, true)
+}
+
+// IsBackgroundReconnect reports whether ctx was created by the supervisor
+// for a background reconnect attempt. Connector.Connect implementations can
+// use this to disable interactive operations (e.g. OAuth prompts) that
+// should not run in the background.
+func IsBackgroundReconnect(ctx context.Context) bool {
+	v, _ := ctx.Value(backgroundReconnectKey{}).(bool)
+	return v
+}
+
 // Connector creates new sessions for a Supervisor. Implementations are
 // transport-specific: stdio MCP, remote MCP, LSP stdio.
 type Connector interface {
@@ -462,8 +487,21 @@ func (s *Supervisor) tryRestart(ctx context.Context) bool {
 		}
 		s.mu.Unlock()
 
-		sess, err := s.connector.Connect(ctx)
+		sess, err := s.connector.Connect(withBackgroundReconnect(ctx))
 		if err != nil {
+			// A permanent error on reconnect (e.g. ErrAuthRequired from a
+			// server-side invalid_token) must not be retried: doing so would
+			// burn through the budget and mask the real failure. Symmetric
+			// with the shouldRestart check on the Wait() path.
+			if IsPermanent(err) {
+				log.Warn("supervisor: permanent error on reconnect; not retrying", "name", s.name, "error", err)
+				s.tracker.Fail(StateFailed, err)
+				if cb := s.policy.OnFailed; cb != nil {
+					cb(err)
+				}
+				s.signalDone()
+				return false
+			}
 			s.tracker.Fail(StateRestarting, err)
 			s.tracker.IncRestarts()
 			log.Warn("supervisor: restart failed", "name", s.name, "attempt", attempt+1, "error", err)
