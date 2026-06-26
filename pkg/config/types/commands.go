@@ -51,7 +51,8 @@ type Command struct {
 	// URL, when set, makes the command open the given URL in the user's
 	// default browser instead of sending a prompt to the agent. Any custom
 	// URI scheme the OS knows how to handle works too (e.g. docker-desktop://
-	// to deep-link into Docker Desktop).
+	// to deep-link into Docker Desktop). The token {{session_id}} is replaced
+	// at invocation time with the current session ID (URL-query-escaped).
 	URL string `json:"url,omitempty"`
 }
 
