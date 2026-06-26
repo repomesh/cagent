@@ -29,14 +29,18 @@ func (j JSONSchema) MarshalJSON() ([]byte, error) {
 
 // ConvertMultiContent converts chat.MessagePart slices to OpenAI content
 // parts, resolving attachment capabilities from the provided modelsdev.Store.
-func ConvertMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store) []openai.ChatCompletionContentPartUnionParam {
-	return convertMultiContentWithCaps(ctx, multiContent, modelinfo.LoadCaps(ctx, store, id))
+// A non-nil override declares the model's attachment capabilities explicitly,
+// bypassing the models.dev lookup (issue #2741).
+func ConvertMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionContentPartUnionParam {
+	return convertMultiContentWithCaps(ctx, multiContent, modelinfo.ResolveCaps(ctx, store, id, override))
 }
 
 // ConvertMessages converts chat.Message slices to OpenAI message params,
-// resolving attachment capabilities from the provided modelsdev.Store.
-func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store) []openai.ChatCompletionMessageParamUnion {
-	return convertMessagesWithCaps(ctx, messages, modelinfo.LoadCaps(ctx, store, id))
+// resolving attachment capabilities from the provided modelsdev.Store. A
+// non-nil override declares the model's attachment capabilities explicitly,
+// bypassing the models.dev lookup (issue #2741).
+func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionMessageParamUnion {
+	return convertMessagesWithCaps(ctx, messages, modelinfo.ResolveCaps(ctx, store, id, override))
 }
 
 // ConvertMessagesWithCaps is the caps-injectable variant of [ConvertMessages].
