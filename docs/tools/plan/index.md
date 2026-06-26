@@ -25,12 +25,44 @@ No additional options are required. All agents that include `type: plan` in thei
 
 ## Available Tools
 
-| Tool          | Description                                                                                       |
-| ------------- | ------------------------------------------------------------------------------------------------- |
-| `write_plan`  | Create or update a shared plan by name. Replaces the entire plan content — read it first to preserve what you want to keep. Each write bumps the revision number. |
-| `read_plan`   | Read a shared plan by name, including its title, content, author, revision number, and last-updated timestamp. |
-| `list_plans`  | List all shared plans with their name, title, author, revision, and last-updated timestamp. |
-| `delete_plan` | Delete a shared plan by name.                                                                     |
+| Tool                    | Description                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `write_plan`            | Create or update a shared plan by name. Replaces the entire plan content — read it first to preserve what you want to keep. Each write bumps the revision number. |
+| `read_plan`             | Read a shared plan by name, including its title, content, author, status, revision number, and last-updated timestamp. |
+| `list_plans`            | List all shared plans with their name, title, author, status, revision, and last-updated timestamp. |
+| `delete_plan`           | Delete a shared plan by name.                                                                     |
+| `update_plan_from_file` | Create or update a plan, taking the new content from a file on disk instead of inline. Use it with `export_plan_to_file` to edit a large plan without re-sending its whole body. |
+| `export_plan_to_file`   | Write a plan's content to a file. The content goes to disk and is **not** returned as tool output, so materialising a plan costs no tokens. |
+| `set_plan_status`       | Set a plan's free-form status without rewriting its body. The plan must already exist. |
+| `get_plan_status`       | Read a plan's status and current revision without fetching its body.                  |
+
+### Cheap edits with file-based revisions
+
+Re-sending a whole plan on every revision is expensive. The file-based tools let
+an agent edit a plan without paying input-token cost for its body:
+
+1. `export_plan_to_file` writes the current plan content to a path. The content
+   is written to disk and is **not** returned.
+2. The agent edits that file in place with its filesystem tools.
+3. `update_plan_from_file` commits the file's new contents as the next revision.
+
+### Free-form status
+
+Each plan carries a free-form `status` string. There is no fixed vocabulary:
+define your own in the system prompt (e.g. `idle`, `in-progress`, `blocked`,
+`done`, `canceled`). Read and write it independently of the body with
+`get_plan_status` and `set_plan_status`, or pass `status` to `write_plan` and
+`update_plan_from_file`. The TUI surfaces the status next to the plan title.
+
+### Optimistic locking
+
+When several sessions edit the same plan, concurrent writes could silently
+overwrite each other. Every read returns a `revision` number; pass the value you
+last read as `last_known_revision` to `write_plan`, `update_plan_from_file`,
+`set_plan_status`, or `delete_plan`. If the plan changed since (its current
+revision no longer matches), the write is rejected with a version-conflict
+error and the caller should re-read the plan and retry. Omit
+`last_known_revision` to write unconditionally (last writer wins).
 
 ### Plan Names
 
@@ -46,7 +78,8 @@ Each plan document contains:
 | `title`    | A short human-readable title (optional)                   |
 | `content`  | The full Markdown or free-form plan text                  |
 | `author`   | Free-form label identifying who last wrote the plan       |
-| `revision` | Monotonically increasing counter, bumped on every write   |
+| `status`   | Free-form lifecycle label (optional), e.g. `in-progress`  |
+| `revision` | Monotonically increasing version counter, bumped on every write |
 | `updatedAt`| ISO 8601 timestamp of the last write                      |
 
 ## Example
