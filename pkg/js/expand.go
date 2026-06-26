@@ -130,6 +130,7 @@ func (exp *Expander) ExpandCommands(ctx context.Context, cmds types.Commands) ty
 		// new fields are added to types.Command.
 		cmd.Description = runExpansion(vm, cmd.Description)
 		cmd.Instruction = runExpansion(vm, cmd.Instruction)
+		cmd.URL = runExpansion(vm, cmd.URL)
 		expanded[k] = cmd
 	}
 	return expanded

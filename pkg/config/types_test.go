@@ -35,6 +35,25 @@ func TestCommandsUnmarshal_List(t *testing.T) {
 	require.Equal(t, "list files", c["ls"].Instruction)
 }
 
+func TestCommandsUnmarshal_URL(t *testing.T) {
+	var c types.Commands
+	input := []byte(`
+feedback:
+  description: "Open the feedback site"
+  url: https://example.com/feedback
+desktop:
+  url: docker-desktop://dashboard
+`)
+	err := yaml.Unmarshal(input, &c)
+	require.NoError(t, err)
+	require.Equal(t, "https://example.com/feedback", c["feedback"].URL)
+	require.Equal(t, "Open the feedback site", c["feedback"].Description)
+	require.Empty(t, c["feedback"].Instruction)
+	require.Equal(t, "docker-desktop://dashboard", c["desktop"].URL)
+	// A URL-only command falls back to the URL for its display text.
+	require.Equal(t, "Open docker-desktop://dashboard", c["desktop"].DisplayText())
+}
+
 func TestThinkingBudget_MarshalUnmarshal_String(t *testing.T) {
 	t.Parallel()
 

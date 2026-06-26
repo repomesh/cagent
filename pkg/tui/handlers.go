@@ -683,6 +683,13 @@ func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
 	// the resolved message — otherwise the message would be processed by
 	// the previous agent.
 	cmd, _, ok := m.application.LookupCommand(ctx, command)
+
+	// URL commands open the configured URL in the browser instead of sending
+	// a prompt to the agent.
+	if ok && cmd.URL != "" {
+		return m, core.CmdHandler(messages.OpenURLMsg{URL: cmd.URL})
+	}
+
 	resolved := m.application.ResolveCommand(ctx, command)
 
 	var cmds []tea.Cmd
