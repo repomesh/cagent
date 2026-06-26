@@ -1,6 +1,10 @@
 package dialog
 
 import (
+	"fmt"
+	"maps"
+	"slices"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -75,9 +79,16 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	options := d.renderOptions(contentWidth)
 	optionsHeight := lipgloss.Height(options)
 
+	// The metadata section, when present, adds its own height plus a
+	// leading blank line (matching how View() spaces it).
+	var metadataHeight int
+	if metadata := d.renderMetadata(contentWidth); metadata != "" {
+		metadataHeight = lipgloss.Height(metadata) + 1
+	}
+
 	// Calculate available height for scroll view
 	frameHeight := styles.DialogStyle.GetVerticalFrameSize()
-	fixedContentHeight := titleHeight + separatorHeight + toolConfirmEmptyLinesBefore + questionHeight + toolConfirmEmptyLinesAfter + optionsHeight
+	fixedContentHeight := titleHeight + separatorHeight + toolConfirmEmptyLinesBefore + questionHeight + toolConfirmEmptyLinesAfter + optionsHeight + metadataHeight
 	availableHeight := max(maxDialogHeight-frameHeight-fixedContentHeight, toolConfirmMinScrollHeight)
 	d.scrollView.SetSize(contentWidth, availableHeight)
 
@@ -92,6 +103,28 @@ func (d *toolConfirmationDialog) renderSeparator(contentWidth int) string {
 // renderOptions renders the Y/N/T/A decision row.
 func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
 	return RenderHelpKeys(contentWidth, toolconfirm.OptionsHelp(d.permissionPattern)...)
+}
+
+// renderMetadata renders the key/value annotations attached to the
+// confirmation prompt (static toolset metadata merged with any
+// permission_request hook contributions). Returns "" when there is none.
+// Keys are sorted so the display order is stable across renders.
+func (d *toolConfirmationDialog) renderMetadata(contentWidth int) string {
+	if len(d.msg.Metadata) == 0 {
+		return ""
+	}
+
+	header := styles.SecondaryStyle.Render("Metadata")
+	lines := []string{header}
+	for _, k := range slices.Sorted(maps.Keys(d.msg.Metadata)) {
+		key := styles.MutedStyle.Render(k + ": ")
+		val := styles.DialogContentStyle.Render(d.msg.Metadata[k])
+		lines = append(lines, fmt.Sprintf("  %s%s", key, val))
+	}
+
+	return styles.DialogContentStyle.Width(contentWidth).Render(
+		lipgloss.JoinVertical(lipgloss.Left, lines...),
+	)
 }
 
 // NewToolConfirmationDialog creates a new tool confirmation dialog
@@ -248,6 +281,10 @@ func (d *toolConfirmationDialog) View() string {
 
 	if argumentsSection != "" {
 		parts = append(parts, "", argumentsSection)
+	}
+
+	if metadata := d.renderMetadata(contentWidth); metadata != "" {
+		parts = append(parts, "", metadata)
 	}
 
 	// Confirmation prompt
