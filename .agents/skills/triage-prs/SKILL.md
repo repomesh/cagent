@@ -154,7 +154,9 @@ provider integrations → the matching `area/providers/*`; docs/markdown → `ar
 
 **Action (first time only):**
 
-1. Convert the PR to **draft**.
+1. Convert the PR to **draft** — *skip this step if the PR is already a draft*
+   (the `isDraft` field from the read pass tells you; converting an already-draft PR
+   is a no-op write and violates the "no-op means no call" budget rule).
 2. Add `status/needs-rebase` (in the same grouped label mutation as any Rule 1 labels).
 3. Post **one** comment addressed to the author, for example:
 
@@ -176,6 +178,9 @@ is now `MERGEABLE`.
 mutation).
 
 **Do not:**
+- trigger on `UNKNOWN` mergeable state — only `MERGEABLE` clears the label. If the
+  state is `UNKNOWN`, leave `status/needs-rebase` in place and re-evaluate next run
+  (see the [API budget](#api-budget) `UNKNOWN` rule); never treat `UNKNOWN` as resolved,
 - mark the PR ready for review (leave the draft/ready state to the author), and
 - post any comment.
 
@@ -191,7 +196,8 @@ For each in-scope PR, in one read-then-write cycle:
      already flagged (Rule 2),
    - `status/needs-rebase` to remove if flagged and now `MERGEABLE` (Rule 3).
 3. Apply **one grouped label mutation** for all label changes, plus at most one draft
-   conversion and at most one comment. Skip every PR that needs nothing.
+   conversion (only if newly drafting a not-already-draft PR) and at most one comment.
+   Skip every PR that needs nothing.
 
 ## Report
 
