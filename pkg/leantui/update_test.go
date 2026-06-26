@@ -110,7 +110,7 @@ func TestShiftTabCyclesThinkingLevel(t *testing.T) {
 
 	assert.Equal(t, 1, rt.cycleCalls)
 	assert.Equal(t, "high", m.status.thinking)
-	assert.Len(t, m.blocks, 1)
+	assert.Empty(t, m.blocks)
 }
 
 func TestShiftTabReportsUnsupportedThinkingLevel(t *testing.T) {

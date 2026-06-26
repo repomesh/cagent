@@ -140,7 +140,6 @@ func (m *model) handleCycleThinkingLevel(ctx context.Context) {
 		return
 	}
 	m.status.thinking = level.String()
-	m.addNotice("", "Thinking: "+level.String(), stMuted())
 }
 
 func (m *model) submit(ctx context.Context, text string) {
