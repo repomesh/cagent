@@ -2027,11 +2027,24 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// parseCtrlNumberKey checks if msg is ctrl+1 through ctrl+9 and returns the index (0-8), or -1 if not matched
+// parseCtrlNumberKey checks if msg is ctrl+1 through ctrl+9 and returns the index (0-8), or -1 if not matched.
+//
+// It inspects the key's modifiers and code directly rather than msg.String():
+// terminals with keyboard enhancements (e.g. the Kitty protocol) populate the
+// key's Text field, which makes String() return the bare digit ("1") instead of
+// "ctrl+1", silently breaking string-based matching.
 func parseCtrlNumberKey(msg tea.KeyPressMsg) int {
-	s := msg.String()
-	if len(s) == 6 && s[:5] == "ctrl+" && s[5] >= '1' && s[5] <= '9' {
-		return int(s[5] - '1')
+	if msg.Mod != tea.ModCtrl {
+		return -1
+	}
+	// Prefer BaseCode (the PC-101 layout key) when present so the shortcut
+	// works on international keyboards; fall back to Code otherwise.
+	code := msg.Code
+	if msg.BaseCode != 0 {
+		code = msg.BaseCode
+	}
+	if code >= '1' && code <= '9' {
+		return int(code - '1')
 	}
 	return -1
 }
