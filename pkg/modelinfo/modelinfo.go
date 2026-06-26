@@ -269,12 +269,26 @@ const DefaultAnthropicContextLimit = 200000
 
 // DefaultClaudeContextLimit returns the context window assumed for a Claude
 // model when models.dev has no entry for it — typically a model released
-// before the catalogue caught up. Claude Fable models expose a 1M-token
-// window; everything else falls back to the standard 200k floor.
+// before the catalogue caught up. The Claude Fable family and the Claude
+// Opus 4.6+ family expose a 1M-token window; everything else falls back to
+// the standard 200k floor.
+//
+// Bedrock-style identifiers such as "global.anthropic.claude-opus-4-8" are
+// recognised too.
 func DefaultClaudeContextLimit(modelID string) int64 {
 	m := normalize(modelID)
+	if bare, ok := bedrockClaudeModelName(m); ok {
+		m = bare
+	}
 	if m == "claude-fable" || strings.HasPrefix(m, "claude-fable-") {
 		return 1_000_000
+	}
+	// Claude Opus 4.6, 4.7 and 4.8 ship with a 1M-token window across the
+	// API, Bedrock and Vertex AI; only older Opus families use the 200k floor.
+	for _, prefix := range []string{"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"} {
+		if m == prefix || strings.HasPrefix(m, prefix+"-") {
+			return 1_000_000
+		}
 	}
 	return DefaultAnthropicContextLimit
 }
