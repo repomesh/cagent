@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	goruntime "runtime"
@@ -683,6 +684,13 @@ func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
 	// the resolved message — otherwise the message would be processed by
 	// the previous agent.
 	cmd, _, ok := m.application.LookupCommand(ctx, command)
+
+	// URL commands open the configured URL in the browser instead of sending
+	// a prompt to the agent.
+	if ok && cmd.URL != "" {
+		return m, core.CmdHandler(messages.OpenURLMsg{URL: m.expandURLPlaceholders(cmd.URL)})
+	}
+
 	resolved := m.application.ResolveCommand(ctx, command)
 
 	var cmds []tea.Cmd
@@ -713,6 +721,29 @@ func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// expandURLPlaceholders substitutes runtime placeholders in a command URL.
+// Currently only {{session_id}} is supported. The token is intentionally
+// distinct from the ${...} syntax used for config-time JS expansion, since
+// the session ID is only known at dispatch time.
+func (m *appModel) expandURLPlaceholders(url string) string {
+	var sessionID string
+	if m.application != nil {
+		if sess := m.application.Session(); sess != nil {
+			sessionID = sess.ID
+		}
+	}
+	return expandSessionPlaceholder(url, sessionID)
+}
+
+// expandSessionPlaceholder replaces the {{session_id}} token with sessionID,
+// URL-query-escaped so it can't break the URL or inject extra parameters.
+func expandSessionPlaceholder(url, sessionID string) string {
+	if !strings.Contains(url, "{{session_id}}") {
+		return url
+	}
+	return strings.ReplaceAll(url, "{{session_id}}", neturl.QueryEscape(sessionID))
 }
 
 func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {

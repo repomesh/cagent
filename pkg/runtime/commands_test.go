@@ -652,6 +652,24 @@ func TestLookupCommand_AgentTarget(t *testing.T) {
 	assert.Equal(t, "add a logout button", rest)
 }
 
+func TestLookupCommand_URLTarget(t *testing.T) {
+	t.Parallel()
+
+	rt := &mockRuntime{
+		commands: types.Commands{
+			"feedback": types.Command{
+				Description: "Open the feedback site",
+				URL:         "https://example.com/feedback",
+			},
+		},
+	}
+
+	cmd, _, ok := LookupCommand(t.Context(), rt, "/feedback")
+	assert.True(t, ok)
+	assert.Equal(t, "https://example.com/feedback", cmd.URL)
+	assert.Empty(t, cmd.Instruction)
+}
+
 func TestLookupCommand_NotACommand(t *testing.T) {
 	t.Parallel()
 
