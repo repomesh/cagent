@@ -411,6 +411,18 @@ func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, use
 		return nil, err
 	}
 
+	// Sibling-aware title so repeated forks of the same parent get
+	// (fork 1), (fork 2), … instead of colliding on (fork 1).
+	siblings, err := sm.sessionStore.GetSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	siblingTitles := make([]string, 0, len(siblings))
+	for _, s := range siblings {
+		siblingTitles = append(siblingTitles, s.Title)
+	}
+	forked.Title = session.NextForkTitle(parent.Title, siblingTitles)
+
 	if err := sm.sessionStore.AddSession(ctx, forked); err != nil {
 		return nil, err
 	}
