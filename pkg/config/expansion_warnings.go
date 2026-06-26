@@ -93,9 +93,9 @@ func warnExpansionMismatches(ctx context.Context, logger *slog.Logger, cfg *late
 				// directly to exec.Cmd without expansion, so neither syntax
 				// works there. Flag the JS form because that's the
 				// surprising silent failure (it looks template-y).
-				warnPathField(ctx, logger, shellLoc, "working_dir", sh.WorkingDir)
+				warnExecField(ctx, logger, shellLoc, "working_dir", sh.WorkingDir)
 				for k, v := range sh.Env {
-					warnPathField(ctx, logger, shellLoc, "env."+k, v)
+					warnExecField(ctx, logger, shellLoc, "env."+k, v)
 				}
 			}
 		}
@@ -162,9 +162,9 @@ func warnHooksConfig(ctx context.Context, logger *slog.Logger, agentName string,
 
 func warnHookDefinition(ctx context.Context, logger *slog.Logger, agentName, group string, idx int, hook *latest.HookDefinition) {
 	loc := "agent " + agentName + " hooks." + group + "[" + strconv.Itoa(idx) + "]"
-	warnPathField(ctx, logger, loc, "working_dir", hook.WorkingDir)
+	warnExecField(ctx, logger, loc, "working_dir", hook.WorkingDir)
 	for k, v := range hook.Env {
-		warnPathField(ctx, logger, loc, "env."+k, v)
+		warnExecField(ctx, logger, loc, "env."+k, v)
 	}
 }
 
@@ -199,18 +199,20 @@ func warnJSField(ctx context.Context, logger *slog.Logger, loc, field, value str
 	}
 }
 
-// warnPathField warns when a verbatim-exec field (ScriptShell/hook env and
+// warnExecField warns when a verbatim-exec field (ScriptShell/hook env and
 // working_dir) contains a `${env.X}` reference. Those fields are forwarded
-// directly to exec.Cmd without expansion, so the reference is passed through
-// literally. The variable name is captured but the surrounding value is not,
-// since env values frequently contain credentials.
-func warnPathField(ctx context.Context, logger *slog.Logger, loc, field, value string) {
+// directly to exec.Cmd without any expansion, so neither the JS-style
+// `${env.X}` nor the shell-style `${X}`/`$X` form is substituted; the
+// reference is passed through literally. The variable name is captured but
+// the surrounding value is not, since env values frequently contain
+// credentials.
+func warnExecField(ctx context.Context, logger *slog.Logger, loc, field, value string) {
 	if value == "" || !strings.Contains(value, "${env.") {
 		return
 	}
 	for _, m := range jsEnvRefStrict.FindAllStringSubmatch(value, -1) {
 		logger.WarnContext(ctx,
-			"JS-style ${env.X} in shell-expanded field will not be substituted; use ${X} or $X",
+			"${env.X} in this field will not be substituted; it is passed to the command unexpanded",
 			"location", loc,
 			"field", field,
 			"variable", m[1],
