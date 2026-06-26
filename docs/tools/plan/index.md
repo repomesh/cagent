@@ -29,7 +29,7 @@ No additional options are required. All agents that include `type: plan` in thei
 | ------------- | ------------------------------------------------------------------------------------------------- |
 | `write_plan`  | Create or update a shared plan by name. Replaces the entire plan content — read it first to preserve what you want to keep. Each write bumps the revision number. |
 | `read_plan`   | Read a shared plan by name, including its title, content, author, and revision number.            |
-| `list_plans`  | List all shared plans with their name, title, author, and revision.                               |
+| `list_plans`  | List all shared plans with their name, title, author, revision, and last-updated timestamp. |
 | `delete_plan` | Delete a shared plan by name.                                                                     |
 
 ### Plan Names
