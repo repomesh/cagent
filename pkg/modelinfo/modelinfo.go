@@ -3,7 +3,7 @@
 //
 // Some providers must specialize their behavior depending on the underlying
 // model: pick OpenAI's Responses API for o-series and gpt-5, switch Claude
-// Opus 4.6+ to adaptive thinking, use level-based thinking for Gemini 3+,
+// Opus 4.6/4.7/4.8 to adaptive thinking, use level-based thinking for Gemini 3+,
 // auto-enable interleaved thinking for any Claude model regardless of host
 // (Anthropic, Bedrock, Vertex AI Model Garden), decide which attachment MIME
 // types can be forwarded natively, and so on.
@@ -84,6 +84,29 @@ func AlwaysReasons(modelID string) bool {
 	return isOSeries(normalize(modelID))
 }
 
+// claudeOpus46To48Prefixes lists the bare Claude Opus model families that share
+// two behaviors: they reject token-based thinking ([RejectsTokenThinking]) and
+// expose a 1M-token context window ([DefaultClaudeContextLimit]). Kept in one
+// place so a new affected Opus version is added to both predicates at once.
+var claudeOpus46To48Prefixes = []string{"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
+
+// isClaudeOpus46To48 reports whether modelID names a Claude Opus 4.6, 4.7 or
+// 4.8 model (or a dated variant like claude-opus-4-7-20251101). Bedrock-style
+// identifiers such as "global.anthropic.claude-opus-4-8" are recognised by
+// stripping the inference-profile prefix first.
+func isClaudeOpus46To48(modelID string) bool {
+	m := normalize(modelID)
+	if bare, ok := bedrockClaudeModelName(m); ok {
+		m = bare
+	}
+	for _, prefix := range claudeOpus46To48Prefixes {
+		if m == prefix || strings.HasPrefix(m, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}
+
 // RejectsTokenThinking reports whether an Anthropic Claude model rejects
 // `thinking.type=enabled` (token-based extended thinking) and instead requires
 // `thinking.type=adaptive`.
@@ -96,16 +119,7 @@ func AlwaysReasons(modelID string) bool {
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func RejectsTokenThinking(modelID string) bool {
-	m := normalize(modelID)
-	if bare, ok := bedrockClaudeModelName(m); ok {
-		m = bare
-	}
-	for _, prefix := range []string{"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"} {
-		if m == prefix || strings.HasPrefix(m, prefix+"-") {
-			return true
-		}
-	}
-	return false
+	return isClaudeOpus46To48(modelID)
 }
 
 // UsesThinkingLevel reports whether a Google Gemini model uses level-based
@@ -269,11 +283,23 @@ const DefaultAnthropicContextLimit = 200000
 
 // DefaultClaudeContextLimit returns the context window assumed for a Claude
 // model when models.dev has no entry for it — typically a model released
-// before the catalogue caught up. Claude Fable models expose a 1M-token
-// window; everything else falls back to the standard 200k floor.
+// before the catalogue caught up. The Claude Fable family and the Claude
+// Opus 4.6, 4.7 and 4.8 families expose a 1M-token window; everything else
+// falls back to the standard 200k floor.
+//
+// Bedrock-style identifiers such as "global.anthropic.claude-opus-4-8" are
+// recognised too.
 func DefaultClaudeContextLimit(modelID string) int64 {
 	m := normalize(modelID)
+	if bare, ok := bedrockClaudeModelName(m); ok {
+		m = bare
+	}
 	if m == "claude-fable" || strings.HasPrefix(m, "claude-fable-") {
+		return 1_000_000
+	}
+	// Claude Opus 4.6, 4.7 and 4.8 ship with a 1M-token window across the
+	// API, Bedrock and Vertex AI; only older Opus families use the 200k floor.
+	if isClaudeOpus46To48(m) {
 		return 1_000_000
 	}
 	return DefaultAnthropicContextLimit
