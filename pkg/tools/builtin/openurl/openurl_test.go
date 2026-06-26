@@ -108,6 +108,42 @@ func TestOpenURL_OpenerNotCanceled(t *testing.T) {
 	assert.NoError(t, sawErr, "opener must receive a non-canceled context")
 }
 
+// TestOpenURL_RejectsUnsafeURLs locks in the security guard at the tool
+// boundary using the REAL default opener (browser.Open). Flag-like and
+// schemeless URLs — including ones produced by ${env.X} expansion, which is
+// this package's responsibility — must be rejected before any OS launcher
+// (open / xdg-open / rundll32) is invoked, preventing argument injection.
+// The rejection path errors out in validation before a process is spawned,
+// so exercising the real opener here never launches a browser.
+func TestOpenURL_RejectsUnsafeURLs(t *testing.T) {
+	t.Parallel()
+
+	expander := js.NewJsExpander(environment.NewMapEnvProvider(map[string]string{
+		"FLAG": "-malicious",
+	}))
+
+	for _, tc := range []struct {
+		name string
+		url  string
+		opts []Option
+	}{
+		{"leading dash flag", "-foo", nil},
+		{"double dash flag", "--version", nil},
+		{"schemeless host", "example.com", nil},
+		{"empty", "", nil},
+		{"env expands to flag", "${env.FLAG}", []Option{WithExpander(expander)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tool := New(tc.url, tc.opts...)
+			result, err := tool.callTool(t.Context(), struct{}{})
+			require.NoError(t, err)
+			assert.True(t, result.IsError, "unsafe URL %q must be rejected", tc.url)
+		})
+	}
+}
+
 func TestCreateToolSet_RequiresURL(t *testing.T) {
 	t.Parallel()
 

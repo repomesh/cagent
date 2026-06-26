@@ -105,11 +105,17 @@ func (t *ToolSet) callTool(ctx context.Context, _ struct{}) (*tools.ToolCallResu
 		url = t.expander.Expand(ctx, url, nil)
 	}
 
-	// The platform launcher (open / xdg-open / rundll32) hands the URL to the
-	// OS and exits immediately; the OS then opens the browser asynchronously.
-	// exec.CommandContext kills the launcher when its context is canceled, so
-	// we strip cancellation (while keeping trace/values) to prevent a finishing
-	// or interrupted agent turn from killing the launcher mid-handoff.
+	// browser.Open validates the (post-expansion) URL before launching: it
+	// requires a non-empty scheme and rejects flag-like values (leading "-"),
+	// which would otherwise be parsed as options by the OS launcher
+	// (open / xdg-open / rundll32) — argument injection. Both static and
+	// env-expanded URLs go through this guard. See pkg/browser.validate.
+	//
+	// The launcher hands the URL to the OS and exits immediately; the OS then
+	// opens the browser asynchronously. exec.CommandContext kills the launcher
+	// when its context is canceled, so we strip cancellation (while keeping
+	// trace/values) to prevent a finishing or interrupted agent turn from
+	// killing the launcher mid-handoff.
 	if err := t.open(context.WithoutCancel(ctx), url); err != nil {
 		return tools.ResultError(fmt.Sprintf("failed to open %s: %v", url, err)), nil
 	}
