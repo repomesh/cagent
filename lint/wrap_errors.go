@@ -5,7 +5,6 @@ import (
 	"go/token"
 	"go/types"
 	"strconv"
-	"strings"
 
 	"github.com/dgageot/rubocop-go/cop"
 )
@@ -45,7 +44,7 @@ var WrapErrors = &cop.Func{
 			if !ok {
 				return
 			}
-			if strings.Contains(format, "%w") {
+			if hasWrapVerb(format) {
 				return // already wrapping at least one error
 			}
 			for _, arg := range call.Args[1:] {
@@ -56,6 +55,26 @@ var WrapErrors = &cop.Func{
 			}
 		})
 	},
+}
+
+// hasWrapVerb reports whether format contains a real %w verb, ignoring
+// escaped percent signs. A naive strings.Contains(format, "%w") would treat
+// the literal "%%w" (an escaped percent followed by the letter w) as a
+// wrapping verb and silence a genuinely unwrapped error.
+func hasWrapVerb(format string) bool {
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' || i+1 >= len(format) {
+			continue
+		}
+		if format[i+1] == '%' {
+			i++ // consume the escaped percent so "%%w" is not read as a verb
+			continue
+		}
+		if format[i+1] == 'w' {
+			return true
+		}
+	}
+	return false
 }
 
 // stringLit returns the unquoted value of a string-literal expression.

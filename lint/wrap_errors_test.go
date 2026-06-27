@@ -26,6 +26,18 @@ func f(err error) error { return fmt.Errorf("oops: %w", err) }
 	assert.Empty(t, coptest.RunTyped(t, WrapErrors, src))
 }
 
+// An escaped percent followed by the letter w ("%%w") is a literal, not a
+// wrapping verb: a real unwrapped error in the same call must still be flagged.
+func TestWrapErrorsFlagsEscapedPercentW(t *testing.T) {
+	src := `package p
+import "fmt"
+func f(err error) error { return fmt.Errorf("done 50%%w: %v", err) }
+`
+	offenses := coptest.RunTyped(t, WrapErrors, src)
+	require.Len(t, offenses, 1)
+	assert.Equal(t, "Lint/WrapErrors", offenses[0].CopName)
+}
+
 func TestWrapErrorsIgnoresNonErrorArgs(t *testing.T) {
 	src := `package p
 import "fmt"
