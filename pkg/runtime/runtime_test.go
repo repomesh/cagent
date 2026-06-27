@@ -889,6 +889,52 @@ func TestNewRuntime_InvalidCurrentAgentError(t *testing.T) {
 	require.Contains(t, err.Error(), "agent not found: other (available agents: root)")
 }
 
+// TestNewRuntime_ModelStorePrecedence pins the resolution order for the
+// runtime's models.dev store: an explicit WithModelStore wins; otherwise a
+// store carried on the ModelSwitcherConfig is adopted (this is how the team
+// loader shares the catalog it already warmed); otherwise the runtime builds
+// its own lazy store. Sharing the warmed store is what keeps the first /model
+// open from re-paying the multi-MB catalog parse.
+func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
+	t.Parallel()
+
+	newTeam := func() *team.Team {
+		root := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/m"}))
+		return team.New(team.WithAgents(root))
+	}
+
+	t.Run("explicit WithModelStore wins over ModelSwitcherConfig", func(t *testing.T) {
+		t.Parallel()
+		explicit := &mockCatalogStore{}
+		cfgStore := &mockCatalogStore{}
+		rt, err := NewLocalRuntime(newTeam(),
+			WithModelStore(explicit),
+			WithModelSwitcherConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}),
+		)
+		require.NoError(t, err)
+		assert.Same(t, explicit, rt.modelsStore)
+	})
+
+	t.Run("ModelSwitcherConfig store is adopted when no explicit store", func(t *testing.T) {
+		t.Parallel()
+		cfgStore := &mockCatalogStore{}
+		rt, err := NewLocalRuntime(newTeam(),
+			WithModelSwitcherConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}),
+		)
+		require.NoError(t, err)
+		assert.Same(t, cfgStore, rt.modelsStore)
+	})
+
+	t.Run("falls back to lazy store when neither is set", func(t *testing.T) {
+		t.Parallel()
+		rt, err := NewLocalRuntime(newTeam(),
+			WithModelSwitcherConfig(&ModelSwitcherConfig{}),
+		)
+		require.NoError(t, err)
+		assert.IsType(t, &lazyModelStore{}, rt.modelsStore)
+	})
+}
+
 func TestProcessToolCalls_UnknownTool_ReturnsErrorResponse(t *testing.T) {
 	root := agent.New("root", "You are a test agent", agent.WithModel(&mockProvider{}))
 	tm := team.New(team.WithAgents(root))

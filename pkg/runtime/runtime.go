@@ -626,7 +626,15 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	}
 
 	if r.modelsStore == nil {
-		r.modelsStore = &lazyModelStore{}
+		// Precedence: an explicit WithModelStore (already set above) wins; then a
+		// store carried on the ModelSwitcherConfig (the team loader shares the
+		// one it warmed so the first /model open skips the cold catalog parse);
+		// otherwise a lazy store constructed on first use.
+		if r.modelSwitcherCfg != nil && r.modelSwitcherCfg.ModelsStore != nil {
+			r.modelsStore = r.modelSwitcherCfg.ModelsStore
+		} else {
+			r.modelsStore = &lazyModelStore{}
+		}
 	}
 
 	// Validate that the current agent exists and has a model

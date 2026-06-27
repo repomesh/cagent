@@ -126,6 +126,11 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 		ProviderRegistry:   loaded.ProviderRegistry,
 		AgentDefaultModels: loaded.AgentDefaultModels,
 	}
+	// Reuse the models.dev store the team loader already warmed so model-
+	// metadata lookups don't re-pay the cold catalog parse.
+	if store, storeErr := runConfig.ModelsDevStore(); storeErr == nil {
+		modelSwitcher.ModelsStore = store
+	}
 
 	runtimeOpts := []dagentruntime.Opt{
 		dagentruntime.WithModelSwitcherConfig(modelSwitcher),

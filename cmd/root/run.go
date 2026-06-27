@@ -714,6 +714,15 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
 	}
+	// Share the models.dev store the team loader already warmed (parsing the
+	// multi-MB catalog once) so the runtime doesn't build its own cold store
+	// and re-pay the parse on the first /model open. On error we leave it unset
+	// and the runtime falls back to its lazy default.
+	if store, err := runConfig.ModelsDevStore(); err == nil {
+		modelSwitcherCfg.ModelsStore = store
+	} else {
+		slog.Warn("Failed to obtain shared models.dev store; runtime will use its own", "error", err)
+	}
 	opts := []runtime.Opt{
 		runtime.WithSessionStore(sessStore),
 		runtime.WithCurrentAgent(agentName),

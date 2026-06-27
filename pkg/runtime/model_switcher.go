@@ -165,6 +165,13 @@ type ModelSwitcherConfig struct {
 	ProviderRegistry *provider.Registry
 	// AgentDefaultModels maps agent names to their configured default model references
 	AgentDefaultModels map[string]string
+	// ModelsStore is the models.dev catalog store used for the picker's
+	// pricing/context/modality metadata and the catalog listing. When set, the
+	// runtime adopts it instead of building its own (cold) lazy store, so a
+	// store the team loader already warmed is reused. Optional: a nil store
+	// falls back to the lazy default. An explicit WithModelStore takes
+	// precedence over this field.
+	ModelsStore ModelStore
 }
 
 // SetAgentModel implements [Runtime.SetAgentModel] for LocalRuntime.

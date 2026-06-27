@@ -952,6 +952,13 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
 	}
+	// Reuse the models.dev store the team loader already warmed so the
+	// /api/sessions/:id/models picker doesn't re-pay the cold catalog parse.
+	if store, storeErr := rc.ModelsDevStore(); storeErr == nil {
+		modelSwitcherCfg.ModelsStore = store
+	} else {
+		slog.WarnContext(ctx, "Failed to obtain shared models.dev store; runtime will use its own", "error", storeErr)
+	}
 
 	opts := []runtime.Opt{
 		runtime.WithCurrentAgent(currentAgent),
