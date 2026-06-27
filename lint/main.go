@@ -30,6 +30,7 @@ var cops = []cop.Cop{
 	HookBuiltinsRegistered,
 	SlogContextual,
 	ConstructorPurity,
+	ConstructorCommandExec,
 }
 
 func main() {
