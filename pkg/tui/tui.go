@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/help"
@@ -66,6 +67,7 @@ const (
 // Model is the top-level TUI model that wraps the chat page.
 type appModel struct {
 	shutdownDone <-chan struct{}
+	cleanupOnce  sync.Once
 
 	supervisor *supervisor.Supervisor
 	tabBar     *tabbar.TabBar
@@ -528,10 +530,7 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 	return func() tea.Msg {
 		go func() {
 			<-m.shutdownDone
-			if m.tuiStore != nil {
-				_ = m.tuiStore.Close()
-			}
-			m.supervisor.Shutdown()
+			m.cleanupManagedResources()
 		}()
 		return nil
 	}
@@ -2546,6 +2545,20 @@ var exitFunc = os.Exit
 
 var shutdownTimeout = 5 * time.Second
 
+// cleanupManagedResources shuts down resources owned by the top-level TUI
+// lifecycle. It is safe to call from both the Bubble Tea event loop (normal
+// exit) and the context watcher (external cancellation).
+func (m *appModel) cleanupManagedResources() {
+	m.cleanupOnce.Do(func() {
+		if m.tuiStore != nil {
+			_ = m.tuiStore.Close()
+		}
+		if m.supervisor != nil {
+			m.supervisor.Shutdown()
+		}
+	})
+}
+
 // cleanupAll cleans up all sessions, editors, and resources.
 func (m *appModel) cleanupAll() {
 	m.transcriber.Stop()
@@ -2553,6 +2566,7 @@ func (m *appModel) cleanupAll() {
 	for _, ed := range m.editors {
 		ed.Cleanup()
 	}
+	m.cleanupManagedResources()
 
 	// Safety net: bubbletea's renderer can deadlock on shutdown if stdout
 	// is wedged — the final flush re-acquires the mutex that the still

@@ -18,8 +18,8 @@ import (
 // functions in net and net/http are flagged. Method calls such as .Do and
 // .Accept are out of scope for now.
 //
-// Calls inside nested function literals are ignored because the closure body runs
-// when that closure is invoked, not while the constructor itself executes.
+// Calls inside nested function literals are ignored unless the literal is
+// immediately invoked as part of constructor execution.
 //
 // Annotate an intentional case with //rubocop:disable Lint/ConstructorNetworkIO.
 var ConstructorNetworkIO = &cop.Func{

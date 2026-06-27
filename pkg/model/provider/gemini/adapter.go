@@ -170,9 +170,22 @@ func (g *StreamAdapter) send(res result) bool {
 
 // Recv gets the next Gemini content chunk
 func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
+	select {
+	case <-g.done:
+		return chat.MessageStreamResponse{}, io.EOF
+	default:
+	}
+
 	g.start()
-	res, ok := <-g.ch
-	if !ok {
+
+	var res result
+	select {
+	case r, ok := <-g.ch:
+		if !ok {
+			return chat.MessageStreamResponse{}, io.EOF
+		}
+		res = r
+	case <-g.done:
 		return chat.MessageStreamResponse{}, io.EOF
 	}
 

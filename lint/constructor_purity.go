@@ -25,8 +25,9 @@ import (
 // as part of construction are flagged. A `go` nested inside a function
 // literal that the constructor merely returns or stores runs when that
 // closure is later invoked, not at construction time, so it is intentionally
-// ignored. Goroutines started indirectly through a helper call are out of
-// scope — catching those would require call-graph analysis.
+// ignored. Immediately-invoked function literals are inspected because they
+// do run during construction. Goroutines started indirectly through a helper
+// call are out of scope — catching those would require call-graph analysis.
 //
 // Annotate an intentional case with //rubocop:disable Lint/ConstructorPurity.
 var ConstructorPurity = &cop.Func{
@@ -68,18 +69,62 @@ func isConstructorName(name string) bool {
 	return name == "New" || (len(name) > 3 && name[:3] == "New" && name[3] >= 'A' && name[3] <= 'Z')
 }
 
-// forEachConstructionGoStmt invokes fn for every `go` statement that runs as
-// part of executing body, skipping any nested inside a function literal: a
-// closure's body runs when the closure is called, not when the constructor
-// returns it.
-func forEachConstructionGoStmt(body *ast.BlockStmt, fn func(*ast.GoStmt)) {
-	ast.Inspect(body, func(n ast.Node) bool {
+// inspectConstructionBody walks body and visits nodes that run as part of
+// executing the constructor. Nested function literals are skipped unless they
+// are immediately invoked (func() { ... })(), in which case their body runs
+// during construction and is inspected.
+func inspectConstructionBody(body *ast.BlockStmt, visit func(ast.Node)) {
+	if body == nil {
+		return
+	}
+	inspectConstructionNode(body, visit)
+}
+
+func inspectConstructionNode(root ast.Node, visit func(ast.Node)) {
+	ast.Inspect(root, func(n ast.Node) bool {
 		switch s := n.(type) {
+		case nil:
+			return true
 		case *ast.FuncLit:
 			return false
 		case *ast.GoStmt:
-			fn(s)
+			visit(s)
+			return false
+		case *ast.CallExpr:
+			visit(s)
+			if fl := calledFuncLit(s.Fun); fl != nil {
+				for _, arg := range s.Args {
+					inspectConstructionNode(arg, visit)
+				}
+				inspectConstructionNode(fl.Body, visit)
+				return false
+			}
+		default:
+			visit(s)
 		}
 		return true
+	})
+}
+
+func calledFuncLit(expr ast.Expr) *ast.FuncLit {
+	for {
+		switch e := expr.(type) {
+		case *ast.FuncLit:
+			return e
+		case *ast.ParenExpr:
+			expr = e.X
+		default:
+			return nil
+		}
+	}
+}
+
+// forEachConstructionGoStmt invokes fn for every `go` statement that runs as
+// part of executing body.
+func forEachConstructionGoStmt(body *ast.BlockStmt, fn func(*ast.GoStmt)) {
+	inspectConstructionBody(body, func(n ast.Node) {
+		if g, ok := n.(*ast.GoStmt); ok {
+			fn(g)
+		}
 	})
 }

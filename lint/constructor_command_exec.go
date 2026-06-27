@@ -21,8 +21,8 @@ import (
 // broad at first and may catch non-exec methods with those names; keep any
 // suppression close to the intentional constructor side effect.
 //
-// Calls inside nested function literals are ignored because the closure body runs
-// when that closure is invoked, not while the constructor itself executes.
+// Calls inside nested function literals are ignored unless the literal is
+// immediately invoked as part of constructor execution.
 //
 // Annotate an intentional case with //rubocop:disable Lint/ConstructorCommandExec.
 var ConstructorCommandExec = &cop.Func{
@@ -96,15 +96,11 @@ func commandExecutionMethodCall(call *ast.CallExpr) (string, bool) {
 }
 
 // forEachConstructionCallExpr invokes fn for every call expression that runs as
-// part of executing body, skipping nested function literals.
+// part of executing body.
 func forEachConstructionCallExpr(body *ast.BlockStmt, fn func(*ast.CallExpr)) {
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch s := n.(type) {
-		case *ast.FuncLit:
-			return false
-		case *ast.CallExpr:
-			fn(s)
+	inspectConstructionBody(body, func(n ast.Node) {
+		if call, ok := n.(*ast.CallExpr); ok {
+			fn(call)
 		}
-		return true
 	})
 }
