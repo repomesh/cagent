@@ -339,6 +339,13 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 		session.WithToolsApproved(sessionTemplate.ToolsApproved),
 	)
 
+	// Carry a caller-supplied title (from the POST /api/sessions request body)
+	// into the new session. When set, RunSession's needsTitle check skips the
+	// LLM title-generation call and re-emits this title instead.
+	if title := strings.TrimSpace(sessionTemplate.Title); title != "" {
+		opts = append(opts, session.WithTitle(title))
+	}
+
 	if wd := strings.TrimSpace(sessionTemplate.WorkingDir); wd != "" {
 		absWd, err := filepath.Abs(wd)
 		if err != nil {
