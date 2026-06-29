@@ -658,3 +658,32 @@ func TestApplyStoredOverrides(t *testing.T) {
 		})
 	})
 }
+
+func TestSessionManager_CreateSession_CarriesTitle(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	t.Run("non-empty title is preserved on the created session", func(t *testing.T) {
+		t.Parallel()
+		created, err := sm.CreateSession(ctx, &session.Session{Title: "harbor-watch"})
+		require.NoError(t, err)
+		assert.Equal(t, "harbor-watch", created.Title)
+	})
+
+	t.Run("whitespace-only title is not set (TrimSpace guard)", func(t *testing.T) {
+		t.Parallel()
+		created, err := sm.CreateSession(ctx, &session.Session{Title: "   "})
+		require.NoError(t, err)
+		assert.Empty(t, created.Title)
+	})
+
+	t.Run("empty title leaves session title unset", func(t *testing.T) {
+		t.Parallel()
+		created, err := sm.CreateSession(ctx, &session.Session{})
+		require.NoError(t, err)
+		assert.Empty(t, created.Title)
+	})
+}
