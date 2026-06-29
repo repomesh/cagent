@@ -29,6 +29,11 @@ type providerConfig struct {
 // cloudProviders defines the available cloud providers in priority order.
 // The first provider with a configured API key will be selected by AutoModelConfig.
 // DMR is always appended as the final fallback (not listed here).
+//
+// opencode-zen is ordered before opencode-go because both share OPENCODE_API_KEY:
+// when the key is set, Zen wins auto-selection. A subscriber who only uses Go
+// should set the provider explicitly (e.g. `--model opencode-go/...`) rather than
+// relying on auto; see docs/providers/opencode-go for details.
 var cloudProviders = []providerConfig{
 	{"anthropic", []string{"ANTHROPIC_API_KEY"}, "ANTHROPIC_API_KEY"},
 	{"openai", []string{"OPENAI_API_KEY"}, "OPENAI_API_KEY"},

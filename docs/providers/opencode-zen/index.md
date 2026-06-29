@@ -177,7 +177,7 @@ To use a Google model:
 providers:
   opencode-zen-gemini:
     provider: google
-    base_url: https://opencode.ai/zen/v1
+    base_url: https://opencode.ai/zen
     token_key: OPENCODE_API_KEY
 
 models:
@@ -202,7 +202,7 @@ OpenCode Zen is implemented as a built-in alias in docker-agent:
 
 The same API key works for both OpenCode Go and OpenCode Zen — they are part of the same platform. Zen uses a pay-per-use billing model, while Go uses a fixed subscription.
 
-For Anthropic-compatible models, docker-agent uses a custom provider pointing to the Anthropic client at `https://opencode.ai/zen` with the same token. For Google models, a custom provider points to the Google client at `https://opencode.ai/zen/v1`.
+For Anthropic-compatible models, docker-agent uses a custom provider pointing to the Anthropic client at `https://opencode.ai/zen` with the same token. For Google models, a custom provider points to the Google client at `https://opencode.ai/zen` (the Google SDK appends its own `/v1beta/models/...` path segment).
 
 ### Differences from OpenCode Go
 

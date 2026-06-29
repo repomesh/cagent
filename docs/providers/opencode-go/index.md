@@ -154,7 +154,7 @@ agents:
 OpenCode Go subscriptions include the following limits:
 
 - **5-hour rolling limit** — $12 of usage
-- **Weekly limit** — $30 of usage  
+- **Weekly limit** — $30 of usage
 - **Monthly limit** — $60 of usage
 
 Limits are defined as dollar values. More expensive models allow fewer requests per limit period. You can also [add Zen balance](https://opencode.ai/auth) to continue usage beyond the limits.
