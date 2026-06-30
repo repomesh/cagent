@@ -100,6 +100,28 @@ func TestImplicitUserMessageAt_IsImplicitAndUsesClock(t *testing.T) {
 	}
 }
 
+func TestWithMessageOptions_UseInjectedClock(t *testing.T) {
+	t.Parallel()
+	fixed := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
+	want := fixed.Format(time.RFC3339)
+
+	s := New(
+		WithClock(fixedClock(fixed)),
+		WithUserMessage("user"),
+		WithSystemMessage("system"),
+		WithImplicitUserMessage("implicit"),
+	)
+
+	if len(s.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(s.Messages))
+	}
+	for i, item := range s.Messages {
+		if item.Message.Message.CreatedAt != want {
+			t.Errorf("Messages[%d].CreatedAt = %q, want %q", i, item.Message.Message.CreatedAt, want)
+		}
+	}
+}
+
 func TestDuration_DeterministicWithExplicitTimestamps(t *testing.T) {
 	t.Parallel()
 	t0 := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)

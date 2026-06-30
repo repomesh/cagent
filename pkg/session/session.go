@@ -718,19 +718,19 @@ type Opt func(s *Session)
 
 func WithUserMessage(content string) Opt {
 	return func(s *Session) {
-		s.AddMessage(UserMessage(content))
+		s.AddMessage(UserMessageAt(s.now(), content))
 	}
 }
 
 func WithImplicitUserMessage(content string) Opt {
 	return func(s *Session) {
-		s.AddMessage(ImplicitUserMessage(content))
+		s.AddMessage(ImplicitUserMessageAt(s.now(), content))
 	}
 }
 
 func WithSystemMessage(content string) Opt {
 	return func(s *Session) {
-		s.AddMessage(SystemMessage(content))
+		s.AddMessage(SystemMessageAt(s.now(), content))
 	}
 }
 
@@ -831,10 +831,13 @@ func WithID(id string) Opt {
 	}
 }
 
-// WithClock injects the time source used for the session's CreatedAt and for
-// timestamping messages it generates (summaries, compaction input). Primarily
-// for tests that need a deterministic clock; production code leaves it unset
-// and falls back to time.Now.
+// WithClock injects the time source used for the session's CreatedAt, for
+// timestamping messages it generates (summaries, compaction input), and for
+// messages added through WithUserMessage/WithSystemMessage/
+// WithImplicitUserMessage. Because those message options read the clock when
+// they run, WithClock must precede them in the option list (the natural
+// ordering). Primarily for tests that need a deterministic clock; production
+// code leaves it unset and falls back to time.Now.
 func WithClock(now func() time.Time) Opt {
 	return func(s *Session) {
 		s.clock = now
