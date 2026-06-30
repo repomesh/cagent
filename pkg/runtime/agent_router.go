@@ -10,8 +10,8 @@ import (
 )
 
 // agentRouter owns the runtime's notion of "which agent is currently
-// driving the conversation". It is a thin wrapper around a team plus a
-// mutex-guarded current-agent name, but pulling it out of *LocalRuntime
+// driving the conversation". It is a thin wrapper around a team plus an
+// atomically-updated current-agent name, but pulling it out of *LocalRuntime
 // turns five methods (CurrentAgentName, setCurrentAgent, SetCurrentAgent,
 // CurrentAgent, resolveSessionAgent) that all touched the same two raw
 // fields into delegations to one type, and lets tests exercise the
