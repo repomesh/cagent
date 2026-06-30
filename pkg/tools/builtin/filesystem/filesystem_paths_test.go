@@ -373,6 +373,8 @@ func TestExpandPathToken(t *testing.T) {
 		{name: "relative", token: "src", want: filepath.Join(wd, "src")},
 		{name: "env-var", token: "$MY_VAR", want: "/var/data"},
 		{name: "env-var-braces", token: "${MY_VAR}", want: "/var/data"},
+		{name: "env-var-js-alias", token: "${env.MY_VAR}", want: "/var/data"},
+		{name: "env-var-js-alias-inside-tilde", token: "~/${env.MY_VAR}", want: filepath.Join(homeDir, "var", "data")},
 		{name: "env-var-inside-tilde", token: "~/${MY_VAR}", want: filepath.Join(homeDir, "var", "data")},
 		{name: "empty", token: "", wantErr: "empty"},
 		{name: "whitespace", token: "   ", wantErr: "empty"},
