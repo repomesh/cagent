@@ -24,7 +24,7 @@ type mockRuntime struct {
 func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) {
 	return m.tools, nil
 }
-func (m *mockRuntime) CurrentAgentName() string                           { return "test" }
+func (m *mockRuntime) CurrentAgentName(context.Context) string            { return "test" }
 func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
 func (m *mockRuntime) RestartToolset(context.Context, string) error       { return nil }
 func (m *mockRuntime) CurrentAgentInfo(context.Context) CurrentAgentInfo {
@@ -35,7 +35,7 @@ func (m *mockRuntime) CurrentAgentInfo(context.Context) CurrentAgentInfo {
 	}
 }
 
-func (m *mockRuntime) SetCurrentAgent(string) error {
+func (m *mockRuntime) SetCurrentAgent(context.Context, string) error {
 	return nil
 }
 func (m *mockRuntime) EmitStartupInfo(context.Context, *session.Session, EventSink) {}
@@ -75,13 +75,13 @@ func (m *mockRuntime) ExecuteMCPPrompt(context.Context, string, map[string]strin
 func (m *mockRuntime) UpdateSessionTitle(context.Context, *session.Session, string) error {
 	return nil
 }
-func (m *mockRuntime) TitleGenerator() *sessiontitle.Generator             { return nil }
-func (m *mockRuntime) Close() error                                        { return nil }
-func (m *mockRuntime) Steer(QueuedMessage) error                           { return nil }
-func (m *mockRuntime) FollowUp(QueuedMessage) error                        { return nil }
-func (m *mockRuntime) QueueStatus() QueueStatus                            { return QueueStatus{} }
-func (m *mockRuntime) TogglePause(context.Context) (bool, error)           { return false, nil }
-func (m *mockRuntime) SetAgentModel(context.Context, string, string) error { return nil }
+func (m *mockRuntime) TitleGenerator(context.Context) *sessiontitle.Generator { return nil }
+func (m *mockRuntime) Close() error                                           { return nil }
+func (m *mockRuntime) Steer(context.Context, QueuedMessage) error             { return nil }
+func (m *mockRuntime) FollowUp(context.Context, QueuedMessage) error          { return nil }
+func (m *mockRuntime) QueueStatus() QueueStatus                               { return QueueStatus{} }
+func (m *mockRuntime) TogglePause(context.Context) (bool, error)              { return false, nil }
+func (m *mockRuntime) SetAgentModel(context.Context, string, string) error    { return nil }
 func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Level, error) {
 	return "", ErrUnsupported
 }
@@ -650,6 +650,24 @@ func TestLookupCommand_AgentTarget(t *testing.T) {
 	assert.Equal(t, "planner", cmd.Agent)
 	assert.Empty(t, cmd.Instruction)
 	assert.Equal(t, "add a logout button", rest)
+}
+
+func TestLookupCommand_URLTarget(t *testing.T) {
+	t.Parallel()
+
+	rt := &mockRuntime{
+		commands: types.Commands{
+			"feedback": types.Command{
+				Description: "Open the feedback site",
+				URL:         "https://example.com/feedback",
+			},
+		},
+	}
+
+	cmd, _, ok := LookupCommand(t.Context(), rt, "/feedback")
+	assert.True(t, ok)
+	assert.Equal(t, "https://example.com/feedback", cmd.URL)
+	assert.Empty(t, cmd.Instruction)
 }
 
 func TestLookupCommand_NotACommand(t *testing.T) {

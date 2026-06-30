@@ -42,7 +42,7 @@ All endpoints are under the `/api` prefix.
 | Method   | Path                                | Description                                             |
 | -------- | ----------------------------------- | ------------------------------------------------------- |
 | `GET`    | `/api/sessions`                     | List all sessions                                       |
-| `POST`   | `/api/sessions`                     | Create a new session                                    |
+| `POST`   | `/api/sessions`                     | Create a new session. Accepts an optional `title` field — when set, it is stored and LLM title generation is skipped. |
 | `GET`    | `/api/sessions/:id`                 | Get a session by ID (messages, tokens, permissions)     |
 | `GET`    | `/api/sessions/:id/status`          | Lightweight runtime state (streaming, title, agent, tokens). Requires an attached runtime. |
 | `GET`    | `/api/sessions/:id/snapshot`        | Full state in one call (stored fields + runtime state + `last_event_seq`) for gapless resync — see [Reconnecting without gaps](#reconnecting-without-gaps). |
@@ -157,6 +157,12 @@ $ curl http://localhost:8080/api/agents
 $ curl -X POST http://localhost:8080/api/sessions \
   -H "Content-Type: application/json" -d '{}'
 {"id":"abc-123","title":"","created_at":"..."}
+
+# Create a session with a pre-supplied title (skips LLM title generation)
+$ curl -X POST http://localhost:8080/api/sessions \
+  -H "Content-Type: application/json" -d '{"title":"deploy check"}'
+{"id":"def-456","title":"deploy check","created_at":"..."}
+# title preserved; LLM title generation skipped
 
 # 3. Run the agent with a message
 $ curl -N -X POST http://localhost:8080/api/sessions/abc-123/agent/my-agent \
@@ -308,27 +314,26 @@ as soon as any session is ready.
 **Request body:**
 
 ```json
-{ "message_index": 2 }
+{ "user_message_index": 1 }
 ```
 
-`message_index` is a **0-based index** into the flat, user-visible message list (the same shape `GET /api/sessions/:id` returns in `messages`). The fork includes messages `[0, message_index)` — the message at `message_index` is **excluded**, so clients can prefill it into their chat input for the user to edit and resubmit.
+`user_message_index` is a **0-based ordinal** that counts only user-role messages in the parent's flat, user-visible message list. The targeted user message is **excluded** from the fork so clients can prefill it into their chat input for the user to edit and resubmit.
 
 **Example:**
 
 ```bash
-# Fork a session before message index 4 (the user message the user wants to rewrite)
+# Fork a session before the second user message (ordinal 1)
 $ curl -X POST http://localhost:8080/api/sessions/$SID/fork \
   -H 'Content-Type: application/json' \
-  -d '{"message_index": 4}'
+  -d '{"user_message_index": 1}'
 # Returns: api.SessionResponse for the new forked session
 # New session title: "<parent title> (fork 1)", "(fork 2)", etc.
 ```
 
 **Validation:**
 
-- `message_index` must point to a **user-role message**; pointing at an assistant turn returns `400 Bad Request`.
-- Out-of-range indices return `400 Bad Request`.
-- An index that falls inside a sub-session returns `400 Bad Request`. A sub-session is a nested session created when a multi-agent config delegates work to a child agent; its messages are embedded within the parent session's message list and cannot be used as a fork boundary.
+- Out-of-range ordinals (negative, or at/past the user-message count) return `400 Bad Request`.
+- An ordinal that resolves to a user message inside a sub-session returns `400 Bad Request`. A sub-session is a nested session created when a multi-agent config delegates work to a child agent; its messages are embedded within the parent session's message list and cannot be used as a fork boundary.
 
 ## Idempotent follow-ups
 

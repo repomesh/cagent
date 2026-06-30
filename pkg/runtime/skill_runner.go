@@ -40,7 +40,7 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 		return errResult, nil
 	}
 
-	ca := r.CurrentAgentName()
+	ca := r.currentAgentName()
 
 	// Open the span before any pre-delegation work so model resolution
 	// (inside WithAgentModel) is recorded under runtime.run_skill rather
@@ -112,6 +112,8 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 			ToolsApproved:       sess.ToolsApproved,
 			NonInteractive:      sess.NonInteractive,
 			ExcludedTools:       []string{skills.ToolNameRunSkill},
+			AllowedTools:        prepared.AllowedTools,
+			ExtraToolSets:       prepared.ToolSets,
 		},
 	})
 }

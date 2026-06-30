@@ -160,7 +160,14 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 // resolved from models.dev: DMR is not a models.dev provider, so a store lookup
 // would always miss and silently drop image/PDF attachments.
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
-	openaiMessages := oaistream.ConvertMessagesWithCaps(ctx, messages, c.attachmentCaps)
+	// Attachment capabilities default to those declared in provider_opts; an
+	// explicit config capabilities override, when present, takes precedence
+	// (issue #2741).
+	caps := c.attachmentCaps
+	if override := c.CapsOverride(); override != nil {
+		caps = modelinfo.CapsWith(override.Image, override.PDF)
+	}
+	openaiMessages := oaistream.ConvertMessagesWithCaps(ctx, messages, caps)
 	return oaistream.MergeConsecutiveMessages(openaiMessages)
 }
 

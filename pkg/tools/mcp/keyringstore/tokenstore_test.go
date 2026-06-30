@@ -26,6 +26,7 @@ func newTestStore(t *testing.T) (*KeyringTokenStore, keyring.Keyring) {
 }
 
 func TestKeyringTokenStore_RoundTrip(t *testing.T) {
+	t.Parallel()
 	// Use in-memory store to avoid triggering macOS keychain permission dialogs
 	// or failing in CI environments without a keyring.
 	store := mcp.NewInMemoryTokenStore()
@@ -71,6 +72,7 @@ func TestKeyringTokenStore_RoundTrip(t *testing.T) {
 }
 
 func TestKeyringTokenStore_JSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	// Verify that mcp.OAuthToken serializes correctly (important for keyring storage)
 	token := &mcp.OAuthToken{
 		AccessToken:  "at",
@@ -97,6 +99,7 @@ func TestKeyringTokenStore_JSONRoundTrip(t *testing.T) {
 }
 
 func TestKeyringTokenStore_RemoveNonExistent(t *testing.T) {
+	t.Parallel()
 	store := mcp.NewInMemoryTokenStore()
 	if err := store.RemoveToken("https://nonexistent.example.com"); err != nil {
 		t.Fatalf("RemoveToken for non-existent key should not error: %v", err)
@@ -107,6 +110,7 @@ func TestKeyringTokenStore_RemoveNonExistent(t *testing.T) {
 // store instance are readable by a fresh instance pointed at the same
 // keyring + file — i.e. they survive a process restart.
 func TestEncryptedStore_PersistsAcrossReload(t *testing.T) {
+	t.Parallel()
 	store, ring := newTestStore(t)
 
 	urls := []string{
@@ -164,6 +168,7 @@ func (k *countingKeyring) Set(item keyring.Item) error {
 // in-memory cache or the encrypted file. This is what avoids repeated
 // keychain prompts on macOS.
 func TestEncryptedStore_ReadsTouchKeyringOnce(t *testing.T) {
+	t.Parallel()
 	urls := []string{
 		"https://server-a.example/mcp",
 		"https://server-b.example/mcp",
@@ -206,6 +211,7 @@ func TestEncryptedStore_ReadsTouchKeyringOnce(t *testing.T) {
 // a process reuse the cached encryption key rather than re-fetching it from
 // the keyring on every persist.
 func TestEncryptedStore_WritesTouchKeyringOnce(t *testing.T) {
+	t.Parallel()
 	ring := newCountingKeyring()
 	path := filepath.Join(t.TempDir(), tokenFileName)
 	store := newKeyringTokenStore(ring, path)
@@ -230,6 +236,7 @@ func TestEncryptedStore_WritesTouchKeyringOnce(t *testing.T) {
 }
 
 func TestEncryptedStore_GetMissDoesNotCreateKeyringItem(t *testing.T) {
+	t.Parallel()
 	ring := keyring.NewArrayKeyring(nil)
 	store := newKeyringTokenStore(ring, filepath.Join(t.TempDir(), tokenFileName))
 
@@ -247,6 +254,7 @@ func TestEncryptedStore_GetMissDoesNotCreateKeyringItem(t *testing.T) {
 }
 
 func TestEncryptedStore_CrossProcessStoresMerge(t *testing.T) {
+	t.Parallel()
 	ring := keyring.NewArrayKeyring(nil)
 	path := filepath.Join(t.TempDir(), tokenFileName)
 
@@ -288,6 +296,7 @@ func TestEncryptedStore_CrossProcessStoresMerge(t *testing.T) {
 // encryption key. The tokens themselves live in the file, so macOS only
 // ever asks for permission on a single ACL.
 func TestEncryptedStore_KeyringHoldsOnlyTheKey(t *testing.T) {
+	t.Parallel()
 	store, ring := newTestStore(t)
 
 	for _, url := range []string{
@@ -312,6 +321,7 @@ func TestEncryptedStore_KeyringHoldsOnlyTheKey(t *testing.T) {
 // TestEncryptedStore_FileIsNotPlaintext guards against accidentally writing
 // tokens in the clear: the access token must not be findable in the file.
 func TestEncryptedStore_FileIsNotPlaintext(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 
 	const secret = "super-secret-access-token-value"
@@ -334,6 +344,7 @@ func TestEncryptedStore_FileIsNotPlaintext(t *testing.T) {
 // TestEncryptedStore_FilePermissions checks the token file is created with
 // owner-only permissions.
 func TestEncryptedStore_FilePermissions(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	if err := store.StoreToken("https://a.example/mcp", &mcp.OAuthToken{AccessToken: "x"}); err != nil {
 		t.Fatalf("StoreToken: %v", err)
@@ -351,6 +362,7 @@ func TestEncryptedStore_FilePermissions(t *testing.T) {
 // stored in the single keyring bundle are folded into the encrypted file
 // on first load and the legacy keyring entry is cleaned up.
 func TestEncryptedStore_LegacyBundleMigration(t *testing.T) {
+	t.Parallel()
 	ring := keyring.NewArrayKeyring(nil)
 	path := filepath.Join(t.TempDir(), tokenFileName)
 
@@ -396,6 +408,7 @@ func TestEncryptedStore_LegacyBundleMigration(t *testing.T) {
 // TestEncryptedStore_LegacyPerTokenMigration confirms the oldest layout —
 // one keyring item per resource URL — is migrated and cleaned up.
 func TestEncryptedStore_LegacyPerTokenMigration(t *testing.T) {
+	t.Parallel()
 	ring := keyring.NewArrayKeyring(nil)
 	path := filepath.Join(t.TempDir(), tokenFileName)
 
@@ -436,6 +449,7 @@ func TestEncryptedStore_LegacyPerTokenMigration(t *testing.T) {
 }
 
 func TestEncryptedStore_LegacyBundleWinsOverPerTokenMigration(t *testing.T) {
+	t.Parallel()
 	ring := keyring.NewArrayKeyring(nil)
 	path := filepath.Join(t.TempDir(), tokenFileName)
 	const url = "https://legacy.example/mcp"
@@ -476,6 +490,7 @@ func seedLegacyToken(t *testing.T, ring keyring.Keyring, url string, tok *mcp.OA
 // migration must NOT delete the legacy keyring entries, so a later process
 // can retry instead of leaving the user with no tokens at all.
 func TestEncryptedStore_MigrationKeepsLegacyOnPersistFailure(t *testing.T) {
+	t.Parallel()
 	ring := keyring.NewArrayKeyring(nil)
 
 	bundle := map[string]*mcp.OAuthToken{
@@ -509,6 +524,7 @@ func TestEncryptedStore_MigrationKeepsLegacyOnPersistFailure(t *testing.T) {
 }
 
 func TestEncryptedStore_StoreRefusesAfterUnreadableFile(t *testing.T) {
+	t.Parallel()
 	ring := keyring.NewArrayKeyring(nil)
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
@@ -525,6 +541,7 @@ func TestEncryptedStore_StoreRefusesAfterUnreadableFile(t *testing.T) {
 // the file without it, so subsequent reads no longer see it even after the
 // in-memory cache is dropped.
 func TestEncryptedStore_RemovePersists(t *testing.T) {
+	t.Parallel()
 	store, ring := newTestStore(t)
 
 	url := "https://to-remove.example/mcp"
@@ -543,6 +560,7 @@ func TestEncryptedStore_RemovePersists(t *testing.T) {
 // TestEncryptedStore_CorruptFile ensures a corrupt token file doesn't crash
 // callers — we treat it as empty and let the OAuth flow re-populate.
 func TestEncryptedStore_CorruptFile(t *testing.T) {
+	t.Parallel()
 	store, ring := newTestStore(t)
 
 	// Seed the encryption key by writing a real token first, then clobber
@@ -572,6 +590,7 @@ func TestEncryptedStore_CorruptFile(t *testing.T) {
 // TestEncryptedStore_ListReturnsAllEntries exercises the list helper used by
 // `agent debug oauth list`.
 func TestEncryptedStore_ListReturnsAllEntries(t *testing.T) {
+	t.Parallel()
 	store, ring := newTestStore(t)
 
 	if err := store.StoreToken("https://a.example/mcp", &mcp.OAuthToken{AccessToken: "a"}); err != nil {
@@ -620,6 +639,7 @@ func (*failingKeyring) GetMetadata(string) (keyring.Metadata, error) { return ke
 // the cache as loaded eagerly so a denied access surfaces once per process,
 // not once per token operation.
 func TestEncryptedStore_KeyringFailureIsCachedOnce(t *testing.T) {
+	t.Parallel()
 	ring := &failingKeyring{getErr: errors.New("simulated denied access")}
 	store := newKeyringTokenStore(ring, filepath.Join(t.TempDir(), tokenFileName))
 
@@ -631,46 +651,262 @@ func TestEncryptedStore_KeyringFailureIsCachedOnce(t *testing.T) {
 	}
 }
 
-// TestKeyringTokenStore_ConcurrentAccess verifies that concurrent reads and
-// writes to the token store are safe and don't cause data races.
+// TestSecureBackendsExcludeGenericFile guards the fix for the sandbox failure:
+// the generic "file" and "pass" backends must never be in the secure list, or
+// openKeyring would silently return a half-broken backend instead of an error
+// the caller can fall back from.
+func TestSecureBackendsExcludeGenericFile(t *testing.T) {
+	t.Parallel()
+	for _, b := range secureBackends {
+		if b == keyring.FileBackend || b == keyring.PassBackend {
+			t.Fatalf("secureBackends must not contain the generic %q backend", b)
+		}
+	}
+}
+
+// TestOpenFileKeyring_Persists verifies the file-backed fallback used inside a
+// sandbox actually persists an item to disk and survives a reopen, so tokens
+// don't vanish between runs.
+func TestOpenFileKeyring_Persists(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), fallbackKeyringDir)
+
+	ring, err := openFileKeyring(dir)
+	if err != nil {
+		t.Fatalf("openFileKeyring: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: encryptionKeyItem, Data: []byte("secret")}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	reopened, err := openFileKeyring(dir)
+	if err != nil {
+		t.Fatalf("reopen openFileKeyring: %v", err)
+	}
+	item, err := reopened.Get(encryptionKeyItem)
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if string(item.Data) != "secret" {
+		t.Errorf("Data = %q, want %q", item.Data, "secret")
+	}
+}
+
+// TestFileKeyringBackedStore_PersistsAcrossReload exercises the full fallback
+// path a sandbox would take: a KeyringTokenStore backed by the file keyring
+// must round-trip tokens across a simulated process restart.
+func TestFileKeyringBackedStore_PersistsAcrossReload(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	keyringDir := filepath.Join(root, fallbackKeyringDir)
+	tokenPath := filepath.Join(root, tokenFileName)
+
+	ring, err := openFileKeyring(keyringDir)
+	if err != nil {
+		t.Fatalf("openFileKeyring: %v", err)
+	}
+
+	const url = "https://mcp.notion.com/sse"
+	if err := newKeyringTokenStore(ring, tokenPath).StoreToken(url, &mcp.OAuthToken{AccessToken: "notion-token"}); err != nil {
+		t.Fatalf("StoreToken: %v", err)
+	}
+
+	reopened, err := openFileKeyring(keyringDir)
+	if err != nil {
+		t.Fatalf("reopen openFileKeyring: %v", err)
+	}
+	got, err := newKeyringTokenStore(reopened, tokenPath).GetToken(url)
+	if err != nil {
+		t.Fatalf("GetToken after reload: %v", err)
+	}
+	if got.AccessToken != "notion-token" {
+		t.Errorf("AccessToken = %q, want %q", got.AccessToken, "notion-token")
+	}
+}
+
+// TestFileKeyringPassphrase_RandomAndPersistent verifies the file-keyring
+// passphrase is generated randomly on first use, persisted with owner-only
+// permissions, and reused on subsequent calls — so it is unique per install
+// rather than a hardcoded constant baked into the binary.
+func TestFileKeyringPassphrase_RandomAndPersistent(t *testing.T) {
+	t.Parallel()
+	dirA := filepath.Join(t.TempDir(), fallbackKeyringDir)
+	if err := ensurePrivateDir(dirA); err != nil {
+		t.Fatalf("ensurePrivateDir: %v", err)
+	}
+
+	first, err := fileKeyringPassphrase(dirA)
+	if err != nil {
+		t.Fatalf("fileKeyringPassphrase: %v", err)
+	}
+	if first == "" {
+		t.Fatal("passphrase must not be empty")
+	}
+
+	// A second call in the same dir must reuse the persisted passphrase.
+	second, err := fileKeyringPassphrase(dirA)
+	if err != nil {
+		t.Fatalf("fileKeyringPassphrase (reuse): %v", err)
+	}
+	if second != first {
+		t.Errorf("passphrase changed across calls: %q != %q", second, first)
+	}
+
+	// The passphrase file must be owner-only.
+	info, err := os.Stat(filepath.Join(dirA, fallbackPassphraseFile))
+	if err != nil {
+		t.Fatalf("Stat passphrase file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("passphrase file permissions = %o, want 0600", perm)
+	}
+
+	// A different install dir must get a different passphrase.
+	dirB := filepath.Join(t.TempDir(), fallbackKeyringDir)
+	if err := ensurePrivateDir(dirB); err != nil {
+		t.Fatalf("ensurePrivateDir: %v", err)
+	}
+	other, err := fileKeyringPassphrase(dirB)
+	if err != nil {
+		t.Fatalf("fileKeyringPassphrase (dirB): %v", err)
+	}
+	if other == first {
+		t.Error("two independent installs must not share a passphrase")
+	}
+}
+
+// TestBuildDefaultStore_PrefersNativeKeyring verifies the native keyring is
+// used when it opens successfully, without ever consulting the fallback.
+func TestBuildDefaultStore_PrefersNativeKeyring(t *testing.T) {
+	t.Parallel()
+	native := keyring.NewArrayKeyring(nil)
+	fallbackCalled := false
+
+	store := buildDefaultStore(t.TempDir(),
+		func() (keyring.Keyring, error) { return native, nil },
+		func(string) (keyring.Keyring, error) {
+			fallbackCalled = true
+			return nil, errors.New("should not be called")
+		},
+	)
+
+	if _, ok := store.(*KeyringTokenStore); !ok {
+		t.Fatalf("expected *KeyringTokenStore, got %T", store)
+	}
+	if fallbackCalled {
+		t.Error("fallback keyring must not be opened when the native keyring succeeds")
+	}
+}
+
+// TestBuildDefaultStore_FallsBackToFileKeyring verifies that when the native
+// keyring is unavailable (as inside a sandbox), the file-backed keyring is
+// used — the regression path for issue #3037.
+func TestBuildDefaultStore_FallsBackToFileKeyring(t *testing.T) {
+	t.Parallel()
+	fallback := keyring.NewArrayKeyring(nil)
+	var gotDir string
+
+	store := buildDefaultStore(t.TempDir(),
+		func() (keyring.Keyring, error) { return nil, errors.New("no OS keyring") },
+		func(dir string) (keyring.Keyring, error) {
+			gotDir = dir
+			return fallback, nil
+		},
+	)
+
+	ks, ok := store.(*KeyringTokenStore)
+	if !ok {
+		t.Fatalf("expected *KeyringTokenStore, got %T", store)
+	}
+	if ks.ring != fallback {
+		t.Error("expected the store to be backed by the fallback keyring")
+	}
+	if filepath.Base(gotDir) != fallbackKeyringDir {
+		t.Errorf("fallback dir = %q, want basename %q", gotDir, fallbackKeyringDir)
+	}
+}
+
+// TestBuildDefaultStore_FallsBackToMemory verifies the last-resort in-memory
+// store is used when neither keyring backend can be opened.
+func TestBuildDefaultStore_FallsBackToMemory(t *testing.T) {
+	t.Parallel()
+	store := buildDefaultStore(t.TempDir(),
+		func() (keyring.Keyring, error) { return nil, errors.New("no OS keyring") },
+		func(string) (keyring.Keyring, error) { return nil, errors.New("no file keyring") },
+	)
+
+	if _, ok := store.(*KeyringTokenStore); ok {
+		t.Fatal("expected in-memory store, got *KeyringTokenStore")
+	}
+}
+
+// TestBuildDefaultStore_NilRingFallsThrough guards against a (nil, nil) return
+// from an opener: a nil keyring must be treated like an error and fall through
+// to the next tier rather than constructing a store that panics on first use.
+func TestBuildDefaultStore_NilRingFallsThrough(t *testing.T) {
+	t.Parallel()
+	fallback := keyring.NewArrayKeyring(nil)
+
+	// Native opener returns (nil, nil): must not be used, must fall through.
+	store := buildDefaultStore(t.TempDir(),
+		func() (keyring.Keyring, error) { return nil, nil },
+		func(string) (keyring.Keyring, error) { return fallback, nil },
+	)
+	ks, ok := store.(*KeyringTokenStore)
+	if !ok {
+		t.Fatalf("expected *KeyringTokenStore, got %T", store)
+	}
+	if ks.ring != fallback {
+		t.Error("a nil native ring must fall through to the fallback keyring")
+	}
+
+	// Both openers return (nil, nil): must land on the in-memory store.
+	memStore := buildDefaultStore(t.TempDir(),
+		func() (keyring.Keyring, error) { return nil, nil },
+		func(string) (keyring.Keyring, error) { return nil, nil },
+	)
+	if _, ok := memStore.(*KeyringTokenStore); ok {
+		t.Fatal("a nil fallback ring must fall through to the in-memory store")
+	}
+}
+
+// TestKeyringTokenStore_ConcurrentAccess guards the store's thread-safety
+// contract: its mutex protects the cache/key/loaded fields against
+// concurrent GetToken/StoreToken/RemoveToken calls. The op count is kept
+// small on purpose — the race detector flags an unsynchronised access on
+// the first overlapping pair, so a few overlapping iterations exercise the
+// contract just as well as thousands while keeping the test fast. Run under
+// -race for it to be meaningful.
 func TestKeyringTokenStore_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 
-	const numGoroutines = 10
-	const numOperations = 100
+	const numGoroutines = 3
+	const numOperations = 10
 
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines * 3) // readers, writers, removers
 
-	// Concurrent readers
 	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id%3)
+			url := fmt.Sprintf("https://server-%d.example/mcp", id)
 			for range numOperations {
 				_, _ = store.GetToken(url)
 			}
 		}(i)
-	}
-
-	// Concurrent writers
-	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id%3)
+			url := fmt.Sprintf("https://server-%d.example/mcp", id)
 			for j := range numOperations {
 				_ = store.StoreToken(url, &mcp.OAuthToken{
 					AccessToken: fmt.Sprintf("token-%d-%d", id, j),
 				})
 			}
 		}(i)
-	}
-
-	// Concurrent removers
-	for i := range numGoroutines {
 		go func(id int) {
 			defer wg.Done()
-			url := fmt.Sprintf("https://server-%d.example/mcp", id%3)
+			url := fmt.Sprintf("https://server-%d.example/mcp", id)
 			for range numOperations {
 				_ = store.RemoveToken(url)
 			}
@@ -679,7 +915,6 @@ func TestKeyringTokenStore_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 
-	// Verify the store is still in a consistent state
-	entries := store.ListOAuthTokens()
-	t.Logf("After concurrent access: %d tokens remain", len(entries))
+	// The store must still be usable after the concurrent churn.
+	_ = store.ListOAuthTokens()
 }

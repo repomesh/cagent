@@ -6,31 +6,37 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // bareModel builds a model with just the pieces buildLines needs, so the
 // rendering pipeline can be exercised without a real App or terminal.
-func bareModel(width, height int) *model {
+func bareModel(height int) *model {
+	const width = 80
+
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 	return &model{
-		width:     width,
-		height:    height,
-		r:         newRenderer(w, width, height),
-		editor:    newEditor("type here"),
-		ac:        newAutocomplete(),
-		tools:     map[string]*toolView{},
-		toolStart: map[string]time.Time{},
-		status:    statusData{workingDir: "/tmp/project"},
+		width:        width,
+		height:       height,
+		r:            newRenderer(w, width, height),
+		editor:       newEditor("type here"),
+		ac:           newAutocomplete(),
+		tools:        map[string]*toolView{},
+		status:       statusData{workingDir: "/tmp/project"},
+		sessionState: service.NewSessionState(nil),
 	}
 }
 
 func TestStreamingGrowthScrollsAndRendersMarkdown(t *testing.T) {
-	m := bareModel(80, 10)
+	t.Parallel()
+	m := bareModel(10)
 	m.busy = true
 	m.render() // initial frame
 
@@ -55,7 +61,8 @@ func TestStreamingGrowthScrollsAndRendersMarkdown(t *testing.T) {
 }
 
 func TestBuildLinesPlacesCursorOnInput(t *testing.T) {
-	m := bareModel(80, 24)
+	t.Parallel()
+	m := bareModel(24)
 	m.editor.setText("hello")
 
 	lines, cursorLine, cursorCol := m.buildLines()
@@ -66,8 +73,40 @@ func TestBuildLinesPlacesCursorOnInput(t *testing.T) {
 }
 
 func TestConversationLinesShowsSpinnerWhenBusy(t *testing.T) {
-	m := bareModel(80, 24)
+	t.Parallel()
+	m := bareModel(24)
 	m.busy = true
 	lines := m.conversationLines(80)
 	assert.Contains(t, strings.Join(lines, ""), "Working")
+}
+
+func TestToolConfirmationReplacesRunningTool(t *testing.T) {
+	t.Parallel()
+	m := bareModel(24)
+	tv := shellToolView(tuitypes.ToolStatusRunning)
+	m.upsertTool("root", tv.message.ToolCall, tv.message.ToolDefinition, tuitypes.ToolStatusRunning)
+	require.Len(t, m.toolOrder, 1)
+
+	event := runtime.ToolCallConfirmation(tv.message.ToolCall, tv.message.ToolDefinition, "root", nil)
+	m.handleEvent(t.Context(), event)
+
+	assert.Empty(t, m.toolOrder)
+	assert.Empty(t, m.tools)
+	require.NotNil(t, m.confirm)
+}
+
+func TestBuildLinesConfirmCursorSitsOnOptions(t *testing.T) {
+	t.Parallel()
+	m := bareModel(24)
+	m.confirm = &confirmState{
+		tool:     "shell",
+		toolView: *shellToolView(tuitypes.ToolStatusConfirmation),
+	}
+
+	lines, cursorLine, cursorCol := m.buildLines()
+	require.NotEmpty(t, lines)
+	require.GreaterOrEqual(t, cursorLine, 0)
+	require.Less(t, cursorLine, len(lines))
+	assert.Contains(t, lines[cursorLine], "[y] yes")
+	assert.Positive(t, cursorCol)
 }

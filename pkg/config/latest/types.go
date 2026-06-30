@@ -16,7 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 )
 
-const Version = "10"
+const Version = "11"
 
 // Config represents the entire configuration file
 type Config struct {
@@ -424,6 +424,74 @@ type HarnessConfig struct {
 	Thinking bool `json:"thinking,omitempty"`
 }
 
+// InstructionFiles holds one or more instruction file paths. It accepts both
+// a single string (`instruction_file: prompt.md`) and a list of strings
+// (`instruction_file: [intro.md, rules.md]`) in YAML and JSON. Empty strings
+// are dropped on decode, so `instruction_file: ""` and `instruction_file: [""]`
+// both decode to nil (treated as absent). A single path is marshalled back as
+// a scalar, and an empty value is omitted entirely, so configs round-trip
+// unchanged.
+type InstructionFiles []string
+
+func (f *InstructionFiles) unmarshal(scalar, list func(any) error) error {
+	var one string
+	if err := scalar(&one); err == nil {
+		*f = nonEmptyInstructionFiles(one)
+		return nil
+	}
+	var many []string
+	if err := list(&many); err != nil {
+		return errors.New("instruction_file must be a string or a list of strings")
+	}
+	*f = nonEmptyInstructionFiles(many...)
+	return nil
+}
+
+// nonEmptyInstructionFiles returns the given paths with empty strings dropped,
+// or nil when nothing remains. This keeps the list form consistent with the
+// scalar form, where `instruction_file: ""` is treated as absent rather than a
+// path to resolve.
+func nonEmptyInstructionFiles(paths ...string) InstructionFiles {
+	var out InstructionFiles
+	for _, p := range paths {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (f *InstructionFiles) UnmarshalYAML(unmarshal func(any) error) error {
+	return f.unmarshal(unmarshal, unmarshal)
+}
+
+func (f InstructionFiles) MarshalYAML() (any, error) {
+	if len(f) == 0 {
+		return nil, nil
+	}
+	if len(f) == 1 {
+		return f[0], nil
+	}
+	return []string(f), nil
+}
+
+func (f *InstructionFiles) UnmarshalJSON(data []byte) error {
+	return f.unmarshal(
+		func(v any) error { return json.Unmarshal(data, v) },
+		func(v any) error { return json.Unmarshal(data, v) },
+	)
+}
+
+func (f InstructionFiles) MarshalJSON() ([]byte, error) {
+	if len(f) == 0 {
+		return json.Marshal(nil)
+	}
+	if len(f) == 1 {
+		return json.Marshal(f[0])
+	}
+	return json.Marshal([]string(f))
+}
+
 // AgentConfig represents a single agent configuration
 type AgentConfig struct {
 	Name           string
@@ -433,9 +501,21 @@ type AgentConfig struct {
 	WelcomeMessage string          `json:"welcome_message,omitempty"`
 	Toolsets       []Toolset       `json:"toolsets,omitempty"`
 	Instruction    string          `json:"instruction,omitempty"`
-	Harness        *HarnessConfig  `json:"harness,omitempty"`
-	SubAgents      []string        `json:"sub_agents,omitempty"`
-	Handoffs       []string        `json:"handoffs,omitempty"`
+	// InstructionFile names one or more files, relative to the config file's
+	// directory, whose contents are loaded into Instruction when the config is
+	// loaded. It accepts either a single path (`instruction_file: prompt.md`)
+	// or a list (`instruction_file: [intro.md, rules.md]`); when several files
+	// are given their contents are concatenated in order, separated by a blank
+	// line. It keeps long behavioral prompts out of the YAML, letting
+	// infrastructure configuration and instruction content evolve in separate
+	// files. Mutually exclusive with Instruction. Only file-based config
+	// sources are supported (not OCI/URL/bytes sources, which have no directory
+	// to resolve against). The field is cleared once resolved so the in-memory
+	// config stays self-contained (see config.Load).
+	InstructionFile InstructionFiles `json:"instruction_file,omitempty" yaml:"instruction_file,omitempty"`
+	Harness         *HarnessConfig   `json:"harness,omitempty"`
+	SubAgents       []string         `json:"sub_agents,omitempty"`
+	Handoffs        []string         `json:"handoffs,omitempty"`
 	// ForceHandoff names an agent that unconditionally receives the
 	// conversation whenever this agent produces a final response,
 	// bypassing the LLM's tool-calling entirely. Unlike Handoffs (which
@@ -548,8 +628,17 @@ type InlineSkill struct {
 	// Ignored for non-fork skills.
 	Model string `json:"model,omitempty" yaml:"model,omitempty"`
 	// AllowedTools optionally records the tools the skill expects. It mirrors
-	// the SKILL.md `allowed-tools` field.
+	// the SKILL.md `allowed-tools` field. For a fork-mode skill it is enforced
+	// as an allow-list over the parent agent's inherited tools while the skill
+	// runs in its sub-session: only tools whose names match an entry are kept.
+	// Entries are matched with filepath.Match-style globs (e.g. "read_*"),
+	// falling back to an exact match. Ignored for non-fork skills.
 	AllowedTools []string `json:"allowed_tools,omitempty" yaml:"allowed_tools,omitempty"`
+	// Toolsets lists names of reusable toolset definitions (from the top-level
+	// `toolsets` section) to expose to the skill while it runs in its fork
+	// sub-session, in addition to the parent agent's tools. Ignored for
+	// non-fork skills.
+	Toolsets []string `json:"toolsets,omitempty" yaml:"toolsets,omitempty"`
 }
 
 // SkillsConfig controls skill discovery sources, filtering, and inline
@@ -775,6 +864,34 @@ func (a *AgentConfig) RedactSecretsEnabled() bool {
 	return *a.RedactSecrets
 }
 
+// SaferShellEnabled reports whether any of the agent's shell toolsets
+// has opted into destructive-command detection. The flag lives on the
+// toolset (not the agent), so this aggregates across all of an agent's
+// toolsets — one match anywhere flips the agent-level flag the runtime
+// uses to register the safer_shell builtin.
+//
+// Off by default: a missing pointer or explicit `safer: false` does
+// not enable the feature. Only an explicit `safer: true` on at least
+// one shell toolset switches it on.
+//
+// Multi-toolset note: when an agent declares more than one shell
+// toolset and only some opt in, the safer_shell builtin still runs
+// for every shell call on this agent (it filters by ToolName, not
+// by toolset identity). Author one shell toolset per agent when you
+// need toolset-scoped granularity.
+func (a *AgentConfig) SaferShellEnabled() bool {
+	if a == nil {
+		return false
+	}
+	for i := range a.Toolsets {
+		ts := &a.Toolsets[i]
+		if ts.Type == "shell" && ts.Safer != nil && *ts.Safer {
+			return true
+		}
+	}
+	return false
+}
+
 // GetFallbackRetries returns the fallback retries from the config.
 func (a *AgentConfig) GetFallbackRetries() int {
 	if a.Fallback != nil {
@@ -848,6 +965,27 @@ type ModelConfig struct {
 	// model name from the models section or an inline "provider/model" spec.
 	// When empty, title generation reuses the agent's own model.
 	TitleModel string `json:"title_model,omitempty"`
+	// Capabilities optionally declares the model's attachment capabilities,
+	// overriding the automatic models.dev-based detection. See [CapabilitiesConfig].
+	Capabilities *CapabilitiesConfig `json:"capabilities,omitempty"`
+}
+
+// CapabilitiesConfig declares a model's attachment capabilities explicitly,
+// overriding docker-agent's automatic detection (which queries the models.dev
+// catalogue). It exists for models the catalogue does not describe correctly:
+// custom OpenAI-compatible providers, local models (e.g. Ollama), and model
+// versions that have been dropped from the catalogue. Without it, such models
+// fall back to text-only and their image/PDF attachments are silently dropped.
+//
+// When set, the declared flags are authoritative and no models.dev lookup is
+// performed. When nil (the default), capabilities are detected from models.dev.
+// The declared flags must match what the underlying endpoint actually accepts;
+// claiming an unsupported modality results in a provider-side API error.
+type CapabilitiesConfig struct {
+	// Image reports whether the model accepts image attachments.
+	Image bool `json:"image,omitempty"`
+	// PDF reports whether the model accepts PDF (application/pdf) attachments.
+	PDF bool `json:"pdf,omitempty"`
 }
 
 // IsFirstAvailable reports whether this model is a first-available selector
@@ -881,6 +1019,37 @@ func (m *ModelConfig) DisplayOrModel() string {
 func (m *ModelConfig) UnloadAPI() string {
 	v, _ := m.ProviderOpts["unload_api"].(string)
 	return v
+}
+
+// ExpandEnv rewrites the model config's value-bearing string fields in place by
+// passing each through expand, which substitutes ${env.X} / ${X} references
+// against the runtime environment. Only fields that carry a literal value the
+// provider sends or dials are expanded: model (the model identifier) and
+// base_url (the endpoint). token_key is intentionally excluded because it names
+// an environment variable rather than holding a value, and reference-only
+// fields (provider, routing/fallback specs) are resolved before a provider is
+// built.
+//
+// expand is injected so this package keeps no dependency on pkg/environment,
+// which already depends on the config packages. A nil expand or an empty field
+// is a no-op; the first expansion error is returned and stops processing.
+// Addresses issue #2261, where ${env.X} in a model's model field reached the
+// provider verbatim instead of being substituted.
+func (m *ModelConfig) ExpandEnv(expand func(string) (string, error)) error {
+	if m == nil || expand == nil {
+		return nil
+	}
+	for _, field := range []*string{&m.Model, &m.BaseURL} {
+		if *field == "" {
+			continue
+		}
+		expanded, err := expand(*field)
+		if err != nil {
+			return err
+		}
+		*field = expanded
+	}
+	return nil
 }
 
 // FlexibleModelConfig wraps ModelConfig to support both shorthand and full syntax.
@@ -938,7 +1107,8 @@ func (f *FlexibleModelConfig) isShorthandOnly() bool {
 		f.TaskBudget == nil &&
 		len(f.Routing) == 0 &&
 		f.FirstAvailable == nil &&
-		f.TitleModel == ""
+		f.TitleModel == "" &&
+		f.Capabilities == nil
 }
 
 // RoutingRule defines a single routing rule for model selection.
@@ -1136,6 +1306,17 @@ type Toolset struct {
 	// is declined automatically and sudo fails as before. No effect on Windows.
 	// nil/false keeps the default behaviour (sudo has no TTY and fails fast).
 	SudoAskpass *bool `json:"sudo_askpass,omitempty" yaml:"sudo_askpass,omitempty"`
+
+	// For the `shell` toolset — opt in to destructive-command detection.
+	// When enabled, the agent auto-registers the safer_shell builtin under
+	// pre_tool_use with preempt_yolo:true. Destructive commands (rm -rf, docker
+	// volume rm, mkfs, …) get an Ask verdict carrying a blast-radius
+	// classification; known-safe reads (ls, git status, docker ps, …)
+	// flow through silently; everything else asks with blast_radius=unknown
+	// so the user sees the prompt before --yolo or permission allow-rules
+	// can auto-approve it. nil/false leaves the agent's shell calls subject
+	// only to the regular approval pipeline.
+	Safer *bool `json:"safer,omitempty" yaml:"safer,omitempty"`
 
 	// For the `rag` tool
 	RAGConfig *RAGConfig `json:"rag_config,omitempty" yaml:"rag_config,omitempty"`
@@ -2194,6 +2375,20 @@ type HookMatcherConfig struct {
 
 	// Hooks are the hooks to execute when the matcher matches
 	Hooks []HookDefinition `json:"hooks" yaml:"hooks"`
+
+	// PreemptYolo opts a pre_tool_use entry into firing BEFORE the
+	// deterministic approval pipeline (--yolo, permission patterns).
+	// A deny/ask verdict from a preempting hook cannot be bypassed by
+	// auto-approval rules; an allow verdict is advisory (the pipeline
+	// still runs Decide() and the rest of pre_tool_use). Default
+	// pre_tool_use entries fire AFTER Decide(), as before. Only valid
+	// on pre_tool_use; ignored on other events.
+	//
+	// Used by the safer_shell builtin (auto-registered with this flag
+	// when a shell toolset has `safer: true`). Custom hooks set it to
+	// true when they implement a security-critical check that must
+	// not be bypassed by --yolo.
+	PreemptYolo *bool `json:"preempt_yolo,omitempty" yaml:"preempt_yolo,omitempty"`
 }
 
 // HookDefinition represents a single hook configuration

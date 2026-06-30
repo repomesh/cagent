@@ -339,7 +339,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	// Start fake proxy if --fake is specified
-	fakeCleanup, err := setupFakeProxy(f.fakeResponses, f.fakeStreamDelay, &f.runConfig)
+	fakeCleanup, err := setupFakeProxy(ctx, f.fakeResponses, f.fakeStreamDelay, &f.runConfig)
 	if err != nil {
 		return err
 	}
@@ -350,7 +350,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}()
 
 	// Record AI API interactions to a cassette file if --record flag is specified.
-	cassettePath, recordCleanup, err := setupRecordingProxy(f.recordPath, &f.runConfig)
+	cassettePath, recordCleanup, err := setupRecordingProxy(ctx, f.recordPath, &f.runConfig)
 	if err != nil {
 		return err
 	}
@@ -381,7 +381,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 			return err
 		}
 		if loadResult != nil {
-			stopToolSets(loadResult.Team)
+			stopToolSets(ctx, loadResult.Team)
 		}
 		out.Println("Dry run mode enabled. Agent initialized but will not execute.")
 		return nil
@@ -421,7 +421,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		// the nil-guard used for cleanup throughout this function.
 		if loadResult != nil {
 			if err := f.dispatchWorktreeCreate(ctx, out, loadResult.Team, createdWorktree); err != nil {
-				stopToolSets(loadResult.Team)
+				stopToolSets(ctx, loadResult.Team)
 				return err
 			}
 		}
@@ -714,6 +714,15 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
 	}
+	// Share the models.dev store the team loader already warmed (parsing the
+	// multi-MB catalog once) so the runtime doesn't build its own cold store
+	// and re-pay the parse on the first /model open. On error we leave it unset
+	// and the runtime falls back to its lazy default.
+	if store, err := runConfig.ModelsDevStore(); err == nil {
+		modelSwitcherCfg.ModelsStore = store
+	} else {
+		slog.Warn("Failed to obtain shared models.dev store; runtime will use its own", "error", err)
+	}
 	opts := []runtime.Opt{
 		runtime.WithSessionStore(sessStore),
 		runtime.WithCurrentAgent(agentName),
@@ -770,7 +779,7 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		return nil, nil, err
 	}
 	runtimeOpts := append(f.runtimeOpts(loadResult, &f.runConfig, sessStore, agentName), rtOpts...)
-	localRt, err := runtime.New(t, runtimeOpts...)
+	localRt, err := runtime.New(ctx, t, runtimeOpts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating runtime: %w", err)
 	}
@@ -887,10 +896,11 @@ func (f *runExecFlags) tuiOpts() []tui.Option {
 // (no alternate screen) and sends the first/queued messages itself rather than
 // through the App's bubbletea command pipeline.
 func (f *runExecFlags) runLeanTUI(ctx context.Context, rt runtime.Runtime, sess *session.Session, cleanup func(), args []string, opts ...app.Opt) error {
-	if gen := rt.TitleGenerator(); gen != nil {
+	if gen := rt.TitleGenerator(ctx); gen != nil {
 		opts = append(opts, app.WithTitleGenerator(gen))
 	}
 	a := app.New(ctx, rt, sess, opts...)
+	a.Start(ctx)
 
 	firstMessage, err := readInitialMessage(args)
 	if err != nil {
@@ -904,7 +914,13 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt runtime.Runtime, sess 
 		cleanup = func() {}
 	}
 
-	wd, _ := os.Getwd()
+	// Prefer the session's working directory so the lean status bar shows
+	// where the tools operate — e.g. the worktree from --worktree, not the
+	// process CWD it was launched from.
+	wd := sess.WorkingDir
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
 	return leantui.Run(ctx, leantui.Config{
 		App:                    a,
 		WorkingDir:             wd,
@@ -996,7 +1012,7 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 			return nil, nil, nil, err
 		}
 		runtimeOpts := append(f.runtimeOpts(loadResult, runConfigCopy, sessStore, agt.Name()), rtOpts...)
-		localRt, err := runtime.New(t, runtimeOpts...)
+		localRt, err := runtime.New(spawnCtx, t, runtimeOpts...)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -1008,12 +1024,12 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 
 		// Create cleanup function
 		cleanup := func() {
-			stopToolSets(t)
+			stopToolSets(spawnCtx, t)
 		}
 
 		// Create the app
 		var appOpts []app.Opt
-		if gen := localRt.TitleGenerator(); gen != nil {
+		if gen := localRt.TitleGenerator(spawnCtx); gen != nil {
 			appOpts = append(appOpts, app.WithTitleGenerator(gen))
 		}
 		if ctrl != nil {
@@ -1032,9 +1048,11 @@ type toolStopper interface {
 }
 
 // stopToolSets gracefully stops all tool sets with a bounded timeout so
-// that cleanup cannot block indefinitely.
-func stopToolSets(t toolStopper) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// that cleanup cannot block indefinitely. It detaches from ctx's
+// cancellation (cleanup often runs after the caller's ctx is already done,
+// e.g. on shutdown or tab close) while keeping ctx's trace context.
+func stopToolSets(ctx context.Context, t toolStopper) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if err := t.StopToolSets(ctx); err != nil {
 		slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)

@@ -52,6 +52,18 @@ func TestErrorMessageWrapping(t *testing.T) {
 	}
 }
 
+func TestErrorMessageShowsRetryAffordance(t *testing.T) {
+	t.Parallel()
+
+	msg := types.Error("Something went wrong")
+	mv := New(msg, nil)
+	mv.SetSize(80, 0)
+
+	plainRendered := stripANSI(mv.View())
+	assert.Contains(t, plainRendered, "Something went wrong")
+	assert.Contains(t, plainRendered, types.ErrorRetryLabel)
+}
+
 func TestErrorMessageWithShortContent(t *testing.T) {
 	t.Parallel()
 

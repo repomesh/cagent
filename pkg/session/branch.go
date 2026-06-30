@@ -96,6 +96,8 @@ func (s *Session) Clone() *Session {
 		CustomModelsUsed:        cloneStringSlice(s.CustomModelsUsed),
 		AttachedFiles:           cloneStringSlice(s.AttachedFiles),
 		ExcludedTools:           cloneStringSlice(s.ExcludedTools),
+		AllowedTools:            cloneStringSlice(s.AllowedTools),
+		ExtraToolSets:           slices.Clone(s.ExtraToolSets),
 		AgentName:               s.AgentName,
 		ParentID:                s.ParentID,
 		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
@@ -114,6 +116,10 @@ func (s *Session) Clone() *Session {
 		}
 		if item.SubSession != nil {
 			clone.Messages[i].SubSession = item.SubSession.Clone()
+		}
+		if item.Error != nil {
+			errCopy := *item.Error
+			clone.Messages[i].Error = &errCopy
 		}
 	}
 	return clone
@@ -135,6 +141,9 @@ func cloneSessionItem(item Item) (Item, error) {
 		return Item{SubSession: clonedSub}, nil
 	case item.Summary != "":
 		return Item{Summary: item.Summary, Cost: item.Cost}, nil
+	case item.Error != nil:
+		errCopy := *item.Error
+		return Item{Error: &errCopy}, nil
 	default:
 		return Item{}, errors.New("cannot clone empty session item")
 	}
@@ -243,6 +252,33 @@ func generateForkTitle(parentTitle string) string {
 	}
 
 	return parentTitle + " (fork 1)"
+}
+
+// NextForkTitle returns the next free "<root> (fork N)" title for a
+// fork of parentTitle. Forks descending from the same root share a
+// single counter scanned out of siblingTitles. Returns empty for an
+// empty parentTitle so the caller's auto-title path kicks in.
+func NextForkTitle(parentTitle string, siblingTitles []string) string {
+	if parentTitle == "" {
+		return ""
+	}
+	baseTitle := parentTitle
+	if m := forkSuffixRe.FindStringSubmatch(parentTitle); m != nil {
+		baseTitle = m[1]
+	}
+	siblingRe := regexp.MustCompile(`^` + regexp.QuoteMeta(baseTitle) + `[ \t]*\(fork (\d+)\)$`)
+	highest := 0
+	for _, t := range siblingTitles {
+		m := siblingRe.FindStringSubmatch(t)
+		if m == nil {
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(m[1], "%d", &n); err == nil && n > highest {
+			highest = n
+		}
+	}
+	return fmt.Sprintf("%s (fork %d)", baseTitle, highest+1)
 }
 
 func cloneEvalCriteria(src *EvalCriteria) *EvalCriteria {

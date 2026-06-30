@@ -17,9 +17,10 @@ Built-in tools are included with docker-agent and require no external dependenci
 | `filesystem` | Read, write, list, search, navigate | [Filesystem]({{ '/tools/filesystem/' | relative_url }}) |
 | `shell` | Execute shell commands (sync + background jobs) | [Shell]({{ '/tools/shell/' | relative_url }}) |
 | `think` | Reasoning scratchpad | [Think]({{ '/tools/think/' | relative_url }}) |
+| `plan` | Shared persistent scratchpad for multi-agent collaboration | [Plan]({{ '/tools/plan/' | relative_url }}) |
 | `todo` | Task list management | [Todo]({{ '/tools/todo/' | relative_url }}) |
-| `tasks` | Persistent task database shared across sessions | [Tasks]({{ '/tools/tasks/' | relative_url }}) |
 | `memory` | Persistent key-value storage (SQLite) | [Memory]({{ '/tools/memory/' | relative_url }}) |
+| `tasks` | Persistent task database shared across sessions | [Tasks]({{ '/tools/tasks/' | relative_url }}) |
 | `fetch` | HTTP `GET` requests with text/markdown/html output | [Fetch]({{ '/tools/fetch/' | relative_url }}) |
 | `script` | Custom shell scripts as tools | [Script]({{ '/tools/script/' | relative_url }}) |
 | `lsp` | Language Server Protocol integration | [LSP]({{ '/tools/lsp/' | relative_url }}) |
@@ -28,6 +29,7 @@ Built-in tools are included with docker-agent and require no external dependenci
 | `rag` | Retrieval-augmented generation over indexed sources | [RAG]({{ '/tools/rag/' | relative_url }}) |
 | `model_picker` | Let the agent pick between several models per turn | [Model Picker]({{ '/tools/model-picker/' | relative_url }}) |
 | `user_prompt` | Interactive user input | [User Prompt]({{ '/tools/user-prompt/' | relative_url }}) |
+| `open_url` | Open a fixed URL in the user's default browser | [Open URL]({{ '/tools/open-url/' | relative_url }}) |
 | `transfer_task` | Delegate to sub-agents (auto-enabled) | [Transfer Task]({{ '/tools/transfer-task/' | relative_url }}) |
 | `background_agents` | Parallel sub-agent dispatch | [Background Agents]({{ '/tools/background-agents/' | relative_url }}) |
 | `handoff` | Local conversation handoff to another agent in the same config (auto-enabled by `handoffs:`) | [Handoff]({{ '/tools/handoff/' | relative_url }}) |

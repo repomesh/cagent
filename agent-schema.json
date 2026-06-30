@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/docker/docker-agent/blob/main/agent-schema.json",
   "title": "Docker Agent Configuration",
-  "description": "Configuration schema for Docker Agent v10",
+  "description": "Configuration schema for Docker Agent v11",
   "type": "object",
   "properties": {
     "version": {
@@ -19,7 +19,8 @@
         "7",
         "8",
         "9",
-        "10"
+        "10",
+        "11"
       ],
       "examples": [
         "0",
@@ -32,7 +33,8 @@
         "7",
         "8",
         "9",
-        "10"
+        "10",
+        "11"
       ]
     },
     "providers": {
@@ -202,9 +204,17 @@
           ]
         },
         "base_url": {
-          "type": "string",
-          "description": "Base URL for the provider's API endpoint. Required for OpenAI-compatible providers, optional for native providers.",
-          "format": "uri",
+          "description": "Base URL for the provider's API endpoint. Required for OpenAI-compatible providers, optional for native providers. Accepts ${env.VAR} / ${VAR} references, substituted from the environment when a model using this provider is loaded.",
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uri"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\S*\\$\\{?[A-Za-z_]\\S*$"
+            }
+          ],
           "examples": [
             "https://router.example.com/v1"
           ]
@@ -559,6 +569,20 @@
           "type": "string",
           "description": "Instructions for the agent"
         },
+        "instruction_file": {
+          "description": "Path(s) to a file or files, relative to the config file's directory, whose contents become the agent's instruction. Accepts a single string or a list of strings; when several files are given their contents are concatenated in order, separated by a blank line. Loaded at startup. Mutually exclusive with 'instruction'. Each path must be a local relative path inside the config directory (absolute paths and '..' traversal are rejected). Only supported for local file-based configs, not OCI/URL sources.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
         "harness": {
           "$ref": "#/definitions/HarnessConfig",
           "description": "External coding harness to run this agent with instead of a docker-agent model provider"
@@ -891,7 +915,14 @@
           "items": {
             "type": "string"
           },
-          "description": "Tools the skill expects to use (mirrors the SKILL.md allowed-tools field)."
+          "description": "Tools the skill expects to use (mirrors the SKILL.md allowed-tools field). For a fork-mode skill (context: fork) this is enforced as an allow-list over the parent agent's inherited tools while the skill runs in its sub-session: only tools whose names match an entry are kept (entries support glob patterns like 'read_*', otherwise an exact match). Ignored for non-fork skills."
+        },
+        "toolsets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Names of reusable toolset definitions (from the top-level 'toolsets' section) to expose to this skill while it runs in its fork sub-session, in addition to the parent agent's tools. Only valid for fork-mode skills (context: fork)."
         }
       },
       "required": [
@@ -903,7 +934,7 @@
     },
     "CommandConfig": {
       "type": "object",
-      "description": "Advanced command configuration. Set 'instruction' to send a prompt to the current agent. Set 'agent' to switch the active agent to a sub-agent (e.g. /plan -> the 'planner' sub-agent). Both fields can be combined: the agent is switched first, then the instruction is sent to the new agent.",
+      "description": "Advanced command configuration. Set 'instruction' to send a prompt to the current agent. Set 'agent' to switch the active agent to a sub-agent (e.g. /plan -> the 'planner' sub-agent). Both fields can be combined: the agent is switched first, then the instruction is sent to the new agent. Set 'url' to open a URL in the user's browser instead of messaging the agent.",
       "properties": {
         "description": {
           "type": "string",
@@ -916,6 +947,10 @@
         "agent": {
           "type": "string",
           "description": "Name of a sub-agent to switch to when this command is invoked. The agent must be defined in the team configuration. When set without 'instruction', any text typed after the slash command is forwarded as a prompt to the target agent."
+        },
+        "url": {
+          "type": "string",
+          "description": "URL to open in the user's default browser when this command is invoked, instead of sending a prompt to the agent. Any URI scheme the OS knows how to handle works (e.g. https:// or a custom scheme like docker-desktop:// to deep-link into Docker Desktop). The token {{session_id}} is replaced at invocation time with the current session ID (URL-query-escaped)."
         }
       },
       "additionalProperties": false
@@ -1243,6 +1278,10 @@
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
+        },
+        "preempt_yolo": {
+          "type": "boolean",
+          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (--yolo, permission allow/deny patterns). A deny/ask verdict from a preempting hook cannot be bypassed by --yolo or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only meaningful on pre_tool_use; ignored on other events. Used by the safer_shell builtin (auto-registered with this flag when a shell toolset has `safer: true`)."
         }
       },
       "required": [
@@ -1426,9 +1465,17 @@
           "maximum": 2
         },
         "base_url": {
-          "type": "string",
-          "description": "Base URL for the model API",
-          "format": "uri"
+          "description": "Base URL for the model API. Accepts ${env.VAR} / ${VAR} references, substituted from the environment when the model is loaded.",
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uri"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\S*\\$\\{?[A-Za-z_]\\S*$"
+            }
+          ]
         },
         "parallel_tool_calls": {
           "type": "boolean",
@@ -1557,6 +1604,25 @@
             "openai/gpt-4o-mini",
             "fast"
           ]
+        },
+        "capabilities": {
+          "$ref": "#/definitions/CapabilitiesConfig",
+          "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF attachments are silently dropped."
+        }
+      },
+      "additionalProperties": false
+    },
+    "CapabilitiesConfig": {
+      "type": "object",
+      "description": "Explicit attachment capabilities for a model, overriding automatic models.dev-based detection. The declared flags must match what the underlying endpoint actually accepts; claiming an unsupported modality results in a provider-side API error.",
+      "properties": {
+        "image": {
+          "type": "boolean",
+          "description": "Whether the model accepts image attachments"
+        },
+        "pdf": {
+          "type": "boolean",
+          "description": "Whether the model accepts PDF (application/pdf) attachments"
         }
       },
       "additionalProperties": false
@@ -1851,6 +1917,7 @@
             "shell",
             "tasks",
             "plan",
+            "session_plan",
             "todo",
             "fetch",
             "api",
@@ -1858,6 +1925,7 @@
             "lsp",
             "user_prompt",
             "openapi",
+            "open_url",
             "model_picker",
             "background_agents",
             "rag"
@@ -2065,9 +2133,13 @@
           "type": "boolean",
           "description": "Opt in to a sudo privilege escalation flow for the shell toolset (only valid for type 'shell'). When enabled, sudo commands prompt the user for their password through the host UI via SUDO_ASKPASS; in non-interactive runs the prompt is declined automatically. Only a bare 'sudo ...' invocation in a POSIX shell is handled. No effect on Windows. Default false."
         },
+        "safer": {
+          "type": "boolean",
+          "description": "Opt in to destructive-command detection for the shell toolset (only valid for type 'shell'). When enabled, the agent auto-registers the safer_shell builtin under the pre_tool_use hook event with preempt_yolo:true. Destructive commands (rm -rf, docker volume rm, mkfs, ...) get an Ask verdict with a blast-radius classification; known-safe reads (ls, git status, docker ps, ...) flow through silently; everything else asks with blast_radius=unknown so the user sees the prompt before --yolo or permission allow-rules can auto-approve it. Default false."
+        },
         "url": {
           "type": "string",
-          "description": "URL for the a2a or openapi tool",
+          "description": "URL for the a2a, openapi or open_url tool",
           "format": "uri"
         },
         "headers": {
@@ -2177,6 +2249,7 @@
                 "shell",
                 "tasks",
                 "plan",
+                "session_plan",
                 "todo",
                 "fetch",
                 "api",
@@ -2243,6 +2316,22 @@
               "properties": {
                 "type": {
                   "const": "openapi"
+                }
+              }
+            },
+            {
+              "required": [
+                "url"
+              ]
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "open_url"
                 }
               }
             },

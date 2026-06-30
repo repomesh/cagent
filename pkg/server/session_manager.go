@@ -201,8 +201,8 @@ func (sm *SessionManager) StreamEvents(ctx context.Context, sessionID string, si
 // The internal cancellation signal is fired by [SessionManager.DeleteSession];
 // SSE streams and other lifetime-bound consumers use it (via
 // [SessionManager.StreamEvents]) to terminate when the session is detached.
-func (sm *SessionManager) AttachRuntime(sessionID string, rt runtime.Runtime, sess *session.Session) {
-	ctx, cancel := context.WithCancel(context.Background())
+func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, rt runtime.Runtime, sess *session.Session) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sm.runtimeSessions.Store(sessionID, &activeRuntimes{
 		runtime: rt,
 		done:    ctx.Done(),
@@ -254,7 +254,7 @@ func (sm *SessionManager) WaitSessionAttached(ctx context.Context, sessionID str
 // GetSessionStatus returns a lightweight snapshot of the session's current
 // runtime state. Designed for late-joining SSE consumers that need to know
 // the session's state without waiting for the next event transition.
-func (sm *SessionManager) GetSessionStatus(_ context.Context, id string) (*api.SessionStatusResponse, error) {
+func (sm *SessionManager) GetSessionStatus(ctx context.Context, id string) (*api.SessionStatusResponse, error) {
 	rs, ok := sm.runtimeSessions.Load(id)
 	if !ok {
 		return nil, fmt.Errorf("session %s not found", id)
@@ -273,7 +273,7 @@ func (sm *SessionManager) GetSessionStatus(_ context.Context, id string) (*api.S
 		ID:           sess.ID,
 		Title:        sess.Title,
 		Streaming:    streaming,
-		Agent:        rs.runtime.CurrentAgentName(),
+		Agent:        rs.runtime.CurrentAgentName(ctx),
 		InputTokens:  sess.InputTokens,
 		OutputTokens: sess.OutputTokens,
 		NumMessages:  len(sess.GetAllMessages()),
@@ -294,7 +294,7 @@ func (sm *SessionManager) GetSessionSnapshot(ctx context.Context, id string) (*a
 	agent := ""
 	if rs, ok := sm.runtimeSessions.Load(id); ok {
 		sess = rs.session
-		agent = rs.runtime.CurrentAgentName()
+		agent = rs.runtime.CurrentAgentName(ctx)
 		// Probe streaming state without interfering: TryLock succeeds only
 		// when no RunStream is in progress.
 		if rs.streaming.TryLock() {
@@ -339,6 +339,13 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 		session.WithToolsApproved(sessionTemplate.ToolsApproved),
 	)
 
+	// Carry a caller-supplied title (from the POST /api/sessions request body)
+	// into the new session. When set, RunSession's needsTitle check skips the
+	// LLM title-generation call and re-emits this title instead.
+	if title := strings.TrimSpace(sessionTemplate.Title); title != "" {
+		opts = append(opts, session.WithTitle(title))
+	}
+
 	if wd := strings.TrimSpace(sessionTemplate.WorkingDir); wd != "" {
 		absWd, err := filepath.Abs(wd)
 		if err != nil {
@@ -375,52 +382,24 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	return sess, sm.sessionStore.AddSession(ctx, sess)
 }
 
-// Sentinel errors returned by ForkSession. They are matched with
-// errors.Is by the HTTP handler to classify failures as 400 vs 500, so
-// rewording the error string later is safe — the classification stays
-// pinned to the sentinel rather than to the message text.
+// Sentinel errors returned by ForkSession. Matched via errors.Is by
+// the HTTP handler to classify failures as 400 vs 500, so the messages
+// can be reworded safely.
 var (
-	// ErrForkInvalidMessage is returned when the resolved fork point is
-	// not a user-role message (e.g. an assistant turn, a tool response,
-	// or a sub-session item).
-	ErrForkInvalidMessage = errors.New("fork point must be a user message")
-
-	// ErrForkOutOfRange is returned when the requested message index is
-	// outside the parent session's visible message list.
-	ErrForkOutOfRange = errors.New("fork message index out of range")
-
-	// ErrForkInSubSession is returned when the requested message index
-	// falls inside a sub-session, where positional forking would be
-	// ambiguous (a sub-session can carry many messages but the fork
-	// model is "stop before this user turn in the parent's timeline").
-	ErrForkInSubSession = errors.New("fork message index falls inside a sub-session")
+	ErrForkOutOfRange   = errors.New("fork user-message index out of range")
+	ErrForkInSubSession = errors.New("fork user-message index falls inside a sub-session")
 )
 
-// ForkSession creates a new session whose history is a deep copy of the
-// parent session up to (but excluding) the message at userMessageIndex, with
-// a fork-numbered title ("<parent> (fork N)"). The index refers to the flat,
-// user-visible message list returned by Session.GetAllMessages — the same
-// indexing that api.SessionResponse.Messages exposes to clients — so callers
-// do not need to know about the underlying Item slice.
+// ForkSession creates a new session whose history is a deep copy of
+// the parent session up to (but excluding) the Nth user message, with
+// a fork-numbered title ("<parent> (fork N)"). userMessageOrdinal
+// counts user-role messages in the flat list returned by
+// Session.GetAllMessages.
 //
-// The message at userMessageIndex must be a user-role message in the
-// parent's visible list; values outside `[0, visibleMessageCount)` return
-// ErrForkOutOfRange and non-user messages return ErrForkInvalidMessage.
-// The fork itself does not include that message, so a client can prefill
-// it into its chat input to let the user edit and resubmit.
-//
-// There is intentionally no "full clone" shortcut on this endpoint: every
-// fork must anchor at a real user turn so the resulting history ends
-// cleanly between a user message and its (excluded) follow-up. Callers
-// that need a whole-session duplicate should issue a separate request
-// targeting the index of the most recent user message.
-//
-// The read-then-write of the session store is serialised under sm.mux to
-// match the rest of the manager's mutating methods (DeleteSession,
-// RunSession, etc.). Without it, two concurrent fork requests on the
-// same parent would each see Title="foo", both compute "foo (fork 1)",
-// and produce two distinct sessions with the same auto-numbered title.
-func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, userMessageIndex int) (*session.Session, error) {
+// The read-then-write of the session store is serialised under sm.mux
+// to keep two concurrent forks on the same parent from racing on the
+// auto-numbered title.
+func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, userMessageOrdinal int) (*session.Session, error) {
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
 
@@ -429,14 +408,9 @@ func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, use
 		return nil, err
 	}
 
-	itemIndex, err := flatMessageIndexToItemIndex(parent, userMessageIndex)
+	itemIndex, err := userMessageOrdinalToItemIndex(parent, userMessageOrdinal)
 	if err != nil {
 		return nil, err
-	}
-
-	item := parent.Messages[itemIndex]
-	if item.Message == nil || item.Message.Message.Role != chat.MessageRoleUser {
-		return nil, ErrForkInvalidMessage
 	}
 
 	forked, err := session.ForkSession(parent, itemIndex)
@@ -444,48 +418,65 @@ func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, use
 		return nil, err
 	}
 
+	// Sibling-aware title so repeated forks of the same parent get
+	// (fork 1), (fork 2), … instead of colliding on (fork 1).
+	siblings, err := sm.sessionStore.GetSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	siblingTitles := make([]string, 0, len(siblings))
+	for _, s := range siblings {
+		siblingTitles = append(siblingTitles, s.Title)
+	}
+	forked.Title = session.NextForkTitle(parent.Title, siblingTitles)
+
 	if err := sm.sessionStore.AddSession(ctx, forked); err != nil {
 		return nil, err
 	}
 	return forked, nil
 }
 
-// flatMessageIndexToItemIndex maps an index in the flat user-visible message
-// list (Session.GetAllMessages — which skips system messages and flattens
-// sub-sessions) into an index in the parent's Session.Messages Item slice.
-// Returns ErrForkOutOfRange if the index is outside the visible list, or
-// ErrForkInSubSession if the index lands inside a sub-session, where
-// positional forking would be ambiguous.
-func flatMessageIndexToItemIndex(s *session.Session, flatIdx int) (int, error) {
-	if flatIdx < 0 {
-		return 0, fmt.Errorf("%w: %d", ErrForkOutOfRange, flatIdx)
+// userMessageOrdinalToItemIndex maps a 0-based user-message ordinal
+// into an index in the parent's Session.Messages Item slice. Returns
+// ErrForkOutOfRange or ErrForkInSubSession on invalid input.
+func userMessageOrdinalToItemIndex(s *session.Session, ordinal int) (int, error) {
+	if ordinal < 0 {
+		return 0, fmt.Errorf("%w: %d", ErrForkOutOfRange, ordinal)
 	}
 	seen := 0
 	for i, item := range s.Messages {
 		switch {
 		case item.IsMessage():
-			// GetAllMessages filters out system messages; mirror that here
-			// so the flat index lines up with what the client sees.
+			// Mirror GetAllMessages: system messages don't count.
 			if item.Message.Message.Role == chat.MessageRoleSystem {
 				continue
 			}
-			if seen == flatIdx {
+			if item.Message.Message.Role != chat.MessageRoleUser {
+				continue
+			}
+			if seen == ordinal {
 				return i, nil
 			}
 			seen++
 		case item.IsSubSession():
-			subCount := len(item.SubSession.GetAllMessages())
-			if flatIdx-seen < subCount {
-				return 0, fmt.Errorf("%w at index %d", ErrForkInSubSession, flatIdx)
+			subCount := countUserMessages(item.SubSession.GetAllMessages())
+			if subCount > 0 && ordinal-seen < subCount {
+				return 0, fmt.Errorf("%w at ordinal %d", ErrForkInSubSession, ordinal)
 			}
 			seen += subCount
 		}
 	}
-	// flatIdx must point at an existing visible message. Values at or
-	// past the end (including the "after the last message" full-clone
-	// shortcut that earlier revisions allowed) are now rejected so the
-	// user-role check in ForkSession can never be skipped.
-	return 0, fmt.Errorf("%w: %d", ErrForkOutOfRange, flatIdx)
+	return 0, fmt.Errorf("%w: %d", ErrForkOutOfRange, ordinal)
+}
+
+func countUserMessages(msgs []session.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Message.Role == chat.MessageRoleUser {
+			n++
+		}
+	}
+	return n
 }
 
 // GetSessions retrieves all sessions.
@@ -733,14 +724,14 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 // session. The messages are picked up by the agent loop after the current tool
 // calls finish but before the next LLM call. Returns an error if the session
 // is not actively running or if the steer buffer is full.
-func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, messages []api.Message) error {
+func (sm *SessionManager) SteerSession(ctx context.Context, sessionID string, messages []api.Message) error {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
 		return ErrSessionNotRunning
 	}
 
 	for _, msg := range messages {
-		if err := rt.runtime.Steer(runtime.QueuedMessage{
+		if err := rt.runtime.Steer(ctx, runtime.QueuedMessage{
 			Content:      msg.Content,
 			MultiContent: msg.MultiContent,
 		}); err != nil {
@@ -801,7 +792,7 @@ func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string,
 	}
 
 	for _, msg := range messages {
-		if err := rt.runtime.FollowUp(runtime.QueuedMessage{
+		if err := rt.runtime.FollowUp(ctx, runtime.QueuedMessage{
 			Content:      msg.Content,
 			MultiContent: msg.MultiContent,
 		}); err != nil {
@@ -968,6 +959,13 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
 	}
+	// Reuse the models.dev store the team loader already warmed so the
+	// /api/sessions/:id/models picker doesn't re-pay the cold catalog parse.
+	if store, storeErr := rc.ModelsDevStore(); storeErr == nil {
+		modelSwitcherCfg.ModelsStore = store
+	} else {
+		slog.WarnContext(ctx, "Failed to obtain shared models.dev store; runtime will use its own", "error", storeErr)
+	}
 
 	opts := []runtime.Opt{
 		runtime.WithCurrentAgent(currentAgent),
@@ -980,7 +978,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		runtime.WithTracer(otel.Tracer("cagent")),
 		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
 	}
-	run, err := runtime.New(t, opts...)
+	run, err := runtime.New(ctx, t, opts...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1041,7 +1039,7 @@ func (sm *SessionManager) applyRunModelOverride(ctx context.Context, rs *activeR
 		return "", false, noop, ErrModelSwitchingNotSupported
 	}
 
-	agentName := rs.runtime.CurrentAgentName()
+	agentName := rs.runtime.CurrentAgentName(ctx)
 	sess := rs.session
 
 	if sess != nil && sess.AgentModelOverrides != nil {
@@ -1221,7 +1219,7 @@ func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID 
 		return "", "", nil, ErrModelSwitchingNotSupported
 	}
 
-	agentName := rs.runtime.CurrentAgentName()
+	agentName := rs.runtime.CurrentAgentName(ctx)
 
 	// Snapshot the override and custom-model history under sm.mux so the
 	// read is atomic with respect to SetSessionAgentModel writes. The
@@ -1266,7 +1264,7 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		return "", "", ErrModelSwitchingNotSupported
 	}
 
-	agentName := rs.runtime.CurrentAgentName()
+	agentName := rs.runtime.CurrentAgentName(ctx)
 	sess := rs.session
 
 	// Snapshot current state so we can roll back if persistence fails

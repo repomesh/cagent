@@ -151,6 +151,8 @@ type model struct {
 	titleInput         textinput.Model
 	lastTitleClickTime time.Time // for double-click detection on title
 
+	ctx func() context.Context
+
 	// Render cache to avoid re-rendering sections on every frame during scroll
 	cachedLines          []string // Cached rendered lines
 	cachedWidth          int      // Width used for cached render
@@ -168,15 +170,16 @@ type model struct {
 }
 
 // New creates a new sidebar bound to the given session state.
-func New(sessionState *service.SessionState) Model {
+func New(ctx context.Context, sessionState *service.SessionState) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Session title"
 	ti.CharLimit = 50
 	ti.Prompt = "" // No prompt to maximize usable width in collapsed sidebar
 
-	wd, branch := getCurrentWorkingDirectory()
+	wd, branch := getCurrentWorkingDirectory(ctx)
 
 	m := &model{
+		ctx:          func() context.Context { return context.WithoutCancel(ctx) },
 		width:        20,
 		layoutCfg:    DefaultLayoutConfig(),
 		height:       24,
@@ -494,7 +497,7 @@ func (m *model) LoadFromSession(sess *session.Session) {
 
 	// Load working directory from session
 	if sess.WorkingDir != "" {
-		m.workingDirectory, m.gitBranchName = formatWorkingDirectory(sess.WorkingDir)
+		m.workingDirectory, m.gitBranchName = formatWorkingDirectory(m.ctx(), sess.WorkingDir)
 	}
 
 	// Session has content if it has messages or token usage
@@ -570,11 +573,11 @@ func (m *model) contextPercent() string {
 
 // gitBranch returns the current git branch name for the given directory,
 // or an empty string if the directory is not inside a git repository.
-func gitBranch(dir string) string {
+func gitBranch(ctx context.Context, dir string) string {
 	if dir == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
@@ -586,12 +589,12 @@ func gitBranch(dir string) string {
 // formatWorkingDirectory formats a raw directory path for display,
 // replacing the home prefix with ~/. Returns the display path and the
 // current git branch (empty if not in a repo).
-func formatWorkingDirectory(rawDir string) (display, branch string) {
+func formatWorkingDirectory(ctx context.Context, rawDir string) (display, branch string) {
 	if rawDir == "" {
 		return "", ""
 	}
 
-	branch = gitBranch(rawDir)
+	branch = gitBranch(ctx, rawDir)
 
 	display = rawDir
 	if homeDir := paths.GetHomeDir(); homeDir != "" && strings.HasPrefix(display, homeDir) {
@@ -603,13 +606,13 @@ func formatWorkingDirectory(rawDir string) (display, branch string) {
 
 // getCurrentWorkingDirectory returns the current working directory with home directory
 // replaced by ~/, along with the current git branch name.
-func getCurrentWorkingDirectory() (string, string) {
+func getCurrentWorkingDirectory(ctx context.Context) (string, string) {
 	pwd, err := os.Getwd()
 	if err != nil {
 		return "", ""
 	}
 
-	return formatWorkingDirectory(pwd)
+	return formatWorkingDirectory(ctx, pwd)
 }
 
 // workingDirWithBranch returns the working directory path with the git branch
@@ -1228,14 +1231,16 @@ func (m *model) queueSection(contentWidth int) string {
 	return m.renderTab(title, strings.Join(lines, "\n"), contentWidth)
 }
 
-// agentInfo renders the Agents panel: the current agent as a focus card in its
-// natural config-order position, and every other agent as a compact two-line
-// roster row, with a blank separator line between entries so the two-line rows
-// and the card don't blend together. It records which body line belongs to
-// which agent (agentLineOwners) so click zones can be registered explicitly
-// (see buildAgentClickZones) rather than re-derived from blank-line heuristics;
-// each separator carries an empty owner so it stays unclickable and never
-// shifts an agent's click zone.
+// agentInfo renders the Agents panel: every agent as a two-line entry, with a
+// blank separator line between entries. Line 1 shows the agent's name (in its
+// accent color), the thinking badge right-aligned, and the "^N" switch shortcut
+// flush against the right edge; line 2 shows the indented provider/model. The
+// current agent is marked with ▶ (or the spinner while it works); the other
+// agents pad that marker column so their names stay aligned. Descriptions are
+// deliberately omitted. Each content line is owned by its agent (agentLineOwners)
+// so click zones can be registered explicitly (see buildAgentClickZones) and a
+// click on either line switches to that agent; separators carry an empty owner
+// so they stay unclickable.
 func (m *model) agentInfo(contentWidth int) string {
 	// Read current agent from session state so sidebar updates when agent is switched
 	currentAgent := m.sessionState.CurrentAgentName()
@@ -1251,44 +1256,40 @@ func (m *model) agentInfo(contentWidth int) string {
 		agentTitle += " ↔"
 	}
 
-	rl := m.computeRosterLayout(contentWidth, currentAgent)
+	// Compute the shared column widths once so every entry aligns and the badge
+	// width is not recomputed per agent.
+	glyphOnly := contentWidth < rowGlyphOnlyMinWidth
+	badgeWidth := m.badgeColumnWidth(glyphOnly)
+	nameWidth := max(1, contentWidth-agentMarkerWidth-minGap-badgeWidth-1-agentShortcutWidth)
 
-	var bodyLines []string
-	var owners []string
+	var bodyLines, owners []string
 	add := func(line, owner string) {
 		bodyLines = append(bodyLines, line)
 		owners = append(owners, owner)
 	}
-
 	for i, agent := range m.availableAgents {
-		// Separate every agent entry with a blank line so the two-line rows and
-		// the focus card stay visually distinct. The separator carries an empty
-		// owner so it is never attributed to an agent or made clickable.
+		// Separate entries with a blank, unowned line so the two-line entries stay
+		// visually distinct without being attributed to (or made clickable for)
+		// any agent.
 		if len(bodyLines) > 0 {
 			add("", "")
 		}
-		if agent.Name == currentAgent {
-			for _, line := range m.renderAgentCard(agent, i, contentWidth) {
-				add(line, agent.Name)
-			}
-			continue
-		}
-		for _, line := range m.renderAgentRow(agent, i, rl) {
+		current := agent.Name == currentAgent
+		for _, line := range m.renderAgentLine(agent, i, contentWidth, nameWidth, badgeWidth, glyphOnly, current) {
 			add(line, agent.Name)
 		}
 	}
-
 	m.agentLineOwners = owners
 
 	return m.renderTab(agentTitle, strings.Join(bodyLines, "\n"), contentWidth)
 }
 
 // thinkingKind classifies an agent's raw thinking wire label into the badge
-// vocabulary used by the card and roster rows.
+// vocabulary used by the agent lines.
 type thinkingKind int
 
 const (
-	thinkingNone     thinkingKind = iota // empty label: no badge / no card line
+	thinkingNone     thinkingKind = iota // empty label: no badge
 	thinkingOff                          // "off": disabled on a capable model
 	thinkingAdaptive                     // "adaptive": adaptive budget
 	thinkingTokens                       // decimal token count
@@ -1325,11 +1326,11 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// thinkingBadge returns the styled right-aligned roster badge for an agent's
-// thinking label and the compact single-cell form used in the glyph-only
-// degradation step. Both are empty when the agent has no thinking
-// configuration. The vocabulary carries no ✻ glyph: the effort gauge is the
-// only visual language for thinking.
+// thinkingBadge returns the styled right-aligned badge for an agent's thinking
+// label and the compact single-cell form used in the glyph-only degradation
+// step. Both are empty when the agent has no thinking configuration. The
+// vocabulary carries no ✻ glyph: the effort gauge is the only visual language
+// for thinking.
 func thinkingBadge(label string) (badge, compact string) {
 	kind, tokens := classifyThinking(label)
 	switch kind {
@@ -1357,197 +1358,79 @@ func thinkingBadge(label string) (badge, compact string) {
 	}
 }
 
-// cardThinkingLine returns the focus card's thinking body line
-// "thinking <gauge> <wording>" (no ✻), or "" when the agent has no thinking
-// configuration. The gauge and wording are shared with the agent-details dialog
-// via toolcommon.ThinkingGaugeValue, so all three surfaces speak one language.
-func cardThinkingLine(label string) string {
-	gv := toolcommon.ThinkingGaugeValue(label)
-	if gv == "" {
-		return ""
-	}
-	return styles.MutedStyle.Render("thinking ") + gv
-}
-
-// rosterLayout holds the roster column widths computed once per render so all
-// rows align. Each non-current agent renders on two lines: line 1 is the
-// shortcut + colored name with the thinking badge right-aligned at the content
-// edge; line 2 is the indented provider/model. glyphOnly collapses line 1's
-// badge to a single cell near MinWidth.
-type rosterLayout struct {
-	contentWidth int
-	nameWidth    int
-	modelWidth   int
-	badgeWidth   int
-	glyphOnly    bool
-}
-
-// computeRosterLayout derives the roster column widths for the given content
-// width. The two-line layout always keeps the model (on its own line 2), so the
-// only degradation is line 1's badge: below rowGlyphOnlyMinWidth (near MinWidth)
-// the gauge collapses to a single cell to give the name column more room.
-func (m *model) computeRosterLayout(contentWidth int, currentAgent string) rosterLayout {
-	fullBadge, compactBadge := 0, 0
+// badgeColumnWidth returns the widest thinking badge across the roster so every
+// agent line reserves the same badge column and the badges stay aligned.
+// glyphOnly selects the single-cell compact form used near MinWidth.
+func (m *model) badgeColumnWidth(glyphOnly bool) int {
+	w := 0
 	for _, a := range m.availableAgents {
-		if a.Name == currentAgent {
-			continue // the current agent renders as the card, not a row
+		full, compact := thinkingBadge(a.Thinking)
+		b := full
+		if glyphOnly {
+			b = compact
 		}
-		b, c := thinkingBadge(a.Thinking)
-		fullBadge = max(fullBadge, lipgloss.Width(b))
-		compactBadge = max(compactBadge, lipgloss.Width(c))
+		w = max(w, lipgloss.Width(b))
 	}
-
-	l := rosterLayout{contentWidth: contentWidth, badgeWidth: fullBadge}
-	if contentWidth < rowGlyphOnlyMinWidth {
-		l.glyphOnly = true
-		l.badgeWidth = compactBadge
-	}
-
-	// Line 1: shortcut + name + minGap + right-aligned badge.
-	l.nameWidth = max(1, contentWidth-rowShortcutWidth-minGap-l.badgeWidth)
-	// Line 2: indented provider/model.
-	l.modelWidth = max(1, contentWidth-rowIndentWidth)
-	return l
+	return w
 }
 
-// rowShortcutCell renders the fixed-width leading cell of a roster row: the
-// spinner frame when the agent is working, the "^N" hint for agents 1–9, or
-// blank padding otherwise.
-func (m *model) rowShortcutCell(agent runtime.AgentDetails, index int) string {
+// padRight pads a (possibly styled) string with trailing spaces to width.
+func padRight(s string, width int) string {
+	return s + strings.Repeat(" ", max(0, width-lipgloss.Width(s)))
+}
+
+// padLeft pads a (possibly styled) string with leading spaces to width, i.e.
+// right-aligns it within the column.
+func padLeft(s string, width int) string {
+	return strings.Repeat(" ", max(0, width-lipgloss.Width(s))) + s
+}
+
+// renderAgentLine renders a single agent as two lines:
+//
+//	▶ name            <thinking> ^N
+//	  provider/model
+//
+// Line 1: the name is left-aligned in its accent color, the thinking badge is
+// right-aligned in a shared column, and the "^N" switch shortcut sits flush
+// against the right edge. The current agent is marked with ▶ (or the spinner
+// while it — or any agent — is working); other agents pad the marker column so
+// the names stay aligned. Line 2: the indented provider/model, left-truncated
+// so its informative tail survives. The description is omitted. Agents past the
+// 9th have no shortcut.
+func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth, nameWidth, badgeWidth int, glyphOnly, current bool) []string {
+	agentStyle := styles.AgentAccentStyleFor(agent.Name)
+
+	var marker string
 	switch {
 	case m.workingAgent == agent.Name:
-		frame := styles.AgentAccentStyleFor(agent.Name).Render(m.spinner.RawFrame())
-		return frame + strings.Repeat(" ", max(0, rowShortcutWidth-lipgloss.Width(frame)))
-	case index >= 0 && index < 9:
-		hint := styles.MutedStyle.Render(fmt.Sprintf("^%d", index+1))
-		return hint + strings.Repeat(" ", max(0, rowShortcutWidth-lipgloss.Width(hint)))
-	default:
-		return strings.Repeat(" ", rowShortcutWidth)
+		marker = agentStyle.Render(m.spinner.RawFrame())
+	case current:
+		marker = agentStyle.Render("▶")
 	}
-}
+	left := padRight(marker, agentMarkerWidth) + agentStyle.Render(toolcommon.TruncateText(agent.Name, nameWidth))
 
-// rightAlign appends padding so hint sits flush against the right edge of width.
-func rightAlign(left, hint string, width int) string {
-	if hint == "" {
-		return left
-	}
-	space := max(1, width-lipgloss.Width(left)-lipgloss.Width(hint))
-	return left + strings.Repeat(" ", space) + hint
-}
-
-// renderAgentRow renders a non-current agent as two lines: line 1 is the
-// shortcut (or spinner) + colored name with the thinking badge right-aligned at
-// the content edge; line 2 is the indented provider/model (or harness type).
-// Harness and non-reasoning agents simply have no badge on line 1. Both lines
-// are owned by the agent so a click on either switches to it.
-func (m *model) renderAgentRow(agent runtime.AgentDetails, index int, l rosterLayout) []string {
-	agentStyle := styles.AgentAccentStyleFor(agent.Name)
-	shortcut := m.rowShortcutCell(agent, index)
-
-	name := toolcommon.TruncateText(agent.Name, l.nameWidth)
 	badge, compact := thinkingBadge(agent.Thinking)
-	if l.glyphOnly {
+	if glyphOnly {
 		badge = compact
 	}
-	line1 := rightAlign(shortcut+agentStyle.Render(name), badge, l.contentWidth)
+
+	var shortcut string
+	if index >= 0 && index < 9 {
+		shortcut = styles.MutedStyle.Render(fmt.Sprintf("^%d", index+1))
+	}
+
+	right := padLeft(badge, badgeWidth) + " " + padLeft(shortcut, agentShortcutWidth)
+	gap := max(1, contentWidth-lipgloss.Width(left)-lipgloss.Width(right))
+	line1 := left + strings.Repeat(" ", gap) + right
 
 	modelText := agent.Model
 	if agent.Provider != "" {
 		modelText = agent.Provider + "/" + agent.Model
 	}
-	model := toolcommon.TruncateTextLeft(modelText, l.modelWidth)
-	line2 := strings.Repeat(" ", rowIndentWidth) + styles.MutedStyle.Render(model)
+	model := toolcommon.TruncateTextLeft(modelText, max(1, contentWidth-agentMarkerWidth))
+	line2 := strings.Repeat(" ", agentMarkerWidth) + styles.MutedStyle.Render(model)
 
 	return []string{line1, line2}
-}
-
-// renderAgentCard renders the multi-line focus card for the current agent.
-func (m *model) renderAgentCard(agent runtime.AgentDetails, index, contentWidth int) []string {
-	agentStyle := styles.AgentAccentStyleFor(agent.Name)
-	var prefix string
-	if m.workingAgent == agent.Name {
-		prefix = agentStyle.Render(m.spinner.RawFrame()) + " "
-	} else {
-		prefix = agentStyle.Render("▶") + " "
-	}
-	var hint string
-	if index >= 0 && index < 9 {
-		hint = styles.MutedStyle.Render(fmt.Sprintf("^%d", index+1))
-	}
-	header := rightAlign(prefix+agentStyle.Render(agent.Name), hint, contentWidth)
-
-	bodyWidth := contentWidth - treePrefixWidth
-	var nodes [][]string
-	if desc := wrapDescription(agent.Description, bodyWidth, 2); len(desc) > 0 {
-		nodes = append(nodes, desc)
-	}
-	modelText := agent.Model
-	if agent.Provider != "" {
-		modelText = agent.Provider + "/" + agent.Model
-	}
-	if modelText != "" {
-		nodes = append(nodes, []string{toolcommon.TruncateTextLeft(modelText, bodyWidth)})
-	}
-	if line := cardThinkingLine(agent.Thinking); line != "" {
-		nodes = append(nodes, []string{line})
-	}
-
-	lines := []string{header}
-	lines = append(lines, renderTreeNodes(nodes)...)
-	return lines
-}
-
-// renderTreeNodes renders body nodes with tree-structure prefixes. Each node is
-// one or more already-styled lines; the last node uses "└ ", earlier nodes use
-// "├ ", and continuation lines use "│ " (or blank under the last node).
-func renderTreeNodes(nodes [][]string) []string {
-	var out []string
-	for ni, node := range nodes {
-		last := ni == len(nodes)-1
-		for li, line := range node {
-			var prefix string
-			switch {
-			case li == 0 && last:
-				prefix = "└ "
-			case li == 0:
-				prefix = "├ "
-			case last:
-				prefix = "  "
-			default:
-				prefix = "│ "
-			}
-			out = append(out, styles.MutedStyle.Render(prefix)+line)
-		}
-	}
-	return out
-}
-
-// wrapDescription wraps plain description text to at most maxLines lines within
-// width, appending an ellipsis to the final line when content is dropped.
-func wrapDescription(desc string, width, maxLines int) []string {
-	if desc == "" || width <= 0 || maxLines <= 0 {
-		return nil
-	}
-	wrapped := toolcommon.WrapLinesWords(desc, width)
-	if len(wrapped) <= maxLines {
-		return wrapped
-	}
-	wrapped = wrapped[:maxLines]
-	wrapped[maxLines-1] = ellipsizePlain(wrapped[maxLines-1], width)
-	return wrapped
-}
-
-// ellipsizePlain shortens plain text to width and guarantees a trailing ellipsis
-// to signal dropped content.
-func ellipsizePlain(s string, width int) string {
-	if width <= 1 {
-		return "…"
-	}
-	r := []rune(s)
-	for lipgloss.Width(string(r)) > width-1 {
-		r = r[:len(r)-1]
-	}
-	return strings.TrimRight(string(r), " ") + "…"
 }
 
 // buildAgentClickZones populates agentClickZones from the explicit per-line

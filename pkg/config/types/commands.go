@@ -25,6 +25,12 @@ import (
 //	plan:
 //	  description: "Hand off to the planner sub-agent"
 //	  agent: planner
+//
+// URL-opening format (object value):
+//
+//	feedback:
+//	  description: "Open the feedback site"
+//	  url: https://example.com/feedback
 type Command struct {
 	// Description is shown in completion dialogs and help text.
 	// For simple format commands, this is empty and the instruction is used for display.
@@ -41,6 +47,13 @@ type Command struct {
 	// hand off to a different agent with a single slash command, e.g. /plan
 	// to switch to the "planner" sub-agent.
 	Agent string `json:"agent,omitempty"`
+
+	// URL, when set, makes the command open the given URL in the user's
+	// default browser instead of sending a prompt to the agent. Any custom
+	// URI scheme the OS knows how to handle works too (e.g. docker-desktop://
+	// to deep-link into Docker Desktop). The token {{session_id}} is replaced
+	// at invocation time with the current session ID (URL-query-escaped).
+	URL string `json:"url,omitempty"`
 }
 
 // DisplayText returns the text to show in completion dialogs.
@@ -54,6 +67,9 @@ func (c Command) DisplayText() string {
 	}
 	if c.Instruction != "" {
 		return c.Instruction
+	}
+	if c.URL != "" {
+		return "Open " + c.URL
 	}
 	if c.Agent != "" {
 		return "Switch to " + c.Agent
@@ -143,19 +159,20 @@ func parseCommandValue(v any) (Command, error) {
 		desc, _ := val["description"].(string)
 		inst, _ := val["instruction"].(string)
 		agent, _ := val["agent"].(string)
+		url, _ := val["url"].(string)
 
-		if inst == "" && desc == "" && agent == "" {
-			return Command{}, errors.New("command must have at least 'instruction', 'description' or 'agent'")
+		if inst == "" && desc == "" && agent == "" && url == "" {
+			return Command{}, errors.New("command must have at least 'instruction', 'description', 'agent' or 'url'")
 		}
 		// Fallback: if no instruction is provided but we have a description (and no
-		// agent target), use the description as the instruction. This allows shorthand
-		// command definitions like `{"cmd": "Do something"}` where the description
-		// doubles as the instruction text.
-		if inst == "" && agent == "" {
+		// agent target or URL), use the description as the instruction. This allows
+		// shorthand command definitions like `{"cmd": "Do something"}` where the
+		// description doubles as the instruction text.
+		if inst == "" && agent == "" && url == "" {
 			inst = desc
 		}
 
-		return Command{Description: desc, Instruction: inst, Agent: agent}, nil
+		return Command{Description: desc, Instruction: inst, Agent: agent, URL: url}, nil
 	default:
 		return Command{}, fmt.Errorf("invalid command value type: %T", v)
 	}

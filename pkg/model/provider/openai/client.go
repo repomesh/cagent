@@ -214,7 +214,7 @@ func (c *Client) Close() {
 // convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
 // using the shared oaistream implementation.
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
-	converted := oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore())
+	converted := oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
 	// Coalesce consecutive same-role (system/user) messages into one.
 	// docker-agent emits a separate system message per source (the agent
 	// instruction plus each toolset's instructions), but some OpenAI-compatible
@@ -682,7 +682,7 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 						}
 					case chat.MessagePartTypeDocument:
 						if part.Document != nil {
-							docParts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore())
+							docParts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
 							if err != nil {
 								slog.WarnContext(ctx, "failed to convert document attachment", "error", err, "doc", part.Document.Name)
 								continue
@@ -801,7 +801,7 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 					}
 				case chat.MessagePartTypeDocument:
 					if part.Document != nil {
-						docParts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore())
+						docParts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
 						if err != nil {
 							slog.WarnContext(ctx, "failed to convert tool result document attachment", "error", err, "doc", part.Document.Name)
 							continue
@@ -1165,14 +1165,15 @@ func isCustomProvider(cfg *latest.ModelConfig) bool {
 // autoSelectsResponsesAPI reports whether, absent an explicit api_type, the
 // provider should auto-select the Responses API for models that require it.
 //
-// This covers OpenAI directly and GitHub Copilot, which proxies the same
+// This covers OpenAI directly, GitHub Copilot (which proxies the same
 // OpenAI models and rejects newer ones (gpt-5, Codex, ...) on the legacy
-// /chat/completions endpoint with a 400. Detection is driven by
-// modelinfo.SupportsResponsesAPI so new models are picked up by naming
-// convention rather than a hardcoded allow-list.
+// /chat/completions endpoint with a 400), and OpenCode Zen (which publishes
+// the same OpenAI Responses endpoint for its GPT model lineup). Detection is
+// driven by modelinfo.SupportsResponsesAPI so new models are picked up by
+// naming convention rather than a hardcoded allow-list.
 func autoSelectsResponsesAPI(provider string) bool {
 	switch provider {
-	case "openai", "github-copilot":
+	case "openai", "github-copilot", "opencode-zen":
 		return true
 	}
 	return false

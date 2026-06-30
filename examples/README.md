@@ -65,6 +65,7 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | File | What it shows |
 |------|---------------|
 | [`shell.yaml`](shell.yaml) | Plain `shell` toolset. |
+| [`shell_safer.yaml`](shell_safer.yaml) | Shell toolset wired with the `safer_shell` builtin under `pre_tool_use` with `preempt_yolo: true` — destructive commands force confirmation regardless of `--yolo`; known-safe reads pass through silently. |
 | [`filesystem.yaml`](filesystem.yaml) | Plain `filesystem` toolset. |
 | [`filesystem_allow_deny.yaml`](filesystem_allow_deny.yaml) | Restricting the filesystem tool with allow/deny path lists. |
 | [`script_shell.yaml`](script_shell.yaml) | Defining custom shell commands as named tools via `type: script`. |
@@ -190,6 +191,7 @@ remote MCP endpoints.
 | [`custom_provider.yaml`](custom_provider.yaml) | Talking to any OpenAI-compatible endpoint via a custom provider. |
 | [`compose-secrets.yaml`](compose-secrets.yaml) | Reading API keys from Docker Compose / Swarm secrets. |
 | [`env_placeholders.yaml`](env_placeholders.yaml) | `${ENV_VAR}` substitution inside the YAML. |
+| [`model_env_substitution.yaml`](model_env_substitution.yaml) | `${env.VAR}` substitution in a model's `model` / `base_url`. |
 | [`nebius.yaml`](nebius.yaml) | Nebius cloud provider. |
 | [`grok.yaml`](grok.yaml) | xAI Grok model. |
 | [`github-copilot.yaml`](github-copilot.yaml) | GitHub Copilot models via OAuth device-flow. |

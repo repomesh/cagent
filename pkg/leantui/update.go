@@ -2,6 +2,8 @@ package leantui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -10,7 +12,9 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
 func (m *model) handleKey(ctx context.Context, k key) {
@@ -34,6 +38,8 @@ func (m *model) handleKey(ctx context.Context, k key) {
 		m.editor.insertNewline()
 	case keyTab:
 		m.handleTab()
+	case keyShiftTab:
+		m.handleCycleThinkingLevel(ctx)
 	case keyUp:
 		if m.ac.active {
 			m.ac.moveUp()
@@ -114,6 +120,26 @@ func (m *model) handleTab() {
 		m.editor.setText("/" + cmd.name + " ")
 		m.ac.sync(m.editor.text())
 	}
+}
+
+func (m *model) handleCycleThinkingLevel(ctx context.Context) {
+	if m.app == nil {
+		return
+	}
+	if !m.app.SupportsModelSwitching() {
+		m.addNotice("", "Thinking levels can't be changed with remote runtimes", stMuted())
+		return
+	}
+	level, err := m.app.CycleAgentThinkingLevel(ctx)
+	if err != nil {
+		if errors.Is(err, runtime.ErrUnsupported) {
+			m.addNotice("", "Current model does not support thinking levels", stMuted())
+			return
+		}
+		m.addNotice("✗ ", fmt.Sprintf("Failed to change thinking level: %v", err), stError())
+		return
+	}
+	m.status.thinking = level.String()
 }
 
 func (m *model) submit(ctx context.Context, text string) {
@@ -259,27 +285,33 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.appendPending(blockAssistant, e.Content)
 	case *runtime.PartialToolCallEvent:
 		m.flushPending()
-		name := e.ToolCall.Function.Name
+		toolDef := tools.Tool{Name: e.ToolCall.Function.Name}
 		if e.ToolDefinition != nil {
-			name = e.ToolDefinition.DisplayName()
+			toolDef = *e.ToolDefinition
 		}
-		m.upsertTool(e.ToolCall.ID, name, e.ToolCall.Function.Arguments)
+		m.upsertTool(e.GetAgentName(), e.ToolCall, toolDef, tuitypes.ToolStatusPending)
 	case *runtime.ToolCallEvent:
 		m.flushPending()
-		m.upsertTool(e.ToolCall.ID, e.ToolDefinition.DisplayName(), e.ToolCall.Function.Arguments)
+		m.upsertTool(e.GetAgentName(), e.ToolCall, e.ToolDefinition, tuitypes.ToolStatusRunning)
 	case *runtime.ToolCallOutputEvent:
-		if tv := m.tools[e.ToolCallID]; tv != nil {
-			tv.output += e.Output
+		if tv := m.tools[e.ToolCallID]; tv != nil && tv.message != nil {
+			tv.message.AppendToolOutput(e.Output)
+			if tv.message.ToolStatus == tuitypes.ToolStatusPending {
+				tv.message.ToolStatus = tuitypes.ToolStatusRunning
+				if tv.message.StartedAt == nil {
+					now := time.Now()
+					tv.message.StartedAt = &now
+				}
+			}
 		}
 	case *runtime.ToolCallResponseEvent:
 		m.finishTool(e)
 	case *runtime.ToolCallConfirmationEvent:
-		cmd, summary := describeToolCall(e.ToolCall.Function.Arguments)
+		m.removeTool(toolViewID(e.ToolCall))
+		toolDef := ensureToolDefinition(e.ToolCall, e.ToolDefinition)
 		m.confirm = &confirmState{
-			name:    e.ToolDefinition.DisplayName(),
-			tool:    e.ToolDefinition.Name,
-			command: cmd,
-			summary: summary,
+			tool:     toolDef.Name,
+			toolView: *newToolView(e.GetAgentName(), e.ToolCall, toolDef, tuitypes.ToolStatusConfirmation),
 		}
 	case *runtime.TokenUsageEvent:
 		if e.Usage != nil {
@@ -289,6 +321,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	case *runtime.AgentInfoEvent:
 		m.status.agent = e.AgentName
+		if m.sessionState != nil {
+			m.sessionState.SetCurrentAgentName(e.AgentName)
+		}
 		if e.Model != "" {
 			m.status.model = e.Model
 		}
@@ -376,45 +411,100 @@ func (m *model) flushPending() {
 	}
 }
 
-func (m *model) upsertTool(id, name, argsJSON string) {
+func (m *model) upsertTool(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status tuitypes.ToolStatus) {
+	id := toolViewID(toolCall)
 	tv := m.tools[id]
 	if tv == nil {
-		tv = &toolView{name: name}
+		tv = newToolView(agentName, toolCall, toolDef, status)
 		m.tools[id] = tv
 		m.toolOrder = append(m.toolOrder, id)
-		m.toolStart[id] = time.Now()
+		return
 	}
-	if name != "" {
-		tv.name = name
+
+	msg := tv.message
+	if msg == nil {
+		msg = newToolView(agentName, toolCall, toolDef, status).message
+		tv.message = msg
+		return
 	}
-	tv.command, tv.argsSummary = describeToolCall(argsJSON)
+
+	if agentName != "" {
+		msg.Sender = agentName
+	}
+	if toolDef.Name != "" || toolCall.Function.Name != "" {
+		msg.ToolDefinition = ensureToolDefinition(toolCall, toolDef)
+	}
+	msg.ToolStatus = status
+	if status == tuitypes.ToolStatusRunning && msg.StartedAt == nil {
+		now := time.Now()
+		msg.StartedAt = &now
+	}
+	if toolCall.ID != "" {
+		msg.ToolCall.ID = toolCall.ID
+	}
+	if toolCall.Type != "" {
+		msg.ToolCall.Type = toolCall.Type
+	}
+	if toolCall.Function.Name != "" {
+		msg.ToolCall.Function.Name = toolCall.Function.Name
+	}
+	if toolCall.Function.Arguments != "" {
+		if status == tuitypes.ToolStatusPending {
+			msg.ToolCall.Function.Arguments += toolCall.Function.Arguments
+		} else {
+			msg.ToolCall.Function.Arguments = toolCall.Function.Arguments
+		}
+	}
 }
 
 func (m *model) finishTool(e *runtime.ToolCallResponseEvent) {
 	id := e.ToolCallID
 	tv := m.tools[id]
 	if tv == nil {
-		tv = &toolView{name: e.ToolDefinition.DisplayName()}
-		m.toolStart[id] = time.Now()
+		toolCall := tools.ToolCall{ID: id, Function: tools.FunctionCall{Name: e.ToolDefinition.Name}}
+		tv = newToolView(e.GetAgentName(), toolCall, e.ToolDefinition, tuitypes.ToolStatusCompleted)
 	}
-	tv.done = true
-	if e.Result != nil {
-		tv.isError = e.Result.IsError
+	if tv.message == nil {
+		return
 	}
-	if strings.TrimSpace(tv.output) == "" {
-		tv.output = e.Response
-	}
-	tv.elapsed = time.Since(m.toolStart[id])
 
-	view := *tv
-	m.addBlock(func(w int) []string { return renderTool(view, w) })
+	status := tuitypes.ToolStatusCompleted
+	if e.Result != nil && e.Result.IsError {
+		status = tuitypes.ToolStatusError
+	}
+	tv.message.ToolStatus = status
+	tv.message.ToolDefinition = ensureToolDefinition(tv.message.ToolCall, e.ToolDefinition)
+	tv.message.Content = strings.ReplaceAll(e.Response, "\t", "    ")
+	tv.message.ToolResult = e.Result.WithoutPayload()
+	tv.images = inlineImagesFromToolResult(e.Result)
 
+	msg := *tv.message
+	view := toolView{message: &msg, images: tv.images}
+	m.addBlock(func(w int) []string { return renderToolWithState(view, w, 0, m.sessionState) })
+
+	m.removeTool(id)
+}
+
+func (m *model) removeTool(id string) {
+	if id == "" {
+		return
+	}
 	delete(m.tools, id)
-	delete(m.toolStart, id)
 	m.toolOrder = slices.DeleteFunc(m.toolOrder, func(s string) bool { return s == id })
 }
 
+func toolViewID(toolCall tools.ToolCall) string {
+	if toolCall.ID != "" {
+		return toolCall.ID
+	}
+	return toolCall.Function.Name
+}
+
 func (m *model) applyTeamInfo(ctx context.Context, e *runtime.TeamInfoEvent) {
+	if m.sessionState != nil {
+		m.sessionState.SetAvailableAgents(e.AvailableAgents)
+		m.sessionState.SetCurrentAgentName(e.CurrentAgent)
+	}
 	for _, a := range e.AvailableAgents {
 		if a.Name != e.CurrentAgent {
 			continue
@@ -477,7 +567,6 @@ func (m *model) resetConversation() {
 	}
 	m.pending = nil
 	m.tools = make(map[string]*toolView)
-	m.toolStart = make(map[string]time.Time)
 	m.toolOrder = nil
 	m.queue = nil
 	m.busy = false
@@ -516,7 +605,8 @@ func (m *model) commitHelp() {
 			stBold().Render("Shortcuts"),
 			stMuted().Render("  Enter      send             Alt+Enter   insert newline"),
 			stMuted().Render("  Up/Down    history           Tab         complete command"),
-			stMuted().Render("  Ctrl+C     cancel / quit     Ctrl+W      delete previous word"),
+			stMuted().Render("  Shift+Tab  cycle thinking    Ctrl+C      cancel / quit"),
+			stMuted().Render("  Ctrl+W     delete previous word"),
 		}
 	})
 }

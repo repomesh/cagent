@@ -17,27 +17,26 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// nowFn returns the current time. Indirected through a package-level variable
-// so that tests can install a deterministic clock via setNowForTest.
-var nowFn = time.Now
-
-// newIDFn returns a fresh session ID. Indirected through a package-level
-// variable so that tests can install a deterministic ID generator via
-// setIDForTest.
-var newIDFn = func() string { return uuid.New().String() }
+// defaultNewID returns a fresh random session ID.
+func defaultNewID() string { return uuid.New().String() }
 
 const (
 	// toolContentPlaceholder is the text used to replace truncated tool content
 	toolContentPlaceholder = "[content truncated]"
 )
 
-// Item represents either a message or a sub-session
+// Item represents a message, a sub-session, a summary, or a recorded error.
 type Item struct {
 	// Message holds a regular conversation message
 	Message *Message `json:"message,omitempty"`
 
 	// SubSession holds a complete sub-session from task transfers
 	SubSession *Session `json:"sub_session,omitempty"`
+
+	// Error holds a recorded agent failure. Persisting failures lets the
+	// error survive a session reload and travel with a shared JSON export
+	// for diagnostics.
+	Error *Error `json:"error,omitempty"`
 
 	// Summary is a summary of the session up until this point
 	Summary string `json:"summary,omitempty"`
@@ -64,10 +63,40 @@ func (si *Item) IsSubSession() bool {
 	return si.SubSession != nil
 }
 
+// IsError returns true if this item contains a recorded error
+func (si *Item) IsError() bool {
+	return si.Error != nil
+}
+
+// Error records an agent failure that occurred during a run. It is stored as
+// a session item so the error is visible when the session is reopened and is
+// included in a shared JSON session export for diagnostics.
+type Error struct {
+	// Message is the human-readable error message.
+	Message string `json:"message"`
+	// Code classifies the error (see runtime.ErrorCode* constants). Empty
+	// when the error was emitted without a code.
+	Code string `json:"code,omitempty"`
+	// AgentName is the agent that was running when the error occurred.
+	AgentName string `json:"agent_name,omitempty"`
+	// CreatedAt is the RFC3339 timestamp of the failure.
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
 // Session represents the agent's state including conversation history and variables
 type Session struct {
 	// mu protects Messages from concurrent read/write access.
 	mu sync.RWMutex `json:"-"`
+
+	// now and newID are per-session sources of time and identity. They are
+	// indirected (rather than calling time.Now/uuid.New directly) so that
+	// tests can inject a deterministic clock and ID generator via WithClock
+	// and WithIDGen without mutating any process-global state — which keeps
+	// such tests safe to run with t.Parallel(). Sessions created outside New
+	// (e.g. via JSON deserialization or struct literals) leave these nil; use
+	// the now() and newID() accessors which fall back to real implementations.
+	clock func() time.Time `json:"-"`
+	idgen func() string    `json:"-"`
 
 	// ID is the unique identifier for the session
 	ID string `json:"id"`
@@ -159,6 +188,19 @@ type Session struct {
 	// recursive run_skill calls.
 	ExcludedTools []string `json:"-"`
 
+	// AllowedTools, when non-empty, restricts this session's agent tools to
+	// those whose names match an entry (filepath.Match-style glob, falling
+	// back to an exact match). Used by fork-mode skill sub-sessions that
+	// declare an allowed-tools list. An empty list imposes no restriction.
+	// ExtraToolSets are always kept regardless of this filter.
+	AllowedTools []string `json:"-"`
+
+	// ExtraToolSets holds additional toolsets injected into this session on
+	// top of the agent's own toolsets. Used by fork-mode skill sub-sessions
+	// that declare assistive toolsets. Their tools bypass the AllowedTools
+	// filter (the skill explicitly asked for them).
+	ExtraToolSets []tools.ToolSet `json:"-"`
+
 	// AgentName, when set, tells RunStream which agent to use for this session
 	// instead of reading from the shared runtime currentAgent field. This is
 	// required for background agent tasks where multiple sessions may run
@@ -210,18 +252,30 @@ type Message struct {
 }
 
 func ImplicitUserMessage(content string) *Message {
-	msg := UserMessage(content)
+	return ImplicitUserMessageAt(time.Now(), content)
+}
+
+// ImplicitUserMessageAt is like ImplicitUserMessage but stamps the message with
+// an explicit creation time, letting callers (and tests) avoid the wall clock.
+func ImplicitUserMessageAt(createdAt time.Time, content string) *Message {
+	msg := UserMessageAt(createdAt, content)
 	msg.Implicit = true
 	return msg
 }
 
 func UserMessage(content string, multiContent ...chat.MessagePart) *Message {
+	return UserMessageAt(time.Now(), content, multiContent...)
+}
+
+// UserMessageAt is like UserMessage but stamps the message with an explicit
+// creation time, letting callers (and tests) avoid the wall clock.
+func UserMessageAt(createdAt time.Time, content string, multiContent ...chat.MessagePart) *Message {
 	return &Message{
 		Message: chat.Message{
 			Role:         chat.MessageRoleUser,
 			Content:      content,
 			MultiContent: multiContent,
-			CreatedAt:    nowFn().Format(time.RFC3339),
+			CreatedAt:    createdAt.Format(time.RFC3339),
 		},
 	}
 }
@@ -234,11 +288,17 @@ func NewAgentMessage(agentName string, message *chat.Message) *Message {
 }
 
 func SystemMessage(content string) *Message {
+	return SystemMessageAt(time.Now(), content)
+}
+
+// SystemMessageAt is like SystemMessage but stamps the message with an explicit
+// creation time, letting callers (and tests) avoid the wall clock.
+func SystemMessageAt(createdAt time.Time, content string) *Message {
 	return &Message{
 		Message: chat.Message{
 			Role:      chat.MessageRoleSystem,
 			Content:   content,
-			CreatedAt: nowFn().Format(time.RFC3339),
+			CreatedAt: createdAt.Format(time.RFC3339),
 		},
 	}
 }
@@ -253,6 +313,11 @@ func NewMessageItem(msg *Message) Item {
 // NewSubSessionItem creates a SessionItem containing a sub-session
 func NewSubSessionItem(subSession *Session) Item {
 	return Item{SubSession: subSession}
+}
+
+// NewErrorItem creates a SessionItem containing a recorded error
+func NewErrorItem(e *Error) Item {
+	return Item{Error: e}
 }
 
 // EvalResult contains the evaluation scoring outcome for a session.
@@ -448,8 +513,8 @@ func cloneSchemaValue(v any) any {
 // AddMessage adds a message to the session
 func (s *Session) AddMessage(msg *Message) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.Messages = append(s.Messages, NewMessageItem(msg))
-	s.mu.Unlock()
 }
 
 // SetUsage records cumulative input/output token counts under s.mu.
@@ -457,9 +522,9 @@ func (s *Session) AddMessage(msg *Message) {
 // these fields without it.
 func (s *Session) SetUsage(input, output int64) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.InputTokens = input
 	s.OutputTokens = output
-	s.mu.Unlock()
 }
 
 // Usage returns a consistent snapshot of the cumulative input/output
@@ -476,17 +541,25 @@ func (s *Session) Usage() (input, output int64) {
 // observe the new tokens without the matching summary item.
 func (s *Session) ApplyCompaction(inputTokens, outputTokens int64, item Item) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.InputTokens = inputTokens
 	s.OutputTokens = outputTokens
 	s.Messages = append(s.Messages, item)
-	s.mu.Unlock()
 }
 
 // AddSubSession adds a sub-session to the session
 func (s *Session) AddSubSession(subSession *Session) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.Messages = append(s.Messages, NewSubSessionItem(subSession))
-	s.mu.Unlock()
+}
+
+// AddError appends a recorded error to the session so it survives reload and
+// JSON export.
+func (s *Session) AddError(e *Error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Messages = append(s.Messages, NewErrorItem(e))
 }
 
 // Duration calculates the duration of the session from message timestamps.
@@ -645,19 +718,19 @@ type Opt func(s *Session)
 
 func WithUserMessage(content string) Opt {
 	return func(s *Session) {
-		s.AddMessage(UserMessage(content))
+		s.AddMessage(UserMessageAt(s.now(), content))
 	}
 }
 
 func WithImplicitUserMessage(content string) Opt {
 	return func(s *Session) {
-		s.AddMessage(ImplicitUserMessage(content))
+		s.AddMessage(ImplicitUserMessageAt(s.now(), content))
 	}
 }
 
 func WithSystemMessage(content string) Opt {
 	return func(s *Session) {
-		s.AddMessage(SystemMessage(content))
+		s.AddMessage(SystemMessageAt(s.now(), content))
 	}
 }
 
@@ -758,12 +831,52 @@ func WithID(id string) Opt {
 	}
 }
 
+// WithClock injects the time source used for the session's CreatedAt, for
+// timestamping messages it generates (summaries, compaction input), and for
+// messages added through WithUserMessage/WithSystemMessage/
+// WithImplicitUserMessage. Because those message options read the clock when
+// they run, WithClock must precede them in the option list (the natural
+// ordering). Primarily for tests that need a deterministic clock; production
+// code leaves it unset and falls back to time.Now.
+func WithClock(now func() time.Time) Opt {
+	return func(s *Session) {
+		s.clock = now
+	}
+}
+
+// WithIDGen injects the generator used to mint the session ID when no explicit
+// ID is provided. Primarily for tests that need deterministic IDs; production
+// code leaves it unset and falls back to a random UUID.
+func WithIDGen(gen func() string) Opt {
+	return func(s *Session) {
+		s.idgen = gen
+	}
+}
+
 // WithExcludedTools sets tool names that should be filtered out of the agent's
 // tool list for this session. This prevents recursive tool calls in skill
 // sub-sessions.
 func WithExcludedTools(names []string) Opt {
 	return func(s *Session) {
 		s.ExcludedTools = names
+	}
+}
+
+// WithAllowedTools restricts the session's agent tools to those whose names
+// match an entry (glob or exact). Used by fork-mode skill sub-sessions.
+// ExtraToolSets are exempt from this filter.
+func WithAllowedTools(names []string) Opt {
+	return func(s *Session) {
+		s.AllowedTools = names
+	}
+}
+
+// WithExtraToolSets injects additional toolsets into the session on top of
+// the agent's own toolsets. Used by fork-mode skill sub-sessions that declare
+// assistive toolsets.
+func WithExtraToolSets(toolSets []tools.ToolSet) Opt {
+	return func(s *Session) {
+		s.ExtraToolSets = toolSets
 	}
 }
 
@@ -835,17 +948,41 @@ func (s *Session) OwnCost() float64 {
 	return cost
 }
 
+// now returns the session's current time, falling back to time.Now for
+// sessions created without a clock (e.g. JSON deserialization).
+func (s *Session) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
+// newID returns a fresh session ID using the session's generator, falling back
+// to a random UUID for sessions created without one.
+func (s *Session) newID() string {
+	if s.idgen != nil {
+		return s.idgen()
+	}
+	return defaultNewID()
+}
+
 // New creates a new agent session
 func New(opts ...Opt) *Session {
 	s := &Session{
-		ID:              newIDFn(),
-		CreatedAt:       nowFn(),
 		SendUserMessage: true,
 	}
 
 	for _, opt := range opts {
 		opt(s)
 	}
+
+	// Generate the ID and creation time after options run so that
+	// WithClock/WithIDGen (and WithID) can influence them. WithID short-
+	// circuits the generator when an explicit ID was provided.
+	if s.ID == "" {
+		s.ID = s.newID()
+	}
+	s.CreatedAt = s.now()
 
 	slog.Debug("Creating new session", "session_id", s.ID)
 	return s
@@ -944,7 +1081,7 @@ func buildInvariantSystemMessages(a *agent.Agent) []chat.Message {
 // first kept message so that recent context is preserved after compaction.
 // Otherwise it is lastSummaryIndex+1 (i.e. right after the summary item), or
 // 0 when there is no summary.
-func buildSessionSummaryMessages(items []Item) ([]chat.Message, int) {
+func (s *Session) buildSessionSummaryMessages(items []Item) ([]chat.Message, int) {
 	var messages []chat.Message
 	// Find the last summary index to determine where conversation messages start
 	// and to include the summary in session summary messages
@@ -960,7 +1097,7 @@ func buildSessionSummaryMessages(items []Item) ([]chat.Message, int) {
 		messages = append(messages, chat.Message{
 			Role:      chat.MessageRoleUser,
 			Content:   "Session Summary: " + items[lastSummaryIndex].Summary,
-			CreatedAt: nowFn().Format(time.RFC3339),
+			CreatedAt: s.now().Format(time.RFC3339),
 		})
 	}
 
@@ -1025,7 +1162,7 @@ func (s *Session) CompactionInput() ([]chat.Message, []int) {
 		messages = append(messages, chat.Message{
 			Role:      chat.MessageRoleUser,
 			Content:   "Session Summary: " + items[lastSummaryIndex].Summary,
-			CreatedAt: nowFn().Format(time.RFC3339),
+			CreatedAt: s.now().Format(time.RFC3339),
 		})
 		// The synthetic message stands in for the prior summary item;
 		// when this index lands inside the kept tail we want the
@@ -1068,7 +1205,7 @@ func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Messag
 	items := s.snapshotItems()
 
 	// Build session summary messages (vary per session)
-	summaryMessages, startIndex := buildSessionSummaryMessages(items)
+	summaryMessages, startIndex := s.buildSessionSummaryMessages(items)
 
 	var messages []chat.Message
 	messages = append(messages, invariantMessages...)

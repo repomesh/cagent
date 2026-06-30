@@ -26,8 +26,12 @@ agents:
       You are a software architect. Use list_plans to see existing plans and
       read_plan to inspect one, then use write_plan to create or revise a plan
       by name. Always read before writing so you preserve content you want to
-      keep. Set the title and use "architect" as the author. When the
-      high-level plan is ready, hand off to the builder.
+      keep. Set the title and use "architect" as the author. Note the revision
+      you read and pass it as last_known_revision when you write, so a
+      concurrent edit by the builder is detected instead of silently lost; on a
+      conflict, re-read and retry. Use set_plan_status to mark the plan
+      "drafting" while you work and "ready-for-build" when the high-level plan
+      is done, then hand off to the builder.
     toolsets:
       - type: plan
     handoffs:
@@ -37,12 +41,15 @@ agents:
     model: openai/gpt-4o
     description: Reviews plans and adds concrete implementation steps
     instruction: |
-      You are an implementation engineer. Use read_plan to read the architect's
-      plan, then use write_plan to append concrete, actionable implementation
-      steps. Always read before writing so you don't lose the architect's work.
-      Use "builder" as the author. Delete obsolete plans with delete_plan. When
-      done, hand off back to root.
+      You are an implementation engineer. For large plans, edit cheaply: call
+      export_plan_to_file to write the current plan to a scratch file, edit that
+      file in place to add concrete implementation steps, then call
+      update_plan_from_file to commit it (passing last_known_revision so you
+      don't clobber a concurrent edit). Use "builder" as the author and
+      set_plan_status to "done" when the plan is complete. Delete obsolete plans
+      with delete_plan. When done, hand off back to root.
     toolsets:
       - type: plan
+      - type: filesystem
     handoffs:
       - root

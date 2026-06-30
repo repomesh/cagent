@@ -162,12 +162,29 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	// Early check for required env vars before loading models and tools.
 	env := runConfig.EnvProvider()
 
+	// Snapshot which models are `first_available` selectors before resolution
+	// rewrites them in place, so we can prefer locally-available DMR models for
+	// any selector that falls back to Docker Model Runner.
+	firstAvailableSelectors := map[string]bool{}
+	for name, m := range cfg.Models {
+		if m.IsFirstAvailable() {
+			firstAvailableSelectors[name] = true
+		}
+	}
+
 	// Resolve `first_available` model selectors into concrete provider/model
 	// definitions now that the environment is available, so the rest of the
 	// pipeline sees regular model definitions.
 	if err := config.ResolveFirstAvailableModels(ctx, cfg, runConfig.ModelsGateway, env); err != nil {
 		return nil, err
 	}
+
+	// For selectors that fell back to Docker Model Runner, prefer a model the
+	// user already pulled over forcing an on-demand pull of the default. The
+	// returned set names selectors with no usable local model, so an
+	// initialization failure surfaces a "no model available" fallback rather
+	// than an opaque pull error.
+	dmrFallbackSelectors := config.PreferLocalDMRModels(ctx, cfg, firstAvailableSelectors, dmr.ListModels)
 
 	if modelsStore != nil {
 		config.ResolveModelAliases(ctx, cfg, modelsStore)
@@ -220,6 +237,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithAddEnvironmentInfo(agentConfig.AddEnvironmentInfo),
 			agent.WithAddDescriptionParameter(agentConfig.AddDescriptionParameter),
 			agent.WithRedactSecrets(agentConfig.RedactSecretsEnabled()),
+			agent.WithSaferShell(agentConfig.SaferShellEnabled()),
 			agent.WithAddPromptFiles(promptFiles),
 			agent.WithMaxIterations(agentConfig.MaxIterations),
 			agent.WithMaxConsecutiveToolCalls(agentConfig.MaxConsecutiveToolCalls),
@@ -244,11 +262,13 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			}
 			opts = append(opts, agent.WithHarness(&harnessCfg))
 		} else {
-			models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, runConfig, loadOpts.providerRegistry)
+			models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, dmrFallbackSelectors, runConfig, loadOpts.providerRegistry)
 			if err != nil {
-				// Return auto model fallback errors and DMR not installed errors directly
-				// without wrapping to provide cleaner messages
-				if _, ok := errors.AsType[*config.AutoModelFallbackError](err); ok || errors.Is(err, dmr.ErrNotInstalled) {
+				// Return auto model fallback errors, DMR not installed errors, and
+				// DMR pull failures directly without wrapping to provide cleaner,
+				// actionable messages.
+				_, isPull := errors.AsType[*dmr.PullFailedError](err)
+				if _, ok := errors.AsType[*config.AutoModelFallbackError](err); ok || errors.Is(err, dmr.ErrNotInstalled) || isPull {
 					return nil, err
 				}
 				return nil, fmt.Errorf("failed to get models: %w", err)
@@ -290,13 +310,23 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 
 		// Add skills toolset if skills are enabled
 		if agentConfig.Skills.Enabled() {
-			loadedSkills := skills.Load(agentConfig.Skills.Sources)
+			loadedSkills := skills.Load(ctx, agentConfig.Skills.Sources)
 			loadedSkills = filterSkillsByName(loadedSkills, agentConfig.Skills.Include)
 			// Inline skills are defined in the agent config itself; they are
 			// always exposed and never subject to the include filter.
 			loadedSkills = append(loadedSkills, inlineSkills(agentConfig.Skills.Inline)...)
 			if len(loadedSkills) > 0 {
-				agentTools = append(agentTools, skillstool.New(loadedSkills, runConfig.WorkingDir))
+				skillSet := skillstool.New(loadedSkills, runConfig.WorkingDir)
+				// Resolve the additional toolsets each fork skill exposes in
+				// its sub-session from the top-level toolsets section.
+				forkToolSets, forkWarnings := forkSkillToolSets(ctx, cfg, &agentConfig, loadedSkills, parentDir, runConfig, loadOpts.toolsetRegistry, configName, expander)
+				if len(forkToolSets) > 0 {
+					skillSet.SetForkToolSets(forkToolSets)
+				}
+				if len(forkWarnings) > 0 {
+					opts = append(opts, agent.WithLoadTimeWarnings(forkWarnings))
+				}
+				agentTools = append(agentTools, skillSet)
 			}
 		}
 
@@ -378,7 +408,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}, nil
 }
 
-func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, autoModelFn func() latest.ModelConfig, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry) ([]provider.Provider, error) {
+func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, autoModelFn func() latest.ModelConfig, dmrFallbackSelectors map[string]bool, runConfig *config.RuntimeConfig, providerRegistry *provider.Registry) ([]provider.Provider, error) {
 	var models []provider.Provider
 
 	// Obtain the singleton store once, outside the loop.
@@ -394,6 +424,13 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			} else {
 				return nil, fmt.Errorf("model '%s' not found in configuration", name)
 			}
+		}
+		// A `first_available` selector that fell back to Docker Model Runner with
+		// no usable local model is, like `auto`, a best-effort selection: surface
+		// init failures as a "no model available" fallback rather than a raw
+		// pull error.
+		if dmrFallbackSelectors[name] {
+			isAutoModel = true
 		}
 		modelCfg.Name = name
 
@@ -658,9 +695,66 @@ func inlineSkills(defs []latest.InlineSkill) []skills.Skill {
 			Context:       d.Context,
 			Model:         d.Model,
 			AllowedTools:  d.AllowedTools,
+			Toolsets:      d.Toolsets,
 		})
 	}
 	return out
+}
+
+// forkSkillToolSets builds, for each fork skill that declares toolsets, the
+// list of toolsets to expose while the skill runs in its sub-session. Toolset
+// names are resolved against the top-level `toolsets` section and instantiated
+// through the same registry path agents use, so they get the standard
+// name/filter/instruction wrappers. Each toolset is wrapped in a
+// StartableToolSet so the runtime gets the same lazy, single-flight start and
+// failure-dedup semantics as the agent's own toolsets. Non-fork skills and
+// skills without declared toolsets are skipped. Creation failures are
+// collected as warnings (parity with getToolsForAgent) rather than aborting
+// the load.
+func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, loadedSkills []skills.Skill, parentDir string, runConfig *config.RuntimeConfig, registry ToolsetRegistry, configName string, expander *js.Expander) (map[string][]tools.ToolSet, []string) {
+	var (
+		result   map[string][]tools.ToolSet
+		warnings []string
+	)
+	for i := range loadedSkills {
+		skill := loadedSkills[i]
+		if !skill.IsFork() || len(skill.Toolsets) == 0 {
+			continue
+		}
+		var built []tools.ToolSet
+		for _, ref := range skill.Toolsets {
+			toolset, ok := cfg.Toolsets[ref]
+			if !ok {
+				// Validated in config.validateSkillToolsetRefs; defensive only.
+				warnings = append(warnings, fmt.Sprintf("skill %s references unknown toolset %s", skill.Name, ref))
+				continue
+			}
+			tool, err := registry.CreateTool(ctx, toolset, parentDir, runConfig, configName)
+			if err != nil {
+				slog.WarnContext(ctx, "Skill toolset configuration failed; skipping", "skill", skill.Name, "toolset", ref, "error", err)
+				warnings = append(warnings, fmt.Sprintf("skill %s toolset %s failed: %v", skill.Name, ref, err))
+				continue
+			}
+			wrapped := WithToolsFilter(tool, toolset.Tools...)
+			// Honor the agent-level readonly flag, exactly like getToolsForAgent:
+			// a readonly agent must not gain mutating tools through a fork skill.
+			wrapped = WithReadOnlyFilter(wrapped, toolset.ReadOnly || a.ReadOnly)
+			wrapped = WithInstructions(wrapped, expander.Expand(ctx, toolset.Instruction, nil))
+			wrapped = WithToon(wrapped, toolset.Toon)
+			wrapped = WithModelOverride(wrapped, toolset.Model)
+			// Wrap for lazy, single-flight start + failure-dedup, matching
+			// agent.WithToolSets. skillSubSessionTools calls Start() on every
+			// run-loop iteration, so the toolset must tolerate repeated starts.
+			built = append(built, tools.NewStartable(wrapped))
+		}
+		if len(built) > 0 {
+			if result == nil {
+				result = make(map[string][]tools.ToolSet)
+			}
+			result[skill.Name] = built
+		}
+	}
+	return result, warnings
 }
 
 // filterSkillsByName returns the subset of skills whose Name matches one of

@@ -1,14 +1,15 @@
 package tui
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	goruntime "runtime"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
@@ -41,8 +42,7 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	if msg.ParentSessionID == "" {
 		return m, notification.ErrorCmd("No parent session for branch")
 	}
-
-	ctx := context.Background()
+	ctx := m.ctx()
 
 	parent, err := store.GetSession(ctx, msg.ParentSessionID)
 	if err != nil {
@@ -113,8 +113,7 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 	if spawner == nil {
 		return m, notification.ErrorCmd("Session spawning not available")
 	}
-
-	ctx := context.Background()
+	ctx := m.ctx()
 
 	// Fork the session and clone all messages.
 	forkedSession, err := session.BranchSession(currentSession, len(currentSession.Messages))
@@ -153,15 +152,15 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 	if currentSess != nil && currentSess.ID == sessionID {
 		currentSess.Starred = !currentSess.Starred
 		m.chatPage.SetSessionStarred(currentSess.Starred)
-		if err := store.UpdateSession(context.Background(), currentSess); err != nil {
+		if err := store.UpdateSession(m.ctx(), currentSess); err != nil {
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
 		}
 	} else {
-		sess, err := store.GetSession(context.Background(), sessionID)
+		sess, err := store.GetSession(m.ctx(), sessionID)
 		if err != nil {
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
 		}
-		if err := store.SetSessionStarred(context.Background(), sessionID, !sess.Starred); err != nil {
+		if err := store.SetSessionStarred(m.ctx(), sessionID, !sess.Starred); err != nil {
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
 		}
 	}
@@ -169,7 +168,7 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 }
 
 func (m *appModel) handleSetSessionTitle(title string) (tea.Model, tea.Cmd) {
-	if err := m.application.UpdateSessionTitle(context.Background(), title); err != nil {
+	if err := m.application.UpdateSessionTitle(m.ctx(), title); err != nil {
 		if errors.Is(err, app.ErrTitleGenerating) {
 			return m, notification.WarningCmd("Title is being generated, please wait")
 		}
@@ -186,7 +185,7 @@ func (m *appModel) handleRegenerateTitle() (tea.Model, tea.Cmd) {
 	if len(sess.GetLastUserMessages(1)) == 0 {
 		return m, notification.ErrorCmd("Cannot regenerate title: no user message in session")
 	}
-	if err := m.application.RegenerateSessionTitle(context.Background()); err != nil {
+	if err := m.application.RegenerateSessionTitle(m.ctx()); err != nil {
 		if errors.Is(err, app.ErrTitleGenerating) {
 			return m, notification.WarningCmd("Title is being generated, please wait")
 		}
@@ -201,8 +200,7 @@ func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
 	if store == nil {
 		return m, notification.ErrorCmd("No session store configured")
 	}
-
-	if err := store.DeleteSession(context.Background(), sessionID); err != nil {
+	if err := store.DeleteSession(m.ctx(), sessionID); err != nil {
 		return m, notification.ErrorCmd("Failed to delete session: " + err.Error())
 	}
 
@@ -217,7 +215,7 @@ func (m *appModel) handleEvalSession(filename string) (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleExportSession(filename string) (tea.Model, tea.Cmd) {
-	exportFile, err := m.application.ExportHTML(context.Background(), filename)
+	exportFile, err := m.application.ExportHTML(m.ctx(), filename)
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to export session: %v", err))
 	}
@@ -252,7 +250,7 @@ func (m *appModel) handleUndoSnapshot() (tea.Model, tea.Cmd) {
 	if m.chatPage.IsWorking() {
 		return m, notification.WarningCmd("Wait for the current response to finish before undoing")
 	}
-	result, err := m.application.UndoLastSnapshot(context.Background())
+	result, err := m.application.UndoLastSnapshot(m.ctx())
 	if err != nil {
 		if errors.Is(err, app.ErrNothingToUndo) {
 			return m, notification.InfoCmd("No snapshot to undo")
@@ -275,7 +273,7 @@ func (m *appModel) handleResetSnapshot(keep int) (tea.Model, tea.Cmd) {
 	if m.chatPage.IsWorking() {
 		return m, notification.WarningCmd("Wait for the current response to finish before resetting")
 	}
-	result, err := m.application.ResetSnapshot(context.Background(), keep)
+	result, err := m.application.ResetSnapshot(m.ctx(), keep)
 	if err != nil {
 		if errors.Is(err, app.ErrNothingToUndo) {
 			return m, notification.InfoCmd("Nothing to reset")
@@ -323,10 +321,8 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to switch to agent '%s': %v", agentName, err))
 	}
 	m.sessionState.SetCurrentAgentName(agentName)
-	return m, tea.Batch(
-		m.updateChatCmd(messages.SessionToggleChangedMsg{}),
-		notification.SuccessCmd(fmt.Sprintf("Switched to agent '%s'", agentName)),
-	)
+	cmd := m.updateChatCmd(messages.SessionToggleChangedMsg{})
+	return m, cmd
 }
 
 // handleShowAgentDetails opens the read-only agent-details dialog for the named
@@ -334,7 +330,7 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 func (m *appModel) handleShowAgentDetails(agentName string) (tea.Model, tea.Cmd) {
 	for _, agent := range m.sessionState.AvailableAgents() {
 		if agent.Name == agentName {
-			cfg := m.application.AgentConfigInfo(agentName)
+			cfg := m.application.AgentConfigInfo(m.ctx(), agentName)
 			return m, core.CmdHandler(dialog.OpenDialogMsg{
 				Model: dialog.NewAgentDetailsDialog(agent, cfg),
 			})
@@ -459,7 +455,7 @@ func (m *appModel) handleShowPermissionsDialog() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
-	agentTools, err := m.application.CurrentAgentTools(context.Background())
+	agentTools, err := m.application.CurrentAgentTools(m.ctx())
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load tools: %v", err))
 	}
@@ -490,7 +486,7 @@ func (m *appModel) handleRestartToolset(name string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(
 		notification.InfoCmd(fmt.Sprintf("Restarting toolset %q…", name)),
 		func() tea.Msg {
-			if err := appRef.RestartToolset(context.Background(), name); err != nil {
+			if err := appRef.RestartToolset(m.ctx(), name); err != nil {
 				return notification.ShowMsg{
 					Text: fmt.Sprintf("Failed to restart %q: %v", name, err),
 					Type: notification.TypeError,
@@ -517,7 +513,7 @@ func (m *appModel) handleShowMCPPromptInput(promptName string, promptInfo any) (
 }
 
 func (m *appModel) handleMCPPrompt(promptName string, arguments map[string]string) (tea.Model, tea.Cmd) {
-	promptContent, err := m.application.ExecuteMCPPrompt(context.Background(), promptName, arguments)
+	promptContent, err := m.application.ExecuteMCPPrompt(m.ctx(), promptName, arguments)
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Error executing MCP prompt '%s': %v", promptName, err))
 	}
@@ -527,15 +523,24 @@ func (m *appModel) handleMCPPrompt(promptName string, arguments map[string]strin
 // --- Model picker ---
 
 func (m *appModel) handleOpenModelPicker() (tea.Model, tea.Cmd) {
+	start := time.Now()
+	defer func() {
+		slog.Debug("TUI model picker open handled", "duration", time.Since(start))
+	}()
 	if !m.application.SupportsModelSwitching() {
 		return m, notification.InfoCmd("Model switching is not supported with remote runtimes")
 	}
-	models := m.application.AvailableModels(context.Background())
+	loadStart := time.Now()
+	models := m.application.AvailableModels(m.ctx())
+	slog.Debug("TUI model picker available models loaded", "duration", time.Since(loadStart), "models", len(models))
 	if len(models) == 0 {
 		return m, notification.InfoCmd("No models available for selection")
 	}
+	dialogStart := time.Now()
+	modelDialog := dialog.NewModelPickerDialog(models)
+	slog.Debug("TUI model picker dialog built", "duration", time.Since(dialogStart), "models", len(models))
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewModelPickerDialog(models),
+		Model: modelDialog,
 	})
 }
 
@@ -546,18 +551,17 @@ func (m *appModel) handleCycleThinkingLevel() (tea.Model, tea.Cmd) {
 	if !m.application.SupportsModelSwitching() {
 		return m, notification.InfoCmd("Thinking levels can't be changed with remote runtimes")
 	}
-	level, err := m.application.CycleAgentThinkingLevel(context.Background())
-	if err != nil {
+	if _, err := m.application.CycleAgentThinkingLevel(m.ctx()); err != nil {
 		if errors.Is(err, runtime.ErrUnsupported) {
 			return m, notification.InfoCmd("Current model does not support thinking levels")
 		}
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to change thinking level: %v", err))
 	}
-	return m, notification.InfoCmd(styles.ThinkingGlyph + " Thinking: " + level.String())
+	return m, nil
 }
 
 func (m *appModel) handleChangeModel(modelRef string) (tea.Model, tea.Cmd) {
-	if err := m.application.SetCurrentAgentModel(context.Background(), modelRef); err != nil {
+	if err := m.application.SetCurrentAgentModel(m.ctx(), modelRef); err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to change model: %v", err))
 	}
 	if modelRef == "" {
@@ -668,7 +672,7 @@ func (m *appModel) handleThemeFileChanged(themeRef string) (tea.Model, tea.Cmd) 
 // --- Miscellaneous ---
 
 func (m *appModel) handleOpenURL(url string) (tea.Model, tea.Cmd) {
-	if err := browser.Open(context.Background(), url); err != nil {
+	if err := browser.Open(m.ctx(), url); err != nil {
 		slog.Warn("Failed to open URL", "url", url, "error", err)
 		return m, notification.ErrorCmd("Failed to open URL in browser")
 	}
@@ -676,13 +680,20 @@ func (m *appModel) handleOpenURL(url string) (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
-	ctx := context.Background()
+	ctx := m.ctx()
 
 	// Inspect the command before resolving so we can detect /commands that
 	// switch to a sub-agent. For those, we switch first and only then send
 	// the resolved message — otherwise the message would be processed by
 	// the previous agent.
 	cmd, _, ok := m.application.LookupCommand(ctx, command)
+
+	// URL commands open the configured URL in the browser instead of sending
+	// a prompt to the agent.
+	if ok && cmd.URL != "" {
+		return m, core.CmdHandler(messages.OpenURLMsg{URL: m.expandURLPlaceholders(cmd.URL)})
+	}
+
 	resolved := m.application.ResolveCommand(ctx, command)
 
 	var cmds []tea.Cmd
@@ -713,6 +724,29 @@ func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// expandURLPlaceholders substitutes runtime placeholders in a command URL.
+// Currently only {{session_id}} is supported. The token is intentionally
+// distinct from the ${...} syntax used for config-time JS expansion, since
+// the session ID is only known at dispatch time.
+func (m *appModel) expandURLPlaceholders(url string) string {
+	var sessionID string
+	if m.application != nil {
+		if sess := m.application.Session(); sess != nil {
+			sessionID = sess.ID
+		}
+	}
+	return expandSessionPlaceholder(url, sessionID)
+}
+
+// expandSessionPlaceholder replaces the {{session_id}} token with sessionID,
+// URL-query-escaped so it can't break the URL or inject extra parameters.
+func expandSessionPlaceholder(url, sessionID string) string {
+	if !strings.Contains(url, "{{session_id}}") {
+		return url
+	}
+	return strings.ReplaceAll(url, "{{session_id}}", neturl.QueryEscape(sessionID))
 }
 
 func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
@@ -748,7 +782,7 @@ func (m *appModel) handleStartSpeak() (tea.Model, tea.Cmd) {
 
 	ch := make(chan string, 100)
 	m.transcriptCh = ch
-	err := m.transcriber.Start(context.Background(), func(delta string) {
+	err := m.transcriber.Start(m.ctx(), func(delta string) {
 		select {
 		case ch <- delta:
 		default:
@@ -800,7 +834,7 @@ func (m *appModel) closeTranscriptCh() {
 }
 
 func (m *appModel) handleElicitationResponse(action tools.ElicitationAction, content map[string]any) (tea.Model, tea.Cmd) {
-	if err := m.application.ResumeElicitation(context.Background(), action, content); err != nil {
+	if err := m.application.ResumeElicitation(m.ctx(), action, content); err != nil {
 		slog.Error("Failed to resume elicitation", "action", action, "error", err)
 		return m, notification.ErrorCmd("Failed to complete server request: " + err.Error())
 	}

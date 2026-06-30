@@ -159,6 +159,8 @@ Built-ins are typically zero-config and faster than equivalent shell hooks becau
 | `max_iterations`        | `before_llm_call`                                                                         | `["<N>"]` (required)  | Hard-stops the agent after `N` model calls. Stateless: the runtime supplies the iteration counter on every dispatch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `snapshot`              | `session_start`, `turn_start`, `turn_end`, `pre_tool_use`, `post_tool_use`, `session_end` | _none_                | Records filesystem snapshots in a shadow git repo under the docker-agent data directory. No-op outside git repos; respects the source repo's ignore rules and skips newly-added files larger than 2 MiB.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `redact_secrets`        | `pre_tool_use`, `before_llm_call`, `tool_response_transform`                              | _none_                | Scrubs detected secrets (API keys, tokens, private keys, …) out of tool call arguments, outgoing chat content, and tool output. The same builtin handles all three events and dispatches on the event name. Auto-registered on all three events by `redact_secrets: true` on the agent — see [`examples/redact_secrets_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/redact_secrets_hooks.yaml) for the manual wiring.                                                                                                                                                                                     |
+| `limit_large_tool_results` | `tool_response_transform`, `session_end`                                               | _none_                | **Always-on safety hook** — automatically injected by the runtime, no configuration required. When a tool result from the `filesystem`, `shell`, `mcp`, or `a2a` categories exceeds 2,000 lines or 50 KiB, the full payload is written to a per-session temp file and replaced in the conversation with a notice plus a bounded tail (last 2,000 lines, up to 50 KiB). The `session_end` leg deletes the temp directory. Internal toolsets (`memory`, `plan`, `tasks`, `think`, …) are not affected. |
+| `safer_shell`           | `pre_tool_use` (with `preempt_yolo: true`)                                                | _none_                | Classifies shell commands against an embedded taxonomy. Destructive matches (rm -rf, docker volume rm, mkfs, …) get an Ask verdict with `blast_radius` / `category` metadata; known-safe reads (ls, git status, docker ps, …) flow through silently; everything else asks with `blast_radius=unknown`. Filters by tool name internally (no-op for non-shell calls). Registered with `preempt_yolo: true` so the entry fires before `Decide()` / `--yolo`. Auto-registered by `safer: true` on a shell toolset — see [`examples/shell_safer.yaml`](https://github.com/docker/docker-agent/blob/main/examples/shell_safer.yaml). |
 | `unload`                | `on_agent_switch`                                                                         | _none_                | POSTs `{"model": "<id>"}` to each of the previous agent's DMR model endpoints (`/_unload` by default, overridable per-model via `unload_api`) to free the GPU/RAM the just-departing model was holding. Pure HTTP — reads the model snapshot the runtime ships on `on_agent_switch` and depends on no provider-specific runtime state. Non-DMR providers (OpenAI, Anthropic, …) are silently skipped, so cross-provider chains are safe. Errors are logged and swallowed; agent switching never blocks on a slow or unreachable engine (each call has a 10 s timeout). See [`examples/unload_on_switch.yaml`](https://github.com/docker/docker-agent/blob/main/examples/unload_on_switch.yaml). |
 
 <div class="callout callout-info" markdown="1">
@@ -171,6 +173,7 @@ Built-ins are typically zero-config and faster than equivalent shell hooks becau
 <div class="callout-title">Auto-injected built-ins
 </div>
   <p>The agent flags <code>add_date: true</code>, <code>add_environment_info: true</code>, <code>add_prompt_files: [...]</code>, and <code>redact_secrets: true</code> are shorthands that auto-register the matching built-in hook. You don't need to repeat them under <code>hooks:</code> — set the flag <em>or</em> the hook entry(ies), not both. <code>redact_secrets: true</code> auto-registers the same builtin on all three of <code>pre_tool_use</code>, <code>before_llm_call</code>, and <code>tool_response_transform</code>; you can also wire any subset of them by hand for finer-grained control (per-tool matchers, ordering with other rewriters, …).</p>
+  <p><code>limit_large_tool_results</code> is injected unconditionally by the runtime — it is always active and cannot be removed from config.</p>
 </div>
 
 A minimal snapshot wiring looks like this:
@@ -263,7 +266,7 @@ In addition to the common fields, each event ships its own payload:
 | `turn_start`                | _none_ (just the common fields)                                                                                       |
 | `turn_end`                  | `agent_name`, `reason` — one of `normal`, `continue`, `steered`, `error`, `canceled`, `hook_blocked`, `loop_detected` |
 | `before_llm_call`           | `iteration` — 1-based run-loop iteration counter (the model call this hook is gating), `model_id`                    |
-| `after_llm_call`            | `agent_name`, `stop_response`, `last_user_message`, `model_id`                                                       |
+| `after_llm_call`            | `agent_name`, `stop_response`, `last_user_message`, `model_id`, `usage`, `cost`                                       |
 | `session_end`               | `reason` — one of `clear`, `logout`, `prompt_input_exit`, `other`                                                     |
 | `pre_compact`               | `source` — one of `manual`, `auto`, `overflow`, `tool_overflow`                                                       |
 | `before_compaction`         | `input_tokens`, `output_tokens`, `context_limit`, `compaction_reason` (one of `threshold`/`overflow`/`manual`)        |
@@ -288,6 +291,9 @@ Notes:
 - `prompt` is also populated for `user_followup_submit`, carrying the text of the dequeued follow-up message (a user message queued for end-of-turn processing via the FollowUp API / queue, as opposed to mid-turn steering).
 - `stop_response` carries the model's final assistant text for `stop`, `after_llm_call`, and `subagent_stop`. `last_user_message` carries the latest user message at dispatch time.
 - `model_id` is populated for `after_llm_call` (and `before_llm_call`) in the canonical `<provider>/<model>` form (e.g. `anthropic/claude-sonnet-4-5`). For harness agents, `model_id` is the harness label (e.g. `claude-code`) rather than a canonical model name — see [Coding Harnesses]({{ '/features/harnesses/' | relative_url }}).
+- `usage` and `cost` are populated for `after_llm_call` only. `usage` is the per-call token usage object (`input_tokens`, `output_tokens`, `cached_input_tokens`, `cached_write_tokens`, and `reasoning_tokens` — the last is itself omitted for non-reasoning models); the whole object is absent when the provider reported no usage. `cost` is the USD price of that one model response. For a **native model call** it is the price computed from `usage` and the model's pricing table, and equals the cost the session records for the turn: it is **absent** when the response is unpriced (no pricing data on file, or no usage) and an explicit `0` for a priced call that was free — so a present `cost` is authoritative and an absent one means "unpriced", with no need to cross-check `usage`. (For harness agents the meaning differs — see the next note.) A cost ledger can therefore record per-call spend from the payload alone, without subscribing to the runtime event channel.
+- For [harness agents]({{ '/features/harnesses/' | relative_url }}), `cost` is the harness's own reported total for the call rather than a computed price, and is present only when the harness reported a non-zero cost (some harnesses, e.g. `codex`, report token counts but no cost — those turns carry `usage` with `cost` absent, even though the recorded message stores `0`).
+- `after_llm_call` fires for **every** model call, including calls made inside sub-sessions (transferred tasks, background agents, skills). For those, `session_id` is the sub-session's id. Summing `cost` across `after_llm_call` events therefore captures **all** spend, including sub-sessions (and even sub-sessions that error before their cost is persisted). Do **not** add a separately-queried session cost total on top: the runtime's own total already recurses into and includes completed sub-session spend, so combining the two double-counts. Pick one source — the summed hook costs — as the authoritative ledger.
 - `context_limit` is `0` when the model definition is unavailable (treat `0` as "unknown", not as a real limit).
 - `approval_decision` is one of `allow`, `deny`, `canceled`. `approval_source` is a stable classifier of which step decided (e.g. `yolo`, `session_permissions_allow`, `session_permissions_deny`, `team_permissions_allow`, `team_permissions_deny`, `pre_tool_use_hook_allow`, `pre_tool_use_hook_deny`, `readonly_hint`, `user_approved`, `user_approved_session`, `user_approved_tool`, `user_rejected`, `context_canceled`).
 
@@ -334,6 +340,52 @@ The `hook_specific_output` for `pre_tool_use` (and `permission_request`) support
 | `permission_decision`        | string | `allow`, `deny`, or `ask`               |
 | `permission_decision_reason` | string | Explanation for the decision            |
 | `updated_input`              | object | Modified tool input (replaces original) |
+| `metadata`                   | object | (`permission_request` and `pre_tool_use` entries with `preempt_yolo: true` only) string key/value annotations merged onto the tool-call confirmation prompt — see below |
+
+### Preempting `--yolo` from `pre_tool_use`
+
+`pre_tool_use` entries default to firing AFTER the deterministic approval
+pipeline (`--yolo` / permission allow-rules / read-only hint), so a yolo'd
+call skips them entirely. For security-critical checks that MUST run on
+every call regardless of `--yolo`, set `preempt_yolo: true` on the matcher
+entry:
+
+```yaml
+hooks:
+  pre_tool_use:
+    - matcher: "*"
+      preempt_yolo: true
+      hooks:
+        - type: builtin
+          command: safer_shell
+```
+
+The entry then fires in a dedicated stage 0 BEFORE `Decide()`:
+
+- `deny` rejects the call outright; the user is not prompted.
+- `ask` forces user confirmation. The default `pre_tool_use` lane and
+  `permission_request` are skipped on this path so a policy-level
+  allow there can't override the security verdict.
+- `allow` is advisory — the pipeline still runs `Decide()` and the
+  rest of `pre_tool_use`. Same shape as a regular `allow` on the
+  default lane, just observed earlier.
+- No verdict (empty `permission_decision`) falls through.
+
+Hook crashes on a `preempt_yolo: true` entry fail closed (deny), matching
+the default `pre_tool_use` posture.
+
+Preempting entries can attach structured context via
+`hook_specific_output.metadata` (`map[string]string`). The runtime merges
+that into the tool-call confirmation event. Two key conventions get
+special rendering in the TUI confirmation prompt:
+
+- `blast_radius` — one of `low`, `medium`, `high`, `unknown`. Rendered
+  as a colored severity badge (green / yellow / red / muted).
+- `category` — taxonomy tag (e.g. `fs-delete`, `dk-volume-del`).
+
+Plus a free-form `reason` key that the dialog shows as supporting
+context. Other keys render as plain text. Last writer wins on key
+clashes across hooks. The `safer_shell` builtin uses this convention.
 
 ### Tool-Response-Transform Specific Output
 
@@ -398,6 +450,8 @@ hooks:
 ```
 
 `pre_tool_use` is fail-closed for safety: a failed pre-tool hook blocks the tool call regardless of `on_error`.
+
+`working_dir` and `env` apply to `command` and `builtin` hooks. For `builtin` hooks, `working_dir` is resolved with the same logic as `command` hooks (absolute path wins; relative paths join onto the executor directory). For `model` hooks, both fields are accepted by the schema but have no effect: model hooks render a prompt template and call the LLM API directly — no subprocess is spawned and no file I/O is performed, so working directory and environment variables have no applicable semantics.
 
 <div class="callout callout-warning" markdown="1">
 <div class="callout-title">Performance
@@ -559,7 +613,7 @@ The `reason` field classifies the exit:
 
 `before_llm_call` fires immediately before every model call (after `turn_start` has assembled the messages). It cannot contribute context — use `turn_start` for that — but it can **stop the run** by returning `decision: block` (or exit code 2). The built-in `max_iterations` hook implements a hard cap on top of this event.
 
-`after_llm_call` fires immediately after each successful model call, before the response is recorded into the session and tool calls are dispatched. The assistant text is in `stop_response`. Use it for response auditing, redaction logging, or quality metrics. Failed model calls fire `on_error` instead.
+`after_llm_call` fires immediately after each successful model call, before the response is recorded into the session and tool calls are dispatched. The assistant text is in `stop_response`, and the call's `usage` and `cost` carry the per-turn token usage and computed USD spend (see the field notes above). Use it for response auditing, redaction logging, quality metrics, or a sidecar cost ledger that records per-call spend without subscribing to the runtime event channel. Failed model calls fire `on_error` instead.
 
 ### Before/After-Compaction: structured compaction control
 
@@ -727,6 +781,22 @@ hooks:
 ```
 
 Return nothing to fall through to the usual interactive confirmation.
+
+When the hook falls through (returns no `permission_decision`), it can still attach key/value `metadata` to the confirmation prompt the runtime shows the user. The runtime merges it onto any static metadata the toolset attached to the tool (hook keys win on a clash) and emits it on the tool-call confirmation message, so clients (TUI, HTTP) can render extra per-call context. Keys from multiple matching hooks are merged; the last hook in config order wins on a clash.
+
+```yaml
+hooks:
+  permission_request:
+    - matcher: "shell"
+      hooks:
+        - type: command
+          command: |
+            INPUT=$(cat)
+            CMD=$(echo "$INPUT" | jq -r '.tool_input.cmd // ""')
+            if echo "$CMD" | grep -qE '\brm\b'; then
+              echo '{"hook_specific_output":{"metadata":{"risk":"high","note":"deletes files"}}}'
+            fi
+```
 
 ### LLM as a Judge (Auto-Approving Tool Calls)
 

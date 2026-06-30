@@ -1,67 +1,88 @@
 package leantui
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
+
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	toolcomponent "github.com/docker/docker-agent/pkg/tui/components/tool"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
-// toolView is the render state of a single tool call. The controller keeps one
-// per in-flight call, updates it as argument and output deltas arrive, and
-// commits its rendered form once the call completes.
+// toolView is the render state of a single tool call. It deliberately stores
+// the same TUI message shape used by the full-screen TUI so the lean renderer
+// can delegate the visual representation to pkg/tui/components/tool.
 type toolView struct {
-	name        string // display name of the tool
-	command     string // shell command, when the tool runs one
-	argsSummary string // compact argument summary for non-shell tools
-	output      string
-	done        bool
-	isError     bool
-	elapsed     time.Duration
+	message *tuitypes.Message
+	images  []inlineImage
 }
 
 const maxToolOutputLines = 12
 
-// renderTool renders a tool call in the pi style: a status bullet and bold
-// title, the command or argument summary, a dimmed (and tail-truncated) output
-// block, and a final "Took …" line once the call has completed.
+func newToolView(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status tuitypes.ToolStatus) *toolView {
+	return &toolView{
+		message: tuitypes.ToolCallMessage(agentName, toolCall, ensureToolDefinition(toolCall, toolDef), status),
+	}
+}
+
+func ensureToolDefinition(toolCall tools.ToolCall, toolDef tools.Tool) tools.Tool {
+	if toolDef.Name == "" {
+		toolDef.Name = toolCall.Function.Name
+	}
+	return toolDef
+}
+
+// renderTool renders a tool call with the same renderer registry used by the
+// full TUI. This keeps built-in tools and registered custom renderers visually
+// consistent between the normal and lean interfaces.
 func renderTool(t toolView, width int) []string {
-	bullet := stWarning().Render("●")
-	if t.done {
-		if t.isError {
-			bullet = stError().Render("●")
-		} else {
-			bullet = stSuccess().Render("●")
-		}
+	return renderToolWithState(t, width, 0, service.StaticSessionState{})
+}
+
+func renderToolWithState(t toolView, width, frame int, sessionState service.SessionStateReader) []string {
+	if width < 1 {
+		width = 1
+	}
+	if t.message == nil {
+		return nil
+	}
+	if sessionState == nil {
+		sessionState = service.StaticSessionState{}
 	}
 
-	out := []string{bullet + " " + stBold().Render(t.name)}
-
-	switch {
-	case t.command != "":
-		for _, l := range wrapANSI("$ "+t.command, width-2) {
-			out = append(out, "  "+stSecondary().Render(l))
-		}
-	case t.argsSummary != "":
-		for _, l := range wrapANSI(t.argsSummary, width-2) {
-			out = append(out, "  "+stMuted().Render(l))
-		}
+	view := toolcomponent.New(t.message, sessionState)
+	view.SetSize(width, 0)
+	if t.message.ToolStatus == tuitypes.ToolStatusPending || t.message.ToolStatus == tuitypes.ToolStatusRunning {
+		view, _ = view.Update(animation.TickMsg{Frame: frame})
+		defer animation.StopView(view)
 	}
 
-	if strings.TrimSpace(t.output) != "" {
-		out = append(out, renderToolOutput(t.output, width)...)
+	lines := splitRenderedTool(view.View(), width)
+	for _, img := range t.images {
+		lines = append(lines, renderInlineImage(img, width)...)
+	}
+	return lines
+}
+
+func splitRenderedTool(rendered string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	rendered = strings.TrimRight(rendered, "\n")
+	if rendered == "" {
+		return nil
 	}
 
-	if t.done {
-		footer := "Took " + formatDuration(t.elapsed)
-		if t.isError {
-			footer = stError().Render("Failed") + stMuted().Render(" · "+formatDuration(t.elapsed))
-			out = append(out, "  "+footer)
-		} else {
-			out = append(out, "  "+stMuted().Render(footer))
+	var out []string
+	for line := range strings.SplitSeq(rendered, "\n") {
+		if displayWidth(line) > width {
+			out = append(out, wrapANSI(line, width)...)
+			continue
 		}
+		out = append(out, line)
 	}
-
 	return out
 }
 
@@ -80,54 +101,4 @@ func renderToolOutput(output string, width int) []string {
 		}
 	}
 	return out
-}
-
-// describeToolCall extracts a shell command and/or a short argument summary
-// from a tool call's JSON arguments for display.
-func describeToolCall(argsJSON string) (command, summary string) {
-	argsJSON = strings.TrimSpace(argsJSON)
-	if argsJSON == "" {
-		return "", ""
-	}
-
-	var args map[string]any
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		// Arguments are still streaming or not an object; show them raw.
-		return "", truncate(strings.ReplaceAll(argsJSON, "\n", " "), 200)
-	}
-
-	for _, key := range []string{"command", "cmd", "script"} {
-		if v, ok := args[key]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s, ""
-			}
-		}
-	}
-
-	for _, key := range []string{"path", "file", "filename", "file_path", "query", "pattern", "url", "name"} {
-		if v, ok := args[key]; ok {
-			return "", fmt.Sprintf("%s: %v", key, v)
-		}
-	}
-
-	// Fall back to a compact rendering of all scalar arguments.
-	var parts []string
-	for k, v := range args {
-		switch v.(type) {
-		case string, float64, bool, json.Number:
-			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
-		}
-	}
-	return "", truncate(strings.Join(parts, " "), 200)
-}
-
-func formatDuration(d time.Duration) string {
-	switch {
-	case d >= time.Minute:
-		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
-	case d >= time.Second:
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	default:
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
 }

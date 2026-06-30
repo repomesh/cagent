@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -56,6 +57,10 @@ func Load(ctx context.Context, source Source) (*latest.Config, error) {
 
 	config.Version = raw.Version
 
+	if err := resolveInstructionFiles(&config, source); err != nil {
+		return nil, err
+	}
+
 	if err := validateConfig(&config); err != nil {
 		return nil, err
 	}
@@ -63,6 +68,71 @@ func Load(ctx context.Context, source Source) (*latest.Config, error) {
 	warnExpansionMismatches(ctx, slog.Default(), &config)
 
 	return &config, nil
+}
+
+// resolveInstructionFiles replaces every agent's instruction_file reference
+// with the file's contents, loaded relative to the config file's directory.
+// When several files are listed their contents are concatenated in order,
+// separated by a blank line. Resolution happens once at load time so the rest
+// of the pipeline (and any marshalled/pushed copy of the config) only ever
+// sees the inlined Instruction; the InstructionFile field is cleared
+// afterwards to keep the loaded config self-contained.
+//
+// Each reference must be a local relative path inside the config directory:
+// absolute paths and "../" traversal are rejected, and reads are confined to
+// the directory with os.OpenRoot so symlinks cannot escape it. This mirrors
+// the path-safety rules used by the HCL file() helper and fileSource.Read.
+func resolveInstructionFiles(cfg *latest.Config, source Source) error {
+	parentDir := source.ParentDir()
+
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if len(agent.InstructionFile) == 0 {
+			continue
+		}
+		if agent.Instruction != "" {
+			return fmt.Errorf("agent %q: 'instruction' and 'instruction_file' are mutually exclusive, set only one", agent.Name)
+		}
+		if parentDir == "" {
+			return fmt.Errorf("agent %q: 'instruction_file' is only supported for local file-based configs, not OCI/URL sources", agent.Name)
+		}
+
+		instruction, err := readInstructionFiles(parentDir, agent.InstructionFile)
+		if err != nil {
+			return fmt.Errorf("agent %q: %w", agent.Name, err)
+		}
+
+		agent.Instruction = instruction
+		agent.InstructionFile = nil
+	}
+
+	return nil
+}
+
+// readInstructionFiles loads each path (resolved inside parentDir with
+// os.OpenRoot so symlinks cannot escape) and returns their contents joined by
+// a blank line. Each path must be a local relative path: absolute paths and
+// "../" traversal are rejected.
+func readInstructionFiles(parentDir string, paths []string) (string, error) {
+	root, err := os.OpenRoot(parentDir)
+	if err != nil {
+		return "", fmt.Errorf("opening config directory %q: %w", parentDir, err)
+	}
+	defer root.Close()
+
+	parts := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if !filepath.IsLocal(path) {
+			return "", fmt.Errorf("instruction_file %q must be a local relative path inside the config directory", path)
+		}
+		data, err := root.ReadFile(filepath.ToSlash(path))
+		if err != nil {
+			return "", fmt.Errorf("reading instruction_file %q: %w", path, err)
+		}
+		parts = append(parts, string(data))
+	}
+
+	return strings.Join(parts, "\n\n"), nil
 }
 
 // CheckRequiredEnvVars checks which environment variables are required by the models and tools.
@@ -152,6 +222,10 @@ func validateConfig(cfg *latest.Config) error {
 	}
 
 	if err := resolveSkillDefinitions(cfg); err != nil {
+		return err
+	}
+
+	if err := validateSkillToolsetRefs(cfg); err != nil {
 		return err
 	}
 
@@ -323,6 +397,25 @@ func validateProviderName(name string) error {
 	return nil
 }
 
+// validateSkillToolsetRefs checks that every toolset name referenced by an
+// agent's inline fork skills resolves to a definition in the top-level
+// `toolsets` section. Runs after resolveSkillDefinitions so skills merged in
+// via use_skills are covered too.
+func validateSkillToolsetRefs(cfg *latest.Config) error {
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		for j := range agent.Skills.Inline {
+			inline := &agent.Skills.Inline[j]
+			for _, ref := range inline.Toolsets {
+				if _, ok := cfg.Toolsets[ref]; !ok {
+					return fmt.Errorf("agent '%s' inline skill '%s' references non-existent toolset '%s'", agent.Name, inline.Name, ref)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // validateSkills validates a skills configuration. label identifies the owner
 // of the configuration in error messages (e.g. "agent 'foo'" or
 // "skill group 'base'").
@@ -358,6 +451,14 @@ func validateSkills(label string, sc *latest.SkillsConfig) error {
 		}
 		if inline.Context != "" && inline.Context != "fork" {
 			return fmt.Errorf("%s inline skill '%s' has invalid context '%s' (only 'fork' is supported)", label, inline.Name, inline.Context)
+		}
+		if inline.Context != "fork" {
+			if len(inline.Toolsets) > 0 {
+				return fmt.Errorf("%s inline skill '%s' declares toolsets but is not a fork skill (set context: fork)", label, inline.Name)
+			}
+			if len(inline.AllowedTools) > 0 {
+				return fmt.Errorf("%s inline skill '%s' declares allowed_tools but is not a fork skill (set context: fork)", label, inline.Name)
+			}
 		}
 		if seenInline[inline.Name] {
 			return fmt.Errorf("%s has duplicate inline skill '%s'", label, inline.Name)

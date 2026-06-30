@@ -92,7 +92,17 @@ func (b *elicitationBridge) send(ev Event) (err error) {
 }
 
 // restoreAndClose restores the previous stream channel and closes the current
-// stream channel under the bridge write lock.
+// stream channel under the bridge write lock, so the close is mutually
+// exclusive with an in-flight send. This is the #3069 fix: close can no longer
+// race a parked sender and panic with "send on closed channel".
+//
+// Accepted trade-off (do not "fix" by dropping the lock): holding the write
+// lock makes restoreAndClose wait for any in-flight send to finish, because
+// send holds the read lock across "b.ch <- ev". If the stream consumer has
+// gone away and current is full (or unbuffered), that parked send never
+// drains, so this call blocks on Lock forever and the teardown goroutine
+// leaks. A leaked goroutine is the deliberate, accepted alternative to
+// crashing the whole process with a send-on-closed-channel panic.
 func (b *elicitationBridge) restoreAndClose(current, previous chan Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -104,7 +114,7 @@ func (b *elicitationBridge) restoreAndClose(current, previous chan Event) {
 // elicitation request. Returns an error if no elicitation is in progress
 // or if the context is cancelled before the response can be delivered.
 func (r *LocalRuntime) ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any) error {
-	slog.DebugContext(ctx, "Resuming runtime with elicitation response", "agent", r.CurrentAgentName(), "action", action)
+	slog.DebugContext(ctx, "Resuming runtime with elicitation response", "agent", r.currentAgentName(), "action", action)
 
 	result := ElicitationResult{
 		Action:  action,
@@ -150,7 +160,7 @@ func (r *LocalRuntime) elicitationHandler(ctx context.Context, req *mcp.ElicitPa
 	slog.DebugContext(ctx, "Elicitation request meta", "meta", req.Meta)
 
 	if err := r.elicitation.send(
-		ElicitationRequest(req.Message, req.Mode, req.RequestedSchema, req.URL, req.ElicitationID, req.Meta, r.CurrentAgentName()),
+		ElicitationRequest(req.Message, req.Mode, req.RequestedSchema, req.URL, req.ElicitationID, req.Meta, r.currentAgentName()),
 	); err != nil {
 		return tools.ElicitationResult{}, err
 	}

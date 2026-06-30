@@ -15,13 +15,10 @@ import (
 )
 
 // buildHooksExecutors builds a [hooks.Executor] for every agent in the
-// team that has user-configured hooks, an agent-flag setting that maps
-// to a builtin (AddDate / AddEnvironmentInfo / AddPromptFiles), an
-// [builtins.AutoInjector] supplied via [WithAutoInjector] (today the
-// snapshot controller), or a configured response cache (which
-// auto-injects a cache_response stop hook). Agents with no hooks have
-// no entry; lookups fall through to nil so callers can short-circuit
-// cheaply.
+// team. Every agent receives the always-on limit_large_tool_results
+// tool_response_transform hook; user-configured hooks, agent-flag builtins,
+// [builtins.AutoInjector]s, and response-cache hooks are layered onto that
+// base configuration.
 //
 // Called once from [NewLocalRuntime] after r.workingDir, r.env and
 // r.hooksRegistry are finalized; the resulting map is read-only for
@@ -39,6 +36,7 @@ func (r *LocalRuntime) buildHooksExecutors() {
 			AddEnvironmentInfo: a.AddEnvironmentInfo(),
 			AddPromptFiles:     a.AddPromptFiles(),
 			RedactSecrets:      a.RedactSecrets(),
+			SaferShell:         a.SaferShell(),
 		})
 		cfg = applyAutoInjectors(cfg, r.autoInjectors)
 		cfg = applyCacheDefault(cfg, a)
@@ -453,15 +451,22 @@ func (r *LocalRuntime) executeBeforeLLMCallHooks(
 // model call, before the response is recorded into the session and
 // tool calls are dispatched. The assistant text content is passed via
 // stop_response (matching the stop event), so handlers can reuse the
-// same parsing logic. Failed model calls fire on_error instead and
-// skip this event.
-func (r *LocalRuntime) executeAfterLLMCallHooks(ctx context.Context, sess *session.Session, a *agent.Agent, modelID, responseContent string) {
+// same parsing logic. The per-turn token usage and computed USD cost
+// are forwarded via [hooks.Input.Usage] and [hooks.Input.Cost] so
+// sidecar cost ledgers can record per-call spend from the payload
+// alone. cost is a *float64 so an unpriced model (nil) is distinct on
+// the wire from a priced free call (a pointer to 0); the caller owns
+// that distinction. Failed model calls fire on_error instead and skip
+// this event.
+func (r *LocalRuntime) executeAfterLLMCallHooks(ctx context.Context, sess *session.Session, a *agent.Agent, modelID, responseContent string, usage *chat.Usage, cost *float64) {
 	r.dispatchHook(ctx, a, hooks.EventAfterLLMCall, &hooks.Input{
 		SessionID:       sess.ID,
 		AgentName:       a.Name(),
 		ModelID:         modelID,
 		StopResponse:    responseContent,
 		LastUserMessage: sess.GetLastUserMessageContent(),
+		Usage:           usage,
+		Cost:            cost,
 	}, nil)
 }
 

@@ -10,6 +10,7 @@ import (
 )
 
 func TestGenerateBranchTitle(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		parentTitle string
@@ -64,6 +65,7 @@ func TestGenerateBranchTitle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := generateBranchTitle(tt.parentTitle)
 			assert.Equal(t, tt.expected, result)
 		})
@@ -71,6 +73,7 @@ func TestGenerateBranchTitle(t *testing.T) {
 }
 
 func TestGenerateForkTitle(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		parentTitle string
@@ -138,20 +141,78 @@ func TestGenerateForkTitle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := generateForkTitle(tt.parentTitle)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
+func TestNextForkTitle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		parentTitle string
+		siblings    []string
+		expected    string
+	}{
+		{
+			name:        "empty parent title returns empty",
+			parentTitle: "",
+			siblings:    []string{"Other"},
+			expected:    "",
+		},
+		{
+			name:        "no siblings: starts at fork 1",
+			parentTitle: "My Session",
+			siblings:    []string{},
+			expected:    "My Session (fork 1)",
+		},
+		{
+			name:        "ignores unrelated siblings, picks next free N",
+			parentTitle: "My Session",
+			siblings:    []string{"My Session (fork 1)", "Unrelated", "My Session (fork 2)"},
+			expected:    "My Session (fork 3)",
+		},
+		{
+			name:        "parent already has (fork N), counter rooted on base title",
+			parentTitle: "My Session (fork 2)",
+			siblings:    []string{"My Session (fork 1)", "My Session (fork 2)"},
+			expected:    "My Session (fork 3)",
+		},
+		{
+			name:        "gaps in fork numbering are tolerated, picks max+1",
+			parentTitle: "My Session",
+			siblings:    []string{"My Session (fork 1)", "My Session (fork 5)"},
+			expected:    "My Session (fork 6)",
+		},
+		{
+			name:        "mid-title (fork N) is not a sibling",
+			parentTitle: "Q1 Analysis",
+			siblings:    []string{"Q1 (fork 2) Analysis"},
+			expected:    "Q1 Analysis (fork 1)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, NextForkTitle(tt.parentTitle, tt.siblings))
+		})
+	}
+}
+
 func TestCloneSessionItem(t *testing.T) {
+	t.Parallel()
 	t.Run("empty item returns error", func(t *testing.T) {
+		t.Parallel()
 		_, err := cloneSessionItem(Item{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot clone empty session item")
 	})
 
 	t.Run("message item clones successfully", func(t *testing.T) {
+		t.Parallel()
 		item := NewMessageItem(UserMessage("test"))
 		cloned, err := cloneSessionItem(item)
 		require.NoError(t, err)
@@ -159,21 +220,38 @@ func TestCloneSessionItem(t *testing.T) {
 	})
 
 	t.Run("summary item clones successfully", func(t *testing.T) {
+		t.Parallel()
 		item := Item{Summary: "test summary"}
 		cloned, err := cloneSessionItem(item)
 		require.NoError(t, err)
 		assert.Equal(t, "test summary", cloned.Summary)
 	})
+
+	t.Run("error item clones into a distinct pointer", func(t *testing.T) {
+		t.Parallel()
+		item := NewErrorItem(&Error{Message: "boom", Code: "model_error"})
+		cloned, err := cloneSessionItem(item)
+		require.NoError(t, err)
+		require.NotNil(t, cloned.Error)
+		assert.Equal(t, "boom", cloned.Error.Message)
+		assert.Equal(t, "model_error", cloned.Error.Code)
+		// Mutating the clone must not affect the original item.
+		cloned.Error.Message = "mutated"
+		assert.Equal(t, "boom", item.Error.Message)
+	})
 }
 
 func TestBranchSession(t *testing.T) {
+	t.Parallel()
 	t.Run("nil parent returns error", func(t *testing.T) {
+		t.Parallel()
 		_, err := BranchSession(nil, 0)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "parent session is nil")
 	})
 
 	t.Run("negative position returns error", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{Messages: []Item{NewMessageItem(UserMessage("test"))}}
 		_, err := BranchSession(parent, -1)
 		require.Error(t, err)
@@ -181,6 +259,7 @@ func TestBranchSession(t *testing.T) {
 	})
 
 	t.Run("position beyond messages returns error", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{Messages: []Item{NewMessageItem(UserMessage("test"))}}
 		_, err := BranchSession(parent, 2)
 		require.Error(t, err)
@@ -188,12 +267,38 @@ func TestBranchSession(t *testing.T) {
 	})
 
 	t.Run("position equal to messages length no error", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{Messages: []Item{NewMessageItem(UserMessage("test"))}}
 		_, err := BranchSession(parent, 1)
 		require.NoError(t, err)
 	})
 
+	t.Run("branches across a persisted error item", func(t *testing.T) {
+		t.Parallel()
+		// Regression: a session containing a recorded failure must remain
+		// branchable. cloneSessionItem previously errored on error items,
+		// breaking branch/fork for any failed session.
+		parent := &Session{
+			Messages: []Item{
+				NewMessageItem(UserMessage("hi")),
+				NewErrorItem(&Error{Message: "boom", Code: "model_error"}),
+				NewMessageItem(UserMessage("again")),
+			},
+		}
+
+		branched, err := BranchSession(parent, 3)
+		require.NoError(t, err)
+		require.Len(t, branched.Messages, 3)
+		require.True(t, branched.Messages[1].IsError())
+		assert.Equal(t, "boom", branched.Messages[1].Error.Message)
+
+		// Deep copy: mutating the branch must not touch the parent.
+		branched.Messages[1].Error.Message = "mutated"
+		assert.Equal(t, "boom", parent.Messages[1].Error.Message)
+	})
+
 	t.Run("valid branch copies messages up to position", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{
 			ID:    "parent-id",
 			Title: "Parent Title",
@@ -216,6 +321,7 @@ func TestBranchSession(t *testing.T) {
 	})
 
 	t.Run("deep-copies pointer fields in MultiContent", func(t *testing.T) {
+		t.Parallel()
 		// Regression test: MultiContent pointer fields must not be shared
 		// between branched sessions and their parents.
 		parent := &Session{
@@ -266,13 +372,16 @@ func TestBranchSession(t *testing.T) {
 }
 
 func TestForkSession(t *testing.T) {
+	t.Parallel()
 	t.Run("nil parent returns error", func(t *testing.T) {
+		t.Parallel()
 		_, err := ForkSession(nil, 0)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "parent session is nil")
 	})
 
 	t.Run("out-of-range position returns error", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{Messages: []Item{NewMessageItem(UserMessage("test"))}}
 		_, err := ForkSession(parent, 2)
 		require.Error(t, err)
@@ -280,6 +389,7 @@ func TestForkSession(t *testing.T) {
 	})
 
 	t.Run("copies messages up to position and uses fork-numbered title", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{
 			ID:    "parent-id",
 			Title: "Parent Title",
@@ -300,6 +410,7 @@ func TestForkSession(t *testing.T) {
 	})
 
 	t.Run("fork of a fork increments the counter", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{
 			Title:    "Parent Title (fork 2)",
 			Messages: []Item{NewMessageItem(UserMessage("hi"))},
@@ -311,6 +422,7 @@ func TestForkSession(t *testing.T) {
 	})
 
 	t.Run("position zero produces an empty fork", func(t *testing.T) {
+		t.Parallel()
 		parent := &Session{
 			Title:    "Parent Title",
 			Messages: []Item{NewMessageItem(UserMessage("only"))},
@@ -323,6 +435,7 @@ func TestForkSession(t *testing.T) {
 	})
 
 	t.Run("copies safety-rail limits onto the fork", func(t *testing.T) {
+		t.Parallel()
 		// Regression: MaxConsecutiveToolCalls / MaxOldToolCallTokens used to
 		// be silently zeroed out, making the fork behave differently from
 		// the parent (tool-call cutoff and old-tool-call truncation budget

@@ -3,6 +3,250 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.91.0] - 2026-06-30
+
+This release adds per-session markdown plan toolset support, extends `instruction_file` to accept multiple files, and includes several bug fixes and documentation updates.
+
+## What's New
+
+- Adds a `session_plan` toolset alongside the existing `plan` toolset, providing per-session markdown plan storage
+- Extends `instruction_file` to accept either a single string or a list of file paths, with contents concatenated when multiple paths are provided
+- Adds support for a `title` field in `POST /api/sessions` to skip LLM title generation when a title is supplied
+
+## Bug Fixes
+
+- Fixes a data race in `stalledStream.Close` by replacing an unguarded `closed bool` field with `sync.Once`
+- Fixes `instruction_file` to omit empty values and drop empty-string list entries
+
+## Technical Changes
+
+- Redesigns the TUI sidebar agents panel to use uniform two-line entries for all agents via a single `renderAgentLine` function
+- Computes badge column width once in `agentInfo` in the sidebar
+- Extracts a `readInstructionFiles` helper with deferred `root.Close`
+- Adds `t.Parallel()` to isolated unit tests across multiple packages
+- Corrects a stale doc comment and restores alignment assertion in `effort_gauge_test`
+- Updates documentation for `limit_large_tool_results` always-on builtin, the `title` field in `POST /api/sessions`, and model hook `working_dir` and `env` behaviour
+### Pull Requests
+
+- [#3290](https://github.com/docker/docker-agent/pull/3290) - feat(hooks): cap oversized tool result payloads
+- [#3301](https://github.com/docker/docker-agent/pull/3301) - fix(hooks): cap oversized mcp and a2a tool results
+- [#3305](https://github.com/docker/docker-agent/pull/3305) - feat(session_plan): per-session markdown plan toolset alongside plan
+- [#3306](https://github.com/docker/docker-agent/pull/3306) - feat: allow instruction_file to accept a list of files
+- [#3307](https://github.com/docker/docker-agent/pull/3307) - refactor(sidebar): redesign agents panel to uniform two-line entries
+- [#3308](https://github.com/docker/docker-agent/pull/3308) - docs: update CHANGELOG.md for v1.90.0
+- [#3309](https://github.com/docker/docker-agent/pull/3309) - chore: bump direct Go dependencies
+- [#3310](https://github.com/docker/docker-agent/pull/3310) - feat(server): accept title in POST /api/sessions to skip LLM title generation
+- [#3311](https://github.com/docker/docker-agent/pull/3311) - test: enable t.Parallel() on isolated unit tests
+- [#3312](https://github.com/docker/docker-agent/pull/3312) - fix: data race in stalledStream.Close using sync.Once
+- [#3313](https://github.com/docker/docker-agent/pull/3313) - docs: sync /docs with recent merged PRs
+
+
+## [Unreleased]
+
+## What's New
+
+- Extends the agent `instruction_file` field to accept a list of files in addition to a single path; when several files are listed, their contents are concatenated in order (separated by a blank line)
+
+
+## [v1.90.0] - 2026-06-29
+
+This release adds support for OpenCode Go and OpenCode Zen providers and improves error handling for stream truncation during model inference.
+
+## What's New
+- Adds OpenCode Go (`opencode-go`) and OpenCode Zen (`opencode-zen`) as built-in provider aliases, including automatic API key detection via `OPENCODE_API_KEY`
+
+## Bug Fixes
+- Fixes handling of stream truncation errors: retries when a stream is unexpectedly cut mid-response and clarifies the error message shown to users
+- Fixes error handling for mid-stream connection drops in truncation error reporting
+### Pull Requests
+
+- [#3211](https://github.com/docker/docker-agent/pull/3211) - feat: add OpenCode Go and OpenCode Zen provider support
+- [#3298](https://github.com/docker/docker-agent/pull/3298) - Merge pull request #3302 from docker/fix/3298-retry-stream-truncation
+- [#3302](https://github.com/docker/docker-agent/pull/3302) - fix(modelerrors): retry stream truncation and clarify the error (#3298)
+- [#3303](https://github.com/docker/docker-agent/pull/3303) - docs: update CHANGELOG.md for v1.89.0
+
+
+## [v1.89.0] - 2026-06-29
+
+This release brings significant new capabilities including a safety-check hook system, TUI improvements with retry support and new slash commands, expanded hook and config features, and a large number of internal quality improvements around context threading, linting, and test performance.
+
+## What's New
+
+- Adds `usage` and `cost` fields to the `after_llm_call` hook payload, exposing per-turn token usage and computed USD cost
+- Adds a `triage-prs` skill for triaging open pull requests
+- Adds a TUI e2e test harness (`tuitest`) with VCR cassette support, plus live/frame-dump debugging, mouse, and clipboard helpers
+- Adds a retry button to TUI error messages, allowing one-click recovery after agent turn failures
+- Adds key/value `metadata` field to tool-call confirmation events, rendered in the TUI confirmation dialog
+- Adds `${env.X}` expansion support in toolset `env` values (in addition to the existing `${X}` syntax)
+- Adds `triage-prs` skill for automated PR classification and triage
+- Adds fork suffix deduplication across sibling forks so parallel forks of the same parent get unique `(fork N)` suffixes
+- Adds tool-scoping for fork-mode skills via `allowed_tools` and `toolsets` frontmatter fields
+- Adds `url` field support in agent `/commands` config, opening a URL in the user's default browser instead of sending a prompt
+- Adds `{{session_id}}` expansion in URL commands
+- Persists agent failures as first-class `Error` session items so errors survive session reload and appear in the TUI
+- Adds `instruction_file` field to agent config for referencing external instruction files
+- Adds `open_url` built-in toolset for agents to open a configured URL in the user's default browser
+- Adds `preempt_yolo` flag on `pre_tool_use` hook entries and a `safer_shell` builtin that classifies shell commands and forces confirmation for destructive operations
+- Adds file-based plan revisions, free-form status field, and optimistic locking to the plan toolset, including new `export_plan_to_file` and `update_plan_from_file` tools
+- Embeds a models.dev catalog snapshot as a binary fallback for offline/air-gapped environments
+- Adds timing instrumentation to the model picker pipeline
+- Adds `/feedback` and `/bug` slash commands to the TUI
+- Adds `WrapErrors` lint cop to catch `fmt.Errorf` calls that discard error chains
+- Adds constructor side-effect lint cops preventing goroutines, command execution, and network I/O in constructors
+- Adds deferred mutex unlock lint cop and converts existing terminal unlocks to deferred form
+- Adds `ContextConnectivity` whole-program lint cop and threads context throughout the codebase
+- Builtin hooks now honor `working_dir` and `env` fields
+
+## Improvements
+
+- Returns 1,000,000-token context window for Claude Opus 4.6/4.7/4.8 families instead of the 200k fallback
+- Reuses a single warmed models.dev store across runtime, server, and embedded-chat paths instead of warming independently per session
+- Caps oversized tool result payloads (filesystem, shell, MCP, and A2A) at 2,000 lines / 50 KiB, saving the full output to a temp file
+- Removes redundant agent-switch and thinking-level toast notifications whose results are already visible in the UI
+- Speeds up Go test suite by ~37% with shared shims and offline fixtures
+
+## Bug Fixes
+
+- Fixes per-model attachment capability override so custom/aliased OpenAI-compatible providers (Ollama, xai, mistral, etc.) can declare image/PDF support when absent from models.dev
+- Fixes cycling thinking level in the lean TUI via Shift+Tab
+- Fixes `ctrl+1`–`ctrl+9` agent quick-switch shortcuts broken under the Kitty keyboard protocol
+- Fixes lock-state modifiers being incorrectly applied to `ctrl+N` agent switch
+- Fixes MCP OAuth token persistence in sandboxes by falling back to a file-backed keyring when the OS keyring is unavailable, using a per-install random passphrase
+- Fixes data races in scroll state and session store updates
+- Fixes suppression of re-emitted `UserMessageEvent` before `StreamStarted` on retry
+- Fixes `~` expansion to respect the `HOME` environment variable before falling back to `os.UserHomeDir()`
+- Fixes DMR model selection to prefer locally pulled models and surface actionable pull errors
+- Fixes recovery from corrupted partial model downloads (HTTP 416)
+- Fixes URL validation before handing URLs to the OS opener
+- Fixes context cancellation being passed to the browser opener (strips it before launch)
+- Fixes `Tool.Metadata` serialization to avoid duplicate/stale wire fields
+- Fixes session working directory usage in TUI so `/shell` opens in the worktree directory rather than the process CWD
+- Fixes context-cancelled errors being cached in the model picker
+- Fixes branching and cloning sessions that contain error items
+
+## Technical Changes
+
+- Freezes config schema v10 and starts v11 as latest
+- Parallelizes `build-image` CI job across native runners
+- Switches CI Task installation from source compilation to prebuilt binary (~51s → 1s)
+- Adds `t.Parallel()` to 1,216 eligible top-level tests across 165 files
+- Refactors `Coordinator` methods to be receiver-based, keeping package-level shims for compatibility
+- Extracts `buildDefaultStore` for testability and adds fallback-ordering tests
+- Extracts `isClaudeOpus46To48` helper to deduplicate Opus matching logic
+- Threads context through `Runtime` interface methods, RAG helpers, DB setup, memory initialization, sound playback, and other call paths
+- Uses `context.WithoutCancel` for shutdown and flush paths
+- Resolves proxy allowlist at dial time and caches it at construction
+- Speeds up custom linters using new rubocop-go helpers
+### Pull Requests
+
+- [#2615](https://github.com/docker/docker-agent/pull/2615) - feat(config): accept ${env.X} in toolset env values (#2615)
+- [#2741](https://github.com/docker/docker-agent/pull/2741) - Merge branch 'main' into fix/2741-attachment-caps-override
+- [#2994](https://github.com/docker/docker-agent/pull/2994) - feat(runtime): expose per-turn usage and cost in the after_llm_call hook payload
+- [#3037](https://github.com/docker/docker-agent/pull/3037) - fix: fall back to file-backed keyring when OS keyring is unavailable (fixes #3037)
+- [#3074](https://github.com/docker/docker-agent/pull/3074) - Merge pull request #3275 from docker/docs/3074-streamstopped-ordering
+- [#3088](https://github.com/docker/docker-agent/pull/3088) - fix: respect HOME env var when expanding ~ in paths
+- [#3205](https://github.com/docker/docker-agent/pull/3205) - fix(providers): add per-model attachment capability override (#2741)
+- [#3246](https://github.com/docker/docker-agent/pull/3246) - fix: cycle thinking level in lean tui
+- [#3248](https://github.com/docker/docker-agent/pull/3248) - freeze config v10 and start v11 as latest
+- [#3249](https://github.com/docker/docker-agent/pull/3249) - feat(skills): add triage-prs skill
+- [#3251](https://github.com/docker/docker-agent/pull/3251) - docs: update CHANGELOG.md for v1.88.1
+- [#3252](https://github.com/docker/docker-agent/pull/3252) - feat: add TUI e2e test harness
+- [#3253](https://github.com/docker/docker-agent/pull/3253) - feat: add retry button to TUI error messages
+- [#3254](https://github.com/docker/docker-agent/pull/3254) - feat(server): bump fork suffix across sibling forks
+- [#3255](https://github.com/docker/docker-agent/pull/3255) - fix: persist MCP OAuth tokens in sandboxes via file-backed keyring fallback (#3037)
+- [#3256](https://github.com/docker/docker-agent/pull/3256) - feat: add key/value metadata to tool-call confirmation events
+- [#3257](https://github.com/docker/docker-agent/pull/3257) - feat(config): accept ${env.X} in toolset env values (#2615)
+- [#3258](https://github.com/docker/docker-agent/pull/3258) - ci: parallelize build-image across native runners
+- [#3259](https://github.com/docker/docker-agent/pull/3259) - feat: persist agent failures in the session
+- [#3260](https://github.com/docker/docker-agent/pull/3260) - feat: add tool-scoping for fork-mode skills
+- [#3261](https://github.com/docker/docker-agent/pull/3261) - feat: support URL-opening /commands in agent config
+- [#3265](https://github.com/docker/docker-agent/pull/3265) - fix(tui): restore ctrl+1..ctrl+9 agent quick-switch shortcuts
+- [#3266](https://github.com/docker/docker-agent/pull/3266) - refactor(tui): remove redundant agent-switch and thinking-level toasts
+- [#3267](https://github.com/docker/docker-agent/pull/3267) - feat: return 1M context for Claude Opus 4.6/4.7/4.8 families
+- [#3268](https://github.com/docker/docker-agent/pull/3268) - fix(dmr): prefer local models and surface actionable pull errors
+- [#3269](https://github.com/docker/docker-agent/pull/3269) - ci: install Task from prebuilt binary instead of compiling
+- [#3270](https://github.com/docker/docker-agent/pull/3270) - docs: document URL-opening /commands and clean up /feedback and /bug
+- [#3272](https://github.com/docker/docker-agent/pull/3272) - feat(config): support external instruction files via instruction_file
+- [#3273](https://github.com/docker/docker-agent/pull/3273) - feat: safety_check hook + safer_shell builtin
+- [#3274](https://github.com/docker/docker-agent/pull/3274) - feat(plan): file-based revisions, free-form status, and optimistic locking
+- [#3275](https://github.com/docker/docker-agent/pull/3275) - docs(runtime): document StreamStopped ordering and teardown trade-offs (#3074)
+- [#3276](https://github.com/docker/docker-agent/pull/3276) - feat: add open_url built-in toolset
+- [#3277](https://github.com/docker/docker-agent/pull/3277) - feat(modelsdev): embed models.dev catalog snapshot as binary fallback
+- [#3279](https://github.com/docker/docker-agent/pull/3279) - refactor: thread context throughout and enforce ContextConnectivity lint rule
+- [#3280](https://github.com/docker/docker-agent/pull/3280) - Remove thinking cycle notice
+- [#3283](https://github.com/docker/docker-agent/pull/3283) - docs: document capabilities override and TUI error recovery
+- [#3285](https://github.com/docker/docker-agent/pull/3285) - feat: reuse warmed model store, add picker timing, and fix discovery error caching
+- [#3286](https://github.com/docker/docker-agent/pull/3286) - fix: open /shell in the session working directory (e.g. --worktree)
+- [#3287](https://github.com/docker/docker-agent/pull/3287) - lint: add WrapErrors cop
+- [#3288](https://github.com/docker/docker-agent/pull/3288) - lint: enforce deferred mutex unlocks
+- [#3289](https://github.com/docker/docker-agent/pull/3289) - Add constructor side-effect lint cops
+- [#3290](https://github.com/docker/docker-agent/pull/3290) - feat(hooks): cap oversized tool result payloads
+- [#3293](https://github.com/docker/docker-agent/pull/3293) - Faster lint
+- [#3294](https://github.com/docker/docker-agent/pull/3294) - test: speed up Go test suite by ~37% with shared shims and offline fixtures
+- [#3295](https://github.com/docker/docker-agent/pull/3295) - feat: builtin hooks now honor working_dir and env
+- [#3296](https://github.com/docker/docker-agent/pull/3296) - test: add t.Parallel() to eligible tests
+- [#3297](https://github.com/docker/docker-agent/pull/3297) - docs: replace stale safety_check references with preempt_yolo pre_tool_use
+- [#3299](https://github.com/docker/docker-agent/pull/3299) - refactor: receiver-based Coordinator and parallel provider tests
+- [#3300](https://github.com/docker/docker-agent/pull/3300) - chore: bump direct Go dependencies
+- [#3301](https://github.com/docker/docker-agent/pull/3301) - fix(hooks): cap oversized mcp and a2a tool results
+
+
+## [v1.88.1] - 2026-06-26
+
+This release adds session forking by user-message ordinal and includes documentation updates for recently merged features.
+
+## What's New
+- Adds the ability to fork a session by user-message ordinal, allowing clients to target "the Nth user message" directly without translating to a flat message-stream index
+
+## Technical Changes
+- Bumps `github.com/dgageot/rubocop-go` to pull in a new whole-program, inter-procedural dataflow analysis engine and the `Lint/ContextConnectivity` cop
+- Updates documentation for the `plan` builtin toolset, the `readonly` attribute for toolsets and agents, and top-level shared toolsets with `use_toolsets`
+- Fixes tool ordering and `list_plans` description in plan docs; adds `updatedAt` to `read_plan` description
+### Pull Requests
+
+- [#3226](https://github.com/docker/docker-agent/pull/3226) - feat: add readonly attribute for toolsets and agents
+- [#3227](https://github.com/docker/docker-agent/pull/3227) - feat: add plan builtin toolset for shared multi-agent collaboration
+- [#3232](https://github.com/docker/docker-agent/pull/3232) - feat: add top-level shared toolsets with use_toolsets agent field
+- [#3244](https://github.com/docker/docker-agent/pull/3244) - docs: update docs for features merged 2026-06-25 (plan toolset, readonly, shared toolsets)
+- [#3245](https://github.com/docker/docker-agent/pull/3245) - docs: update CHANGELOG.md for v1.88.0
+- [#3247](https://github.com/docker/docker-agent/pull/3247) - chore: bump rubocop-go for whole-program context cop
+- [#3250](https://github.com/docker/docker-agent/pull/3250) - feat(server): fork session by user-message ordinal
+
+
+## [v1.88.0] - 2026-06-26
+
+This release overhauls the TUI with a redesigned Agents panel, Agent Inspector, configurable keybindings, and image rendering in the lean TUI, plus fixes for provider thinking-budget leaks and OTLP trace export compatibility.
+
+## What's New
+
+- Adds clearer thinking-state vocabulary in the TUI: effort gauge (6-cell), updated labels (`adaptive→auto`), and token budget display
+- Redesigns the TUI sidebar Agents panel with a focus card and compact roster layout
+- Adds a right-click Agent Inspector showing live and configured agent details
+- Labels the delegation spinner with `parent → child` for at-a-glance readability
+- Adds configurable keybindings via `~/.config/cagent/config.yaml`, including remappable send/newline keys (resolves `Ctrl+J` conflict in VS Code and tmux)
+- Allows embedders to register custom tool renderers keyed by tool name or category, with built-in renderers as fallback
+- Adds a pluggable `Storage` interface to the `plan` toolset (parity with the `todo` toolset), with a default filesystem backend and per-instance construction
+- Appends OTLP signal path so trace export works with generic base-path backends such as Langfuse and LangSmith
+- Renders images in the lean TUI using the Kitty protocol and reuses existing tool call renderers
+
+## Bug Fixes
+
+- Fixes `CloneWithOptions(..., WithNoThinking())` leaking the provider-level `thinking_budget`, which caused short-budget callers (e.g., session-title generation, summaries) to fail
+### Pull Requests
+
+- [#3101](https://github.com/docker/docker-agent/pull/3101) - Merge pull request #3115 from docker/feat/tui-delegation-spinner-readability
+- [#3108](https://github.com/docker/docker-agent/pull/3108) - feat(tui): readable thinking state, redesigned Agents panel, and Agent Inspector
+- [#3115](https://github.com/docker/docker-agent/pull/3115) - feat(tui): live status + labeled spinner for delegation (#3101)
+- [#3202](https://github.com/docker/docker-agent/pull/3202) - Let embedders register custom tool renderers
+- [#3204](https://github.com/docker/docker-agent/pull/3204) - feat(tui): configurable keybindings (Shift+Enter / Ctrl+J newline alternative)
+- [#3236](https://github.com/docker/docker-agent/pull/3236) - docs: update CHANGELOG.md for v1.87.0
+- [#3238](https://github.com/docker/docker-agent/pull/3238) - fix(provider): WithNoThinking clone no longer leaks provider-level thinking_budget
+- [#3239](https://github.com/docker/docker-agent/pull/3239) - feat(plan): add pluggable Storage interface (parity with todo toolset)
+- [#3240](https://github.com/docker/docker-agent/pull/3240) - feat(otel): append OTLP signal path so Langfuse and LangSmith work
+- [#3242](https://github.com/docker/docker-agent/pull/3242) - test(teamloader): wire test provider registry in agent config retention test
+- [#3243](https://github.com/docker/docker-agent/pull/3243) - Lean TUI tool renderers
+
+
 ## [v1.87.0] - 2026-06-25
 
 This release adds shared toolsets, a new `plan` builtin toolset for multi-agent collaboration, and a `readonly` attribute for toolsets and agents, alongside several MCP OAuth reliability fixes and improvements to attachment forwarding and deterministic prompt ordering.
@@ -3804,3 +4048,13 @@ This release improves the terminal user interface with better error handling and
 [v1.86.0]: https://github.com/docker/docker-agent/releases/tag/v1.86.0
 
 [v1.87.0]: https://github.com/docker/docker-agent/releases/tag/v1.87.0
+
+[v1.88.0]: https://github.com/docker/docker-agent/releases/tag/v1.88.0
+
+[v1.88.1]: https://github.com/docker/docker-agent/releases/tag/v1.88.1
+
+[v1.89.0]: https://github.com/docker/docker-agent/releases/tag/v1.89.0
+
+[v1.90.0]: https://github.com/docker/docker-agent/releases/tag/v1.90.0
+
+[v1.91.0]: https://github.com/docker/docker-agent/releases/tag/v1.91.0

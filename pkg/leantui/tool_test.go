@@ -5,40 +5,47 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/docker/docker-agent/pkg/tools"
+	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
-func TestDescribeToolCallCommand(t *testing.T) {
-	cmd, summary := describeToolCall(`{"command":"ls -l"}`)
-	assert.Equal(t, "ls -l", cmd)
-	assert.Empty(t, summary)
-}
-
-func TestDescribeToolCallPath(t *testing.T) {
-	cmd, summary := describeToolCall(`{"path":"/tmp/x"}`)
-	assert.Empty(t, cmd)
-	assert.Equal(t, "path: /tmp/x", summary)
-}
-
-func TestDescribeToolCallInvalidJSON(t *testing.T) {
-	cmd, summary := describeToolCall(`{"command": "ls`)
-	assert.Empty(t, cmd)
-	assert.NotEmpty(t, summary)
-}
-
-func TestDescribeToolCallEmpty(t *testing.T) {
-	cmd, summary := describeToolCall("")
-	assert.Empty(t, cmd)
-	assert.Empty(t, summary)
-}
-
-func TestRenderToolTruncatesOutput(t *testing.T) {
+func TestRenderToolOutputTruncatesOutput(t *testing.T) {
+	t.Parallel()
 	output := strings.Repeat("line\n", 50)
-	tv := toolView{name: "shell", command: "seq 50", output: output, done: true}
-	lines := renderTool(tv, 80)
+	lines := renderToolOutput(output, 80)
 
-	// Header + command + earlier-lines note + capped output + footer.
-	assert.LessOrEqual(t, len(lines), maxToolOutputLines+5)
-	joined := strings.Join(lines, "\n")
-	assert.Contains(t, joined, "earlier lines")
-	assert.Contains(t, joined, "Took")
+	assert.LessOrEqual(t, len(lines), maxToolOutputLines+1)
+	assert.Contains(t, strings.Join(lines, "\n"), "earlier lines")
+}
+
+func TestRenderToolUsesFullTUIRenderer(t *testing.T) {
+	t.Parallel()
+	tv := shellToolView(tuitypes.ToolStatusCompleted)
+	tv.message.Content = "hi\n"
+
+	joined := strings.Join(renderTool(*tv, 80), "\n")
+	assert.Contains(t, joined, builtinshell.ToolNameShell)
+	assert.Contains(t, joined, "echo hi")
+	assert.Contains(t, joined, "hi")
+	assert.NotContains(t, joined, "Took")
+}
+
+func TestRenderToolDoesNotLeakAnimationSubscription(t *testing.T) {
+	t.Parallel()
+	assert.False(t, animation.HasActive())
+	renderToolWithState(*shellToolView(tuitypes.ToolStatusRunning), 80, 3, nil)
+	assert.False(t, animation.HasActive())
+}
+
+func shellToolView(status tuitypes.ToolStatus) *toolView {
+	return newToolView("root", tools.ToolCall{
+		ID: "call-1",
+		Function: tools.FunctionCall{
+			Name:      builtinshell.ToolNameShell,
+			Arguments: `{"cmd":"echo hi"}`,
+		},
+	}, tools.Tool{Name: builtinshell.ToolNameShell}, status)
 }

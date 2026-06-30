@@ -143,20 +143,19 @@ func (s *Store) getDatabase(ctx context.Context, allowFetch bool) (*Database, er
 		// network. Kept out of s.db so it can never satisfy a later
 		// fetch-eligible lookup for a known provider.
 		if s.cacheDB == nil {
-			db, err := loadDatabase(ctx, s.cacheFile, false)
-			if err != nil {
-				return nil, err
-			}
-			s.cacheDB = db
+			s.cacheDB, _ = loadDatabase(ctx, s.cacheFile, false)
 		}
 		return s.cacheDB, nil
 	}
 
-	db, err := loadDatabase(ctx, s.cacheFile, true)
-	if err != nil {
-		return nil, err
+	db, authoritative := loadDatabase(ctx, s.cacheFile, true)
+	// Only memoize a result that came from the on-disk cache or a live fetch.
+	// The embedded fallback snapshot is deliberately NOT pinned, so a later
+	// lookup retries the fetch once the network (or cache) recovers instead of
+	// serving the build-time snapshot for the Store's entire lifetime.
+	if authoritative {
+		s.db = db
 	}
-	s.db = db
 	return db, nil
 }
 
@@ -211,28 +210,41 @@ func (s *Store) GetModel(ctx context.Context, id ID) (*Model, error) {
 	return &model, nil
 }
 
+// fetchCatalog fetches the models.dev catalog. It is a package variable so
+// tests can observe whether a fetch was attempted (the issue #3165 gate) and
+// stub the network out; production code always uses [fetchFromAPI].
+var fetchCatalog = fetchFromAPI
+
 // loadDatabase loads the database from the local cache file or
 // falls back to fetching from the models.dev API.
 //
 // When allowFetch is false the network is never touched: a fresh cache is
 // returned as-is, a stale cache is returned regardless of age, and a missing
-// cache yields an empty database. This lets lookups for providers models.dev
-// cannot know about resolve locally without a doomed outbound call.
-func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool) (*Database, error) {
+// cache falls back to the snapshot embedded at build time. This lets lookups
+// for providers models.dev cannot know about resolve locally without a doomed
+// outbound call, while still offering a real catalog on a cold cache.
+//
+// loadDatabase always returns a non-nil database. The second return value is
+// true when the database came from the on-disk cache or a live fetch, and
+// false when it fell back to the snapshot embedded at build time. Callers use
+// this to avoid memoizing the fallback so a later lookup can retry once the
+// cache or network recovers.
+func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool) (db *Database, authoritative bool) {
 	// Try to load from cache first
 	cached, err := loadFromCache(cacheFile)
 	if err == nil && (!allowFetch || time.Since(cached.LastRefresh) < refreshInterval) {
-		return &cached.Database, nil
+		return &cached.Database, true
 	}
 
 	if !allowFetch {
 		// No fresh cache and fetching is disallowed: use a stale cache if we
-		// have one, otherwise serve an empty catalog so the caller resolves to
-		// "provider not found" with no network call.
+		// have one, otherwise fall back to the snapshot baked into the binary
+		// so the caller still resolves against a real catalog with no network
+		// call.
 		if cached != nil {
-			return &cached.Database, nil
+			return &cached.Database, true
 		}
-		return &Database{}, nil
+		return embeddedSnapshot(), false
 	}
 
 	// Cache is stale or doesn't exist — try a conditional fetch with the ETag.
@@ -241,14 +253,18 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool) (*Data
 		etag = cached.ETag
 	}
 
-	database, newETag, fetchErr := fetchFromAPI(ctx, etag)
+	database, newETag, fetchErr := fetchCatalog(ctx, etag)
 	if fetchErr != nil {
 		// If API fetch fails but we have cached data, use it regardless of age.
 		if cached != nil {
 			slog.DebugContext(ctx, "API fetch failed, using stale cache", "error", fetchErr)
-			return &cached.Database, nil
+			return &cached.Database, true
 		}
-		return nil, fmt.Errorf("failed to fetch from API and no cached data available: %w", fetchErr)
+		// No cache either — fall back to the snapshot embedded at build time
+		// instead of failing outright, so a fresh binary on a machine that
+		// can't reach models.dev still has a usable catalog.
+		slog.DebugContext(ctx, "API fetch failed and no cache available, using embedded snapshot", "error", fetchErr)
+		return embeddedSnapshot(), false
 	}
 
 	// database is nil when the server returned 304 Not Modified.
@@ -258,7 +274,7 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool) (*Data
 		if saveErr := saveToCache(cacheFile, &cached.Database, cached.ETag); saveErr != nil {
 			slog.WarnContext(ctx, "Failed to update cache timestamp", "error", saveErr)
 		}
-		return &cached.Database, nil
+		return &cached.Database, true
 	}
 
 	// Save the fresh data to cache.
@@ -266,7 +282,7 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool) (*Data
 		slog.WarnContext(ctx, "Failed to save to cache", "error", saveErr)
 	}
 
-	return database, nil
+	return database, true
 }
 
 // fetchFromAPI fetches the models.dev database.

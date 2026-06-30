@@ -38,6 +38,16 @@ tasks:
     cmds:
       - rm -rf ./bin
 
+  update-models:
+    desc: Refresh the embedded models.dev catalog snapshot
+    cmds:
+      - go generate ./pkg/modelsdev/...
+
+  check-models-fresh:
+    desc: Fail if the embedded models.dev snapshot is stale (run update-models to refresh)
+    cmds:
+      - CHECK_MODELS_SNAPSHOT_FRESHNESS=1 go test -run TestSnapshotDateIsFresh ./pkg/modelsdev/
+
   deploy-local:
     desc: Deploy the cli-plugin
     aliases: [install]

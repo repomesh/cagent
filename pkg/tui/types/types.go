@@ -27,6 +27,7 @@ const (
 const (
 	UserMessageEditLabel      = "✎"
 	AssistantMessageCopyLabel = "⎘"
+	ErrorRetryLabel           = "↻ retry"
 )
 
 const (

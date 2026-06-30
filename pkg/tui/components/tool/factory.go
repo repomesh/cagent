@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 	handofftool "github.com/docker/docker-agent/pkg/tools/builtin/handoff"
+	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	shelltool "github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
 	transfertasktool "github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/handoff"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/listdirectory"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/plantool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/readfile"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/readmultiplefiles"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/searchfilescontent"
@@ -58,6 +60,16 @@ var builders = map[string]Builder{
 	todo.ToolNameCreateTodos:              todotool.New,
 	todo.ToolNameUpdateTodos:              todotool.New,
 	todo.ToolNameListTodos:                todotool.New,
+	// Single-plan write/status tools surface the plan's status/title in a
+	// compact header. read_plan, list_plans and delete_plan intentionally keep
+	// the default renderer: read_plan's job is to show the full plan body (the
+	// default renderer prints it, with the status still in the JSON), list_plans
+	// returns many plans, and delete_plan has no status to show.
+	plan.ToolNameWritePlan:          plantool.New,
+	plan.ToolNameSetPlanStatus:      plantool.New,
+	plan.ToolNameGetPlanStatus:      plantool.New,
+	plan.ToolNameUpdatePlanFromFile: plantool.New,
+	plan.ToolNameExportPlanToFile:   plantool.New,
 }
 
 // custom holds renderers registered by embedders via Register. They are

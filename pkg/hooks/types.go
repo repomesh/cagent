@@ -90,6 +90,12 @@ const (
 	EventBeforeLLMCall EventType = "before_llm_call"
 	// EventAfterLLMCall fires immediately after a successful model call,
 	// before the response is recorded. Failed calls fire EventOnError.
+	// The Input carries the response text in [Input.StopResponse]
+	// (matching the stop event), the model that produced it in
+	// [Input.ModelID], and per-turn billing data in [Input.Usage] and
+	// [Input.Cost] so sidecar cost ledgers can record per-call spend
+	// from the payload alone, without subscribing to the runtime event
+	// channel.
 	EventAfterLLMCall EventType = "after_llm_call"
 	// EventSessionEnd fires when a session terminates.
 	EventSessionEnd EventType = "session_end"
@@ -201,6 +207,29 @@ const (
 	EventWorktreeCreate EventType = "worktree_create"
 )
 
+// EventPreToolUsePreYolo is the runtime-internal sentinel used to
+// dispatch the preempt-yolo lane of pre_tool_use. Entries declared
+// in YAML with `preempt_yolo: true` are bucketed here at
+// compileEvents time and dispatched BEFORE the deterministic
+// approval pipeline (--yolo, permission patterns) so a deny/ask
+// verdict cannot be bypassed by auto-approval rules. Default
+// pre_tool_use entries continue to fire under EventPreToolUse after
+// Decide(), as before.
+//
+// Hooks see [Input.HookEventName] = EventPreToolUse on this lane
+// (the executor normalises it before invoking handlers), so builtins
+// and external scripts don't need to know about the internal split.
+// Aggregation handles this sentinel specifically only for Metadata
+// collection — Decision/Allowed/UpdatedInput semantics are shared
+// with EventPreToolUse.
+//
+// Do NOT use this in YAML; HooksConfig has no matching field. It is
+// declared as a var (not a const) so the HookConfigSync linter — which
+// requires every EventXxx const to have a corresponding HooksConfig
+// field — does not flag it. The dispatcher in pkg/runtime/toolexec
+// references this name when consulting the preempt lane.
+var EventPreToolUsePreYolo EventType = "pre_tool_use_pre_yolo"
+
 // Input is the JSON-serializable payload passed to hooks via stdin.
 type Input struct {
 	SessionID     string    `json:"session_id"`
@@ -238,10 +267,12 @@ type Input struct {
 	LastUserMessage string `json:"last_user_message,omitempty"`
 
 	// Tool-related fields (PreToolUse, PostToolUse, PermissionRequest,
-	// ToolResponseTransform).
-	ToolName  string         `json:"tool_name,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	ToolInput map[string]any `json:"tool_input,omitempty"`
+	// ToolResponseTransform). ToolCategory identifies the dispatching tool's
+	// category for builtins that target whole toolsets.
+	ToolCategory string         `json:"tool_category,omitempty"`
+	ToolName     string         `json:"tool_name,omitempty"`
+	ToolUseID    string         `json:"tool_use_id,omitempty"`
+	ToolInput    map[string]any `json:"tool_input,omitempty"`
 
 	// PostToolUse / ToolResponseTransform: the tool's textual output.
 	// On post_tool_use it carries the (already-rewritten) response a
@@ -318,6 +349,36 @@ type Input struct {
 	// "user_approved_tool", "user_rejected", "context_canceled").
 	ApprovalDecision string `json:"approval_decision,omitempty"`
 	ApprovalSource   string `json:"approval_source,omitempty"`
+
+	// AfterLLMCall specific: per-turn token usage and the computed USD
+	// cost of the model response the runtime just received. Both are
+	// populated only for [EventAfterLLMCall] and are nil for every
+	// other event. They are the hook-side counterpart of the runtime's
+	// internal TokenUsageEvent and let sidecar cost ledgers record
+	// per-call spend from the payload alone.
+	//
+	// Usage is a pointer so a handler can distinguish "the provider
+	// reported no usage" (nil) from "usage was zero".
+	//
+	// Cost is a *float64 with three meaningful states, mirroring the
+	// runtime's own pricing gate (usage present AND a model definition
+	// with a pricing table):
+	//   - nil   → unpriced: the model has no pricing data on file
+	//             (unknown model ID, custom endpoint without cost
+	//             config) or the provider reported no usage. With
+	//             omitempty the "cost" key is absent on the wire.
+	//   - 0     → a priced model whose computed cost is genuinely zero
+	//             (a free call). Emitted as "cost": 0, NOT elided —
+	//             omitempty on a pointer drops only nil, never a
+	//             non-nil pointer to the zero value.
+	//   - non-0 → the priced USD cost of this single response.
+	// A handler therefore reads a present "cost" as authoritative and
+	// an absent one as "unpriced", with no need to cross-check usage.
+	// (This is deliberately a *float64, unlike [chat.Message.Cost],
+	// which is a plain float64 with omitempty and so cannot distinguish
+	// a free priced call from an unpriced one on the wire.)
+	Usage *chat.Usage `json:"usage,omitempty"`
+	Cost  *float64    `json:"cost,omitempty"`
 
 	// Compaction fields (BeforeCompaction, AfterCompaction).
 	InputTokens  int64 `json:"input_tokens,omitempty"`
@@ -473,6 +534,15 @@ type HookSpecificOutput struct {
 	// return rewrites concurrently — see aggregate(). Compose multiple
 	// rewriters into a single hook if you need them to chain.
 	UpdatedToolResponse *string `json:"updated_tool_response,omitempty"`
+
+	// Metadata is a set of key/value annotations a
+	// [EventPermissionRequest] hook contributes to the tool-call
+	// confirmation prompt. The runtime merges it onto the tool's own
+	// metadata before emitting the confirmation event, so clients (TUI,
+	// HTTP) can render extra per-call context. Keys from multiple hooks
+	// are merged; on a key clash the last hook in config order wins (see
+	// aggregate()). Ignored on every other event.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // Result is the aggregated outcome of dispatching one event.
@@ -512,6 +582,12 @@ type Result struct {
 	// the next LLM call. Pointer-typed so callers can distinguish
 	// "explicitly cleared" (empty string) from "no rewrite" (nil).
 	UpdatedToolResponse *string
+
+	// Metadata aggregates the key/value annotations contributed by
+	// [EventPermissionRequest] hooks. The runtime merges it onto the
+	// tool's own metadata when emitting the tool-call confirmation
+	// event. nil when no hook supplied any.
+	Metadata map[string]string
 
 	// Decision is the most-restrictive PreToolUse verdict reported by
 	// any matching hook in the chain ("" when no hook produced one).

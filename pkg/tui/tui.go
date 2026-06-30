@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/help"
@@ -65,6 +66,9 @@ const (
 
 // Model is the top-level TUI model that wraps the chat page.
 type appModel struct {
+	shutdownDone <-chan struct{}
+	cleanupOnce  sync.Once
+
 	supervisor *supervisor.Supervisor
 	tabBar     *tabbar.TabBar
 	tuiStore   *tuistate.Store
@@ -81,6 +85,12 @@ type appModel struct {
 	sessionState *service.SessionState
 	chatPage     chat.Page
 	editor       editor.Editor
+
+	// ctx preserves values from the root TUI context (trace context,
+	// baggage, log attrs) without inheriting cancellation. Bubble Tea
+	// handlers have no ctx parameter and many calls are persistence/cleanup
+	// work that must survive shutdown cancellation.
+	ctx func() context.Context
 
 	// Shared history for command history across all editors
 	history *history.History
@@ -319,6 +329,8 @@ func WithToolRenderers(renderers map[string]tool.Builder) Option {
 
 // New creates a new Model.
 func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initialWorkingDir string, cleanup func(), opts ...Option) tea.Model {
+	tuiCtx := func() context.Context { return context.WithoutCancel(ctx) }
+
 	// Initialize supervisor
 	sv := supervisor.New(spawner)
 
@@ -329,7 +341,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	// Initialize tab store
 	var ts *tuistate.Store
 	var tsErr error
-	ts, tsErr = tuistate.New()
+	ts, tsErr = tuistate.New(tuiCtx())
 	if tsErr != nil {
 		slog.WarnContext(ctx, "Failed to open TUI state store, tabs won't persist", "error", tsErr)
 	}
@@ -344,6 +356,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	sessID := initialApp.Session().ID
 
 	m := &appModel{
+		shutdownDone: ctx.Done(),
 		buildCommandCategories: func(ctx context.Context, _ tea.Model) []commands.Category {
 			return commands.BuildCommandCategories(ctx, initialApp)
 		},
@@ -354,6 +367,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		editors:                       map[string]editor.Editor{},
 		sessionStates:                 map[string]*service.SessionState{sessID: initialSessionState},
 		application:                   initialApp,
+		ctx:                           tuiCtx,
 		sessionState:                  initialSessionState,
 		history:                       historyStore,
 		pendingRestores:               make(map[string]string),
@@ -383,7 +397,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	m.editor = initialEditor
 
 	// Create initial chat page (after options are applied so leanMode is set)
-	initialChatPage := chat.New(initialApp, initialSessionState, m.chatPageOpts()...)
+	initialChatPage := chat.New(m.ctx(), initialApp, initialSessionState, m.chatPageOpts()...)
 	m.chatPages[sessID] = initialChatPage
 	m.chatPage = initialChatPage
 
@@ -400,18 +414,6 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	tabs, activeIdx := sv.GetTabs()
 	tb.SetTabs(tabs, activeIdx)
 	m.statusBar.SetShowNewTab(tb.Height() == 0)
-
-	// Make sure to stop on context cancellation.
-	// Note: chatPages/editors cleanup is handled by cleanupAll() on the
-	// normal exit path (ExitConfirmedMsg). We don't iterate those maps
-	// here to avoid racing with the Bubble Tea event loop.
-	go func() {
-		<-ctx.Done()
-		if ts != nil {
-			_ = ts.Close()
-		}
-		sv.Shutdown()
-	}()
 
 	return m
 }
@@ -451,7 +453,7 @@ func (m *appModel) reapplyKeyboardEnhancements() {
 }
 
 func (m *appModel) commandCategories() []commands.Category {
-	categories := m.buildCommandCategories(context.Background(), m)
+	categories := m.buildCommandCategories(m.ctx(), m)
 	if len(m.disabledCommands) == 0 {
 		return categories
 	}
@@ -494,7 +496,7 @@ func (m *appModel) editorOpts() []editor.Option {
 	opts := []editor.Option{
 		editor.WithCompletions(
 			completions.NewCommandCompletion(m.commandCategories()),
-			completions.NewFileCompletion(),
+			completions.NewFileCompletion(m.ctx()),
 		),
 	}
 	if m.application.IsReadOnly() {
@@ -508,7 +510,7 @@ func (m *appModel) editorOpts() []editor.Option {
 // convenience pointers (m.chatPage, m.sessionState, m.editor) are also updated.
 func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session.Session) {
 	ss := service.NewSessionState(sess)
-	cp := chat.New(a, ss, m.chatPageOpts()...)
+	cp := chat.New(m.ctx(), a, ss, m.chatPageOpts()...)
 	ed := editor.New(m.history, m.editorOpts()...)
 
 	m.chatPages[tabID] = cp
@@ -533,8 +535,19 @@ func (m *appModel) initAndFocusComponents() tea.Cmd {
 	)
 }
 
+func (m *appModel) contextShutdownCmd() tea.Cmd {
+	return func() tea.Msg {
+		go func() {
+			<-m.shutdownDone
+			m.cleanupManagedResources()
+		}()
+		return nil
+	}
+}
+
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
+	shutdownCmd := m.contextShutdownCmd()
 	// If a different tab should be active on startup, switch to it directly.
 	// The initial tab's pending restore stays lazy — it will be loaded via
 	// handleSwitchTab when the user eventually opens it, just like every
@@ -543,7 +556,7 @@ func (m *appModel) Init() tea.Cmd {
 		tabID := m.pendingActiveTab
 		m.pendingActiveTab = ""
 		_, switchCmd := m.handleSwitchTab(tabID)
-		return tea.Batch(m.dialogMgr.Init(), switchCmd)
+		return tea.Batch(m.dialogMgr.Init(), switchCmd, shutdownCmd)
 	}
 
 	// If the initial tab has a pending session restore, go through
@@ -552,11 +565,11 @@ func (m *appModel) Init() tea.Cmd {
 	if oldSessionID, ok := m.pendingRestores[activeID]; ok {
 		delete(m.pendingRestores, activeID)
 		if store := m.application.SessionStore(); store != nil {
-			if sess, err := store.GetSession(context.Background(), oldSessionID); err == nil {
-				_, cmd := m.replaceActiveSession(context.Background(), sess)
+			if sess, err := store.GetSession(m.ctx(), oldSessionID); err == nil {
+				_, cmd := m.replaceActiveSession(m.ctx(), sess)
 
 				if m.tuiStore != nil && sess.WorkingDir != "" {
-					if err := m.tuiStore.UpdateTabWorkingDir(context.Background(), oldSessionID, sess.WorkingDir); err != nil {
+					if err := m.tuiStore.UpdateTabWorkingDir(m.ctx(), oldSessionID, sess.WorkingDir); err != nil {
 						slog.Warn("Failed to update persisted working dir", "error", err)
 					}
 				}
@@ -564,12 +577,13 @@ func (m *appModel) Init() tea.Cmd {
 				cmd = tea.Batch(cmd, m.applySidebarCollapsed(activeID))
 				m.persistActiveTab(sess.ID)
 
-				return tea.Batch(m.dialogMgr.Init(), cmd)
+				return tea.Batch(m.dialogMgr.Init(), cmd, shutdownCmd)
 			}
 		}
 	}
 
 	return tea.Batch(
+		shutdownCmd,
 		m.dialogMgr.Init(),
 		m.chatPage.Init(),
 		m.editor.Init(),
@@ -649,7 +663,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.tuiStore != nil {
 			persistedID := m.persistedSessionID(m.supervisor.ActiveID())
-			if err := m.tuiStore.ToggleSidebarCollapsed(context.Background(), persistedID); err != nil {
+			if err := m.tuiStore.ToggleSidebarCollapsed(m.ctx(), persistedID); err != nil {
 				slog.Warn("Failed to persist sidebar collapsed state", "error", err)
 			}
 		}
@@ -1047,7 +1061,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.application.IsReadOnly() {
 			return m, notification.WarningCmd("Session is read-only. No new messages can be sent.")
 		}
-		m.application.RunWithMessage(context.Background(), nil, msg.Content)
+		m.application.RunWithMessage(m.ctx(), nil, msg.Content)
 		return m, nil
 
 	// --- URL opening ---
@@ -1164,8 +1178,7 @@ func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 	if store == nil {
 		return m, notification.InfoCmd("No session store configured")
 	}
-
-	sessions, err := store.GetSessionSummaries(context.Background())
+	sessions, err := store.GetSessionSummaries(m.ctx())
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load sessions: %v", err))
 	}
@@ -1184,8 +1197,7 @@ func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 	if store == nil {
 		return m, notification.ErrorCmd("No session store configured")
 	}
-
-	sess, err := store.GetSession(context.Background(), sessionID)
+	sess, err := store.GetSession(m.ctx(), sessionID)
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
 	}
@@ -1200,7 +1212,7 @@ func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 	if workingDir == "" {
 		workingDir = m.application.Session().WorkingDir
 	}
-	ctx := context.Background()
+	ctx := m.ctx()
 
 	// If the current session is empty (no messages, no title — the default state
 	// when opening the TUI or creating a new tab), replace it in-place instead of
@@ -1328,7 +1340,7 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 
 	// Update persisted tab to point to the new session.
 	if m.tuiStore != nil {
-		ctx := context.Background()
+		ctx := m.ctx()
 		oldPersistedID := m.persistedSessionID(activeID)
 		if err := m.tuiStore.UpdateTabSessionID(ctx, oldPersistedID, newSess.ID); err != nil {
 			slog.WarnContext(ctx, "Failed to update tab session ID after clear", "error", err)
@@ -1353,7 +1365,7 @@ func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
 	}
 
 	// Spawn the new session
-	ctx := context.Background()
+	ctx := m.ctx()
 	sessionID, err := m.supervisor.SpawnSession(ctx, workingDir)
 	if err != nil {
 		return m, notification.ErrorCmd("Failed to spawn session: " + err.Error())
@@ -1374,8 +1386,8 @@ func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
 func (m *appModel) openWorkingDirPicker() (tea.Model, tea.Cmd) {
 	var recentDirs, favoriteDirs []string
 	if m.tuiStore != nil {
-		recentDirs, _ = m.tuiStore.GetRecentDirs(context.Background(), 10)
-		favoriteDirs, _ = m.tuiStore.GetFavoriteDirs(context.Background())
+		recentDirs, _ = m.tuiStore.GetRecentDirs(m.ctx(), 10)
+		favoriteDirs, _ = m.tuiStore.GetFavoriteDirs(m.ctx())
 	}
 
 	// Use the active session's working directory so the picker reflects it
@@ -1386,7 +1398,7 @@ func (m *appModel) openWorkingDirPicker() (tea.Model, tea.Cmd) {
 	}
 
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewWorkingDirPickerDialog(recentDirs, favoriteDirs, m.tuiStore, sessionWorkingDir),
+		Model: dialog.NewWorkingDirPickerDialog(m.ctx(), recentDirs, favoriteDirs, m.tuiStore, sessionWorkingDir),
 	})
 }
 
@@ -1453,12 +1465,12 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		delete(m.pendingRestores, sessionID)
 		m.application = runner.App
 		if store := runner.App.SessionStore(); store != nil {
-			if sess, err := store.GetSession(context.Background(), oldSessionID); err == nil {
+			if sess, err := store.GetSession(m.ctx(), oldSessionID); err == nil {
 				m.persistActiveTab(sess.ID)
-				model, cmd := m.replaceActiveSession(context.Background(), sess)
+				model, cmd := m.replaceActiveSession(m.ctx(), sess)
 
 				if m.tuiStore != nil && sess.WorkingDir != "" {
-					if err := m.tuiStore.UpdateTabWorkingDir(context.Background(), oldSessionID, sess.WorkingDir); err != nil {
+					if err := m.tuiStore.UpdateTabWorkingDir(m.ctx(), oldSessionID, sess.WorkingDir); err != nil {
 						slog.Warn("Failed to update persisted working dir", "error", err)
 					}
 				}
@@ -1599,7 +1611,7 @@ func (m *appModel) replayElicitationEvent(ev *runtime.ElicitationRequestEvent) t
 				serverURL = url
 			}
 			return core.CmdHandler(dialog.OpenDialogMsg{
-				Model:            dialog.NewOAuthAuthorizationDialog(serverURL, m.application),
+				Model:            dialog.NewOAuthAuthorizationDialog(m.ctx(), serverURL, m.application),
 				OriginatingEvent: ev,
 			})
 		}
@@ -1608,7 +1620,7 @@ func (m *appModel) replayElicitationEvent(ev *runtime.ElicitationRequestEvent) t
 	switch ev.Mode {
 	case "url":
 		return core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewURLElicitationDialog(ev.Message, ev.URL),
+			Model:            dialog.NewURLElicitationDialog(m.ctx(), ev.Message, ev.URL),
 			OriginatingEvent: ev,
 		})
 	default:
@@ -1629,7 +1641,7 @@ func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) (tea.Model, tea.
 		for i, tab := range tabs {
 			ids[i] = m.persistedSessionID(tab.SessionID)
 		}
-		if err := m.tuiStore.ReorderTab(context.Background(), ids); err != nil {
+		if err := m.tuiStore.ReorderTab(m.ctx(), ids); err != nil {
 			slog.Warn("Failed to persist tab reorder", "error", err)
 		}
 	}
@@ -1666,7 +1678,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	// Remove from persistent store using the persisted session-store ID.
 	if m.tuiStore != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		ctx, cancel := context.WithTimeout(m.ctx(), 1*time.Second)
 		defer cancel()
 		if err := m.tuiStore.RemoveTab(ctx, persistedID); err != nil {
 			slog.ErrorContext(ctx, "Failed to remove tab from store", "error", err)
@@ -2027,11 +2039,32 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// parseCtrlNumberKey checks if msg is ctrl+1 through ctrl+9 and returns the index (0-8), or -1 if not matched
+// lockModifiers are the keyboard lock states (Caps/Num/Scroll Lock). They ride
+// along in a key event's modifier set under the Kitty protocol but must be
+// ignored when matching shortcuts, since whether Caps Lock is on has no bearing
+// on whether the user pressed ctrl+1.
+const lockModifiers = tea.ModCapsLock | tea.ModNumLock | tea.ModScrollLock
+
+// parseCtrlNumberKey checks if msg is ctrl+1 through ctrl+9 and returns the index (0-8), or -1 if not matched.
+//
+// It inspects the key's modifiers and code directly rather than msg.String():
+// terminals with keyboard enhancements (e.g. the Kitty protocol) populate the
+// key's Text field, which makes String() return the bare digit ("1") instead of
+// "ctrl+1", silently breaking string-based matching.
 func parseCtrlNumberKey(msg tea.KeyPressMsg) int {
-	s := msg.String()
-	if len(s) == 6 && s[:5] == "ctrl+" && s[5] >= '1' && s[5] <= '9' {
-		return int(s[5] - '1')
+	// Require Ctrl and no other active modifier. Lock states (Caps/Num/Scroll)
+	// are masked out first so the shortcut still fires when, e.g., Caps Lock is on.
+	if msg.Mod&^lockModifiers != tea.ModCtrl {
+		return -1
+	}
+	// Prefer BaseCode (the PC-101 layout key) when present so the shortcut
+	// works on international keyboards; fall back to Code otherwise.
+	code := msg.Code
+	if msg.BaseCode != 0 {
+		code = msg.BaseCode
+	}
+	if code >= '1' && code <= '9' {
+		return int(code - '1')
 	}
 	return -1
 }
@@ -2519,6 +2552,20 @@ var exitFunc = os.Exit
 
 var shutdownTimeout = 5 * time.Second
 
+// cleanupManagedResources shuts down resources owned by the top-level TUI
+// lifecycle. It is safe to call from both the Bubble Tea event loop (normal
+// exit) and the context watcher (external cancellation).
+func (m *appModel) cleanupManagedResources() {
+	m.cleanupOnce.Do(func() {
+		if m.tuiStore != nil {
+			_ = m.tuiStore.Close()
+		}
+		if m.supervisor != nil {
+			m.supervisor.Shutdown()
+		}
+	})
+}
+
 // cleanupAll cleans up all sessions, editors, and resources.
 func (m *appModel) cleanupAll() {
 	m.transcriber.Stop()
@@ -2526,6 +2573,7 @@ func (m *appModel) cleanupAll() {
 	for _, ed := range m.editors {
 		ed.Cleanup()
 	}
+	m.cleanupManagedResources()
 
 	// Safety net: bubbletea's renderer can deadlock on shutdown if stdout
 	// is wedged — the final flush re-acquires the mutex that the still

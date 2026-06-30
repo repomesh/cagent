@@ -55,7 +55,9 @@ jobs:
           cache: true
 
       - name: Install Task
-        run: go install github.com/go-task/task/v3/cmd/task@latest
+        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
+        with:
+          version: 3.51.1
 
       - name: Create bin directory
         run: mkdir -p "$HOME/bin"
@@ -88,7 +90,18 @@ jobs:
 
   build-image:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    # Build each platform on its own native runner, in parallel. Building both
+    # platforms on a single runner serializes two CPU-bound cgo/zig compiles on
+    # 2 vCPUs (~8 min); splitting across native runners cuts wall-clock to ~4 min.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -100,23 +113,96 @@ jobs:
         uses: docker/build-push-action@ee4ca427a2f43b6a16632044ca514c076267da23 # v6.19.0
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: false
           sbom: false
           provenance: false
           build-args: |
             GIT_TAG=pr
             GIT_COMMIT=dev
-          cache-from: type=gha,scope=buildx
-          cache-to: type=gha,mode=min,scope=buildx
+          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
+          cache-to: type=gha,mode=min,scope=buildx-${{ matrix.platform }}
 
   build-and-push-image:
     if: github.event_name != 'pull_request' && !github.event.repository.fork
     needs: [lint, build-and-test, license-check]
-    runs-on: ubuntu-latest
+    # Build each platform on its own native runner in parallel, push by digest,
+    # then assemble the multi-arch manifest in the merge job below.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Prepare platform name
+        run: echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+        env:
+          platform: ${{ matrix.platform }}
+
+      - name: Hub login
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
+          password: ${{ secrets.DOCKERPUBLICBOT_WRITE_PAT }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: |
+            docker/docker-agent
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@ee4ca427a2f43b6a16632044ca514c076267da23 # v6.19.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          outputs: type=image,name=docker/docker-agent,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            GIT_TAG=${{ github.ref_name }}
+            GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=buildx-${{ matrix.platform }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${RUNNER_TEMP}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-and-push-image:
+    if: github.event_name != 'pull_request' && !github.event.repository.fork
+    needs: [build-and-push-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - name: Hub login
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -138,18 +224,15 @@ jobs:
             type=edge
             type=ref,event=pr
 
-      - name: Build and push image
-        uses: docker/build-push-action@ee4ca427a2f43b6a16632044ca514c076267da23 # v6.19.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            GIT_TAG=${{ github.ref_name }}
-            GIT_COMMIT=${{ github.sha }}
-          cache-from: type=gha,scope=buildx
-          cache-to: type=gha,mode=max,scope=buildx
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          args=()
+          for tag in "${tags[@]}"; do args+=(-t "$tag"); done
+          for digest in *; do args+=("docker/docker-agent@sha256:${digest}"); done
+          docker buildx imagetools create "${args[@]}"
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect docker/docker-agent:${{ steps.meta.outputs.version }}

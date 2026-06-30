@@ -34,7 +34,7 @@ func TestAskpass_RoundTrip(t *testing.T) {
 		t.Skip("sudo askpass unsupported on this platform")
 	}
 
-	srv, err := startAskpassServer(acceptHandler("hunter2"))
+	srv, err := startAskpassServer(t.Context(), acceptHandler("hunter2"))
 	require.NoError(t, err)
 	defer srv.close()
 
@@ -51,7 +51,7 @@ func TestAskpass_Decline(t *testing.T) {
 		t.Skip("sudo askpass unsupported on this platform")
 	}
 
-	srv, err := startAskpassServer(func() tools.ElicitationHandler {
+	srv, err := startAskpassServer(t.Context(), func() tools.ElicitationHandler {
 		return func(_ context.Context, _ *mcp.ElicitParams) (tools.ElicitationResult, error) {
 			return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
 		}
@@ -72,7 +72,7 @@ func TestAskpass_BadToken(t *testing.T) {
 		t.Skip("sudo askpass unsupported on this platform")
 	}
 
-	srv, err := startAskpassServer(acceptHandler("hunter2"))
+	srv, err := startAskpassServer(t.Context(), acceptHandler("hunter2"))
 	require.NoError(t, err)
 	defer srv.close()
 
@@ -93,6 +93,7 @@ func TestAskpass_MissingEnv(t *testing.T) {
 }
 
 func TestShQuote(t *testing.T) {
+	t.Parallel()
 	// No metacharacters: simple single-quote wrap.
 	assert.Equal(t, "'/usr/bin/docker-agent'", shQuote("/usr/bin/docker-agent"))
 	// Embedded single quote is escaped.
@@ -105,12 +106,13 @@ func TestShQuote(t *testing.T) {
 // dialing helper goes away (its command was killed), instead of blocking on a
 // dead connection for the full prompt timeout.
 func TestAskpass_CancelledWhenHelperDies(t *testing.T) {
+	t.Parallel()
 	if !askpassSupported() {
 		t.Skip("sudo askpass unsupported on this platform")
 	}
 
 	cancelled := make(chan struct{})
-	srv, err := startAskpassServer(func() tools.ElicitationHandler {
+	srv, err := startAskpassServer(t.Context(), func() tools.ElicitationHandler {
 		return func(ctx context.Context, _ *mcp.ElicitParams) (tools.ElicitationResult, error) {
 			<-ctx.Done() // block like a real prompt until the context is cancelled
 			close(cancelled)
@@ -138,6 +140,7 @@ func TestAskpass_CancelledWhenHelperDies(t *testing.T) {
 }
 
 func TestCommandInvokesSudo(t *testing.T) {
+	t.Parallel()
 	assert.True(t, commandInvokesSudo("sudo apt update"))
 	assert.True(t, commandInvokesSudo("echo x && sudo ls"))
 	// Word boundary avoids false positives on similar substrings.
@@ -155,7 +158,7 @@ func TestAskpass_PromptsSerialized(t *testing.T) {
 	}
 
 	var active, maxActive int32
-	srv, err := startAskpassServer(func() tools.ElicitationHandler {
+	srv, err := startAskpassServer(t.Context(), func() tools.ElicitationHandler {
 		return func(_ context.Context, _ *mcp.ElicitParams) (tools.ElicitationResult, error) {
 			n := atomic.AddInt32(&active, 1)
 			for {
@@ -188,6 +191,7 @@ func TestAskpass_PromptsSerialized(t *testing.T) {
 }
 
 func TestWrapSudoCommand(t *testing.T) {
+	t.Parallel()
 	t.Run("wraps sudo for posix shell", func(t *testing.T) {
 		got := wrapSudoCommand("sudo apt update", "/bin/bash")
 		assert.Contains(t, got, `sudo() { command sudo -A "$@"; }`)
@@ -209,6 +213,7 @@ func TestWrapSudoCommand(t *testing.T) {
 // toolset is wrapped by NewStartable and WithName before that runs, so As must
 // be able to reach the inner ToolSet through both wrappers.
 func TestShellToolSet_ElicitableThroughWrappers(t *testing.T) {
+	t.Parallel()
 	ts := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
 	wrapped := tools.WithName(tools.NewStartable(ts), "shell")
 
@@ -222,6 +227,7 @@ func TestShellToolSet_ElicitableThroughWrappers(t *testing.T) {
 }
 
 func TestAskpassActive(t *testing.T) {
+	t.Parallel()
 	h := &shellHandler{sudoAskpass: true}
 	// No elicitation handler yet -> inactive.
 	assert.False(t, h.askpassActive())

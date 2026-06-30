@@ -74,6 +74,11 @@ commands:
     deploy: "Deploy the application"
 skills:
   base: [local, git]
+
+# 10. Toolsets — reusable, named toolset definitions shared across agents (optional)
+toolsets:
+  fs:
+    type: filesystem
 ```
 
 ## Minimal Config
@@ -255,7 +260,7 @@ Applies to:
 
 - `agents.<name>.toolsets[*].working_dir` (MCP, LSP)
 - `agents.<name>.toolsets[*].path` (memory, tasks)
-- `agents.<name>.toolsets[*].env` values (MCP, shell, script, LSP) — these go through `os.Expand`, not the JS evaluator, so `${env.X}` is **not** recognized here.
+- `agents.<name>.toolsets[*].env` values (MCP, shell, script, LSP)
 - The `~` prefix is also accepted in any path-like field documented as such.
 
 ```yaml
@@ -269,7 +274,19 @@ agents:
         working_dir: "$HOME/work"
 ```
 
-The `working_dir` and `path` fields additionally accept the `${env.VAR}` form as an alias for `${VAR}`, so the JS-style syntax works there too. Richer JS expressions (e.g. `${env.VAR || 'default'}`) are still **not** evaluated in path fields. The `env` values fields remain shell-only.
+The `working_dir`, `path`, and `env` value fields additionally accept the `${env.VAR}` form as an alias for `${VAR}`, so the JS-style syntax works there too. Richer JS expressions (e.g. `${env.VAR || 'default'}`) are still **not** evaluated in these fields.
+
+Model definitions follow the same rule. The `models.<name>.model` and `models.<name>.base_url` fields are expanded when the provider is built, accepting both `${env.VAR}` and `${VAR}`. This is useful when the model id or endpoint is injected by the environment (for example a Docker Compose / DMR setup that exports the model reference as a variable):
+
+```yaml
+models:
+  nemotron3:
+    provider: dmr
+    model: "${env.NEMOTRON3_MODEL}" # resolved from the environment at load time
+    base_url: "${DMR_BASE_URL}"     # ${VAR} is accepted as well
+```
+
+`token_key` is **not** expanded: it already names the environment variable that holds the API token, so its value is used as a key rather than substituted. An unset variable in `model` or `base_url` is reported as an error instead of dialing with an empty value.
 
 ### Quick reference
 
@@ -279,8 +296,11 @@ The `working_dir` and `path` fields additionally accept the `${env.VAR}` form as
 | `instruction` (agent and toolset)             |     ✓      |       ✗       |  ✗  |
 | `commands.*`                                  |     ✓      |       ✗       |  ✗  |
 | `headers`, `remote.headers`, `api_config.headers` |     ✓      |       ✗       |  ✗  |
+| `models.*.model`, `models.*.base_url`         |     ✓      |       ✓       |  ✗  |
 | `working_dir`, `path`                         |     ✓      |       ✓       |  ✓  |
-| `env` values                                  |     ✗      |       ✓       |  ✗  |
+| `env` values                                  |     ✓      |       ✓       |  ✗  |
+
+The `~` prefix is meaningful only in path-like fields (`working_dir`, `path`).
 
 When in doubt, prefer `${env.X}` for prompts and headers, and `${X}` (or `$X`) for paths.
 
@@ -366,6 +386,39 @@ agents:
 ```
 
 An `mcps` entry accepts every field a regular `type: mcp` toolset accepts (command/args/env, `remote` with `url`/`transport_type`/`headers`/`oauth`, `tools` filter, `instruction`, `defer`, …) — the `type: mcp` is implicit. See the [Tool Config]({{ '/configuration/tools/' | relative_url }}) page for all options and the [Remote MCP Servers]({{ '/features/remote-mcp/' | relative_url }}) guide for remote setups.
+
+## Reusable Toolsets (`toolsets:`)
+
+The top-level `toolsets:` map defines named toolset configurations that agents can reference by name through `use_toolsets:`. This avoids repeating the same toolset definition across multiple agents — the same pattern as `mcps:` for MCP servers and `commands:` / `skills:` for reusable prompt groups.
+
+Any toolset type is supported, including ones that reference MCP or RAG definitions. Shared toolsets are resolved before the MCP/RAG pass, so they can contain `{type: mcp, ref: <name>}` references.
+
+```yaml
+toolsets:
+  fs:               # a named shared toolset
+    type: filesystem
+  docs:
+    type: fetch
+    allowed_domains:
+      - docker.com
+
+agents:
+  root:
+    model: openai/gpt-5
+    # Pull in shared toolsets by name; inline toolsets come first.
+    use_toolsets: [fs, docs]
+    toolsets:
+      - type: think
+
+  reviewer:
+    model: openai/gpt-5
+    # Reuse the same filesystem toolset without copying its definition.
+    use_toolsets: [fs]
+```
+
+Inline `toolsets:` entries listed directly on the agent take precedence in ordering (they come first) and are always included alongside referenced ones.
+
+See [`examples/shared-toolsets.yaml`](https://github.com/docker/docker-agent/blob/main/examples/shared-toolsets.yaml) for a complete example.
 
 ## Reusable Commands & Skills (`commands:` / `skills:`)
 

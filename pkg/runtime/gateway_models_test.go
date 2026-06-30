@@ -237,6 +237,29 @@ func TestListGatewayModels_CachesFailure(t *testing.T) {
 	assert.Equal(t, int32(1), requests.Load(), "failures must be cached to avoid hammering the gateway")
 }
 
+func TestListGatewayModels_DoesNotCacheCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/gpt-4o"}]}`))
+	}))
+	defer server.Close()
+
+	r := gatewayRuntime(server.URL, stubModelStore{})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := r.listGatewayModels(ctx)
+	require.Error(t, err)
+
+	ids, err := r.listGatewayModels(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"openai/gpt-4o"}, ids)
+	assert.Equal(t, int32(1), requests.Load(), "caller cancellation must not poison the gateway discovery cache")
+}
+
 func TestListGatewayModels_DoubleCheckAvoidsRedundantFetch(t *testing.T) {
 	t.Parallel()
 

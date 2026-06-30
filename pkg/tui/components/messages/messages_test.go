@@ -55,6 +55,39 @@ func TestMouseClickOnURLOpensURL(t *testing.T) {
 	assert.Equal(t, "https://example.com", msg.URL)
 }
 
+func TestMouseClickOnRetryLabelEmitsRetryMsg(t *testing.T) {
+	t.Parallel()
+
+	m := NewScrollableView(80, 24, &service.SessionState{}).(*model)
+	m.SetSize(80, 24)
+
+	// Add an error message which renders a clickable retry affordance.
+	m.AddErrorMessage("boom")
+
+	// Render to populate line offsets and item caches.
+	m.View()
+
+	// Locate the retry label within the rendered error message.
+	var line, col int
+	found := false
+	for i, rendered := range m.renderedLines {
+		plain := ansi.Strip(rendered)
+		if before, _, ok := strings.Cut(plain, types.ErrorRetryLabel); ok {
+			line = i
+			col = ansi.StringWidth(before)
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "retry label should be rendered")
+
+	_, cmd := m.handleMouseClick(tea.MouseClickMsg{X: col, Y: line, Button: tea.MouseLeft})
+	require.NotNil(t, cmd)
+
+	_, ok := cmd().(tuimessages.RetryMsg)
+	assert.True(t, ok, "clicking retry should emit RetryMsg")
+}
+
 func TestLoadFromSessionIncludesReasoningContent(t *testing.T) {
 	t.Parallel()
 

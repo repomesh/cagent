@@ -20,6 +20,7 @@ func TestExpandAll(t *testing.T) {
 }
 
 func TestExpandAll_Error(t *testing.T) {
+	t.Parallel()
 	expanded, err := ExpandAll(t.Context(), []string{"$VAR_THAT_DOES_NOT_EXIST_12345"}, NewOsEnvProvider())
 
 	require.Error(t, err)
@@ -35,7 +36,19 @@ func TestExpandAll_EmptyValue(t *testing.T) {
 	assert.Equal(t, []string{""}, expanded)
 }
 
+func TestExpand_JSEnvRefAlias(t *testing.T) {
+	t.Setenv("USER", "alice")
+
+	// The JS-template ${env.X} form is accepted as an alias for ${X} (#2615).
+	for _, input := range []string{"${env.USER}", "${ env.USER }", "hi ${env.USER}!"} {
+		expanded, err := Expand(t.Context(), input, NewOsEnvProvider())
+		require.NoError(t, err)
+		assert.Contains(t, expanded, "alice")
+	}
+}
+
 func TestAbsolutePath(t *testing.T) {
+	t.Parallel()
 	homeDir, err := os.UserHomeDir()
 	require.NoError(t, err)
 
@@ -93,6 +106,7 @@ func TestAbsolutePath(t *testing.T) {
 }
 
 func TestReadEnvFilesEmpty(t *testing.T) {
+	t.Parallel()
 	lines, err := ReadEnvFiles([]string{})
 
 	require.NoError(t, err)
@@ -100,6 +114,7 @@ func TestReadEnvFilesEmpty(t *testing.T) {
 }
 
 func TestReadEnvFiles(t *testing.T) {
+	t.Parallel()
 	temp := t.TempDir()
 	write(t, filepath.Join(temp, ".env1"), "KEY1=VALUE1\n# Comment\nKEY2=VALUE2\n")
 	write(t, filepath.Join(temp, ".env2"), "\n\nKEY3=\"VALUE3\"\n")
@@ -124,6 +139,7 @@ func TestReadEnvFiles(t *testing.T) {
 }
 
 func TestReadEnvFileNotFound(t *testing.T) {
+	t.Parallel()
 	temp := t.TempDir()
 
 	lines, err := ReadEnvFile(filepath.Join(temp, ".notfound"))
@@ -133,6 +149,7 @@ func TestReadEnvFileNotFound(t *testing.T) {
 }
 
 func TestReadEnvFileInvalid(t *testing.T) {
+	t.Parallel()
 	temp := t.TempDir()
 	write(t, filepath.Join(temp, ".invalid"), "The is not a valid env file")
 

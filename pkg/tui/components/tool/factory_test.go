@@ -7,6 +7,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	shelltool "github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -23,12 +24,13 @@ func withCleanToolRegistry(t *testing.T) {
 	customMu.Unlock()
 	t.Cleanup(func() {
 		customMu.Lock()
+		defer customMu.Unlock()
 		custom = saved
-		customMu.Unlock()
 	})
 }
 
 func TestRegisterAndResolve(t *testing.T) {
+	t.Parallel()
 	withCleanToolRegistry(t)
 
 	// Unknown, unregistered key resolves to nothing.
@@ -69,6 +71,7 @@ func TestRegisterAndResolve(t *testing.T) {
 // and category — so this holds for built-in, Go-SDK, and MCP tools alike. (For an
 // end-to-end custom renderer over a real MCP tool, see examples/golibrary/renderer.)
 func TestNew_Dispatch(t *testing.T) {
+	t.Parallel()
 	ss := service.StaticSessionState{}
 
 	newMsg := func() *types.Message {
@@ -123,4 +126,29 @@ func TestNew_Dispatch(t *testing.T) {
 		assert.False(t, byName, "no per-tool renderer registered")
 		assert.False(t, byCategory, "no category renderer registered")
 	})
+}
+
+// TestPlanToolsRouting locks in which plan tools get the status-surfacing
+// renderer: the single-plan write/status tools do, while read_plan (shows the
+// full body), list_plans (many plans) and delete_plan (no status) intentionally
+// fall through to the default renderer.
+func TestPlanToolsRouting(t *testing.T) {
+	t.Parallel()
+	withCleanToolRegistry(t)
+
+	for _, name := range []string{
+		plan.ToolNameWritePlan,
+		plan.ToolNameSetPlanStatus,
+		plan.ToolNameGetPlanStatus,
+		plan.ToolNameUpdatePlanFromFile,
+		plan.ToolNameExportPlanToFile,
+	} {
+		_, ok := resolve(name)
+		assert.True(t, ok, "%q should have a dedicated plan renderer", name)
+	}
+
+	for _, name := range []string{plan.ToolNameReadPlan, plan.ToolNameListPlans, plan.ToolNameDeletePlan} {
+		_, ok := resolve(name)
+		assert.False(t, ok, "%q should fall through to the default renderer", name)
+	}
 }

@@ -45,7 +45,7 @@ func TestNewClientReturnsErrNotInstalledWhenDockerModelUnsupported(t *testing.T)
 		"exit 1\n"
 	require.NoError(t, os.WriteFile(dockerPath, []byte(script), 0o755))
 
-	t.Setenv("PATH", tempDir)
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MODEL_RUNNER_HOST", "")
 
 	cfg := &latest.ModelConfig{

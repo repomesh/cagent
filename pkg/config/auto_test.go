@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -278,7 +279,7 @@ func TestDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Test that DefaultModels map has all expected providers
-	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "amazon-bedrock"}
+	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "amazon-bedrock", "opencode-zen", "opencode-go"}
 
 	for _, provider := range expectedProviders {
 		t.Run(provider, func(t *testing.T) {
@@ -295,13 +296,15 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "ai/qwen3:latest", DefaultModels["dmr"])
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
 	assert.Equal(t, "global.anthropic.claude-sonnet-4-5-20250929-v1:0", DefaultModels["amazon-bedrock"])
+	assert.Equal(t, "deepseek-v4-flash", DefaultModels["opencode-go"])
+	assert.Equal(t, "deepseek-v4-flash-free", DefaultModels["opencode-zen"])
 }
 
 func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Verify that AutoModelConfig always returns a model from DefaultModels
-	providers := []string{"openai", "anthropic", "google", "mistral"}
+	providers := []string{"openai", "anthropic", "google", "mistral", "opencode-zen"}
 
 	for _, provider := range providers {
 		t.Run(provider, func(t *testing.T) {
@@ -319,6 +322,8 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 				envVars["GOOGLE_API_KEY"] = "test-key"
 			case "mistral":
 				envVars["MISTRAL_API_KEY"] = "test-key"
+			case "opencode-zen":
+				envVars["OPENCODE_API_KEY"] = "test-key"
 			}
 
 			modelConfig := AutoModelConfig(t.Context(), "", environment.NewMapEnvProvider(envVars), nil, nil)
@@ -329,6 +334,20 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 			assert.Equal(t, provider, modelConfig.Provider)
 		})
 	}
+
+	// opencode-go shares OPENCODE_API_KEY with opencode-zen, so it can never be
+	// auto-selected when the env var is set (zen wins due to cloudProviders
+	// ordering). Test it via a user-specified default model instead.
+	t.Run("opencode-go", func(t *testing.T) {
+		t.Parallel()
+
+		modelConfig := AutoModelConfig(t.Context(), "", environment.NewMapEnvProvider(map[string]string{
+			"OPENCODE_API_KEY": "test-key",
+		}), &latest.ModelConfig{Provider: "opencode-go", Model: DefaultModels["opencode-go"]}, nil)
+
+		assert.Equal(t, "opencode-go", modelConfig.Provider)
+		assert.Equal(t, DefaultModels["opencode-go"], modelConfig.Model)
+	})
 
 	// Test dmr provider (no API keys)
 	t.Run("dmr", func(t *testing.T) {
@@ -351,33 +370,44 @@ func TestAvailableProviders_PrecedenceOrder(t *testing.T) {
 		"OPENAI_API_KEY":    "test-key",
 		"GOOGLE_API_KEY":    "test-key",
 		"MISTRAL_API_KEY":   "test-key",
+		"OPENCODE_API_KEY":  "test-key",
 	})
 	providers := AvailableProviders(t.Context(), "", env)
 	assert.Equal(t, "anthropic", providers[0])
 
 	// No anthropic - openai should win
 	env = environment.NewMapEnvProvider(map[string]string{
-		"OPENAI_API_KEY":  "test-key",
-		"GOOGLE_API_KEY":  "test-key",
-		"MISTRAL_API_KEY": "test-key",
+		"OPENAI_API_KEY":   "test-key",
+		"GOOGLE_API_KEY":   "test-key",
+		"MISTRAL_API_KEY":  "test-key",
+		"OPENCODE_API_KEY": "test-key",
 	})
 	providers = AvailableProviders(t.Context(), "", env)
 	assert.Equal(t, "openai", providers[0])
 
 	// No anthropic or openai - google should win
 	env = environment.NewMapEnvProvider(map[string]string{
-		"GOOGLE_API_KEY":  "test-key",
-		"MISTRAL_API_KEY": "test-key",
+		"GOOGLE_API_KEY":   "test-key",
+		"MISTRAL_API_KEY":  "test-key",
+		"OPENCODE_API_KEY": "test-key",
 	})
 	providers = AvailableProviders(t.Context(), "", env)
 	assert.Equal(t, "google", providers[0])
 
 	// No anthropic, openai, or google - mistral should win
 	env = environment.NewMapEnvProvider(map[string]string{
-		"MISTRAL_API_KEY": "test-key",
+		"MISTRAL_API_KEY":  "test-key",
+		"OPENCODE_API_KEY": "test-key",
 	})
 	providers = AvailableProviders(t.Context(), "", env)
 	assert.Equal(t, "mistral", providers[0])
+
+	// Only OPENCODE_API_KEY set - opencode-zen should win (higher priority than opencode-go)
+	env = environment.NewMapEnvProvider(map[string]string{
+		"OPENCODE_API_KEY": "test-key",
+	})
+	providers = AvailableProviders(t.Context(), "", env)
+	assert.Equal(t, "opencode-zen", providers[0])
 
 	// No keys at all - dmr should be selected
 	env = environment.NewNoEnvProvider()
@@ -549,6 +579,84 @@ func TestAutoModelConfig_DMRLocalModels(t *testing.T) {
 	}
 }
 
+func TestPickDMRModel(t *testing.T) {
+	t.Parallel()
+
+	lister := func(models []string, err error) DMRModelLister {
+		return func(context.Context) ([]string, error) { return models, err }
+	}
+
+	tests := []struct {
+		name          string
+		lister        DMRModelLister
+		expectedModel string
+		expectedLocal bool
+	}{
+		{"nil lister keeps default, not local", nil, "ai/qwen3", false},
+		{"default pulled is local", lister([]string{"ai/qwen3"}, nil), "ai/qwen3", true},
+		{"repo match under different tag is local", lister([]string{"ai/qwen3:Q4_K_M"}, nil), "ai/qwen3:Q4_K_M", true},
+		{"first chat-capable installed is local", lister([]string{"qwen3:4B-UD-Q4_K_XL"}, nil), "qwen3:4B-UD-Q4_K_XL", true},
+		{"embedding-only keeps default, not local", lister([]string{"ai/embeddinggemma"}, nil), "ai/qwen3", false},
+		{"discovery error keeps default, not local", lister(nil, errors.New("dmr down")), "ai/qwen3", false},
+		{"empty list keeps default, not local", lister([]string{}, nil), "ai/qwen3", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			model, foundLocal := PickDMRModel(t.Context(), "ai/qwen3", tt.lister)
+			assert.Equal(t, tt.expectedModel, model)
+			assert.Equal(t, tt.expectedLocal, foundLocal)
+		})
+	}
+}
+
+func TestPreferLocalDMRModels(t *testing.T) {
+	t.Parallel()
+
+	lister := func(models []string, err error) DMRModelLister {
+		return func(context.Context) ([]string, error) { return models, err }
+	}
+
+	t.Run("uses a locally-pulled model and reports no fallback", func(t *testing.T) {
+		t.Parallel()
+		cfg := &latest.Config{Models: map[string]latest.ModelConfig{
+			"smart": {Provider: "dmr", Model: "ai/qwen3"},
+		}}
+		noLocal := PreferLocalDMRModels(t.Context(), cfg, map[string]bool{"smart": true}, lister([]string{"qwen3:4B-UD-Q4_K_XL"}, nil))
+
+		assert.Equal(t, "qwen3:4B-UD-Q4_K_XL", cfg.Models["smart"].Model)
+		assert.NotContains(t, noLocal, "smart")
+	})
+
+	t.Run("no usable local model leaves default and flags the selector", func(t *testing.T) {
+		t.Parallel()
+		cfg := &latest.Config{Models: map[string]latest.ModelConfig{
+			"smart": {Provider: "dmr", Model: "ai/qwen3"},
+		}}
+		noLocal := PreferLocalDMRModels(t.Context(), cfg, map[string]bool{"smart": true}, lister([]string{}, nil))
+
+		assert.Equal(t, "ai/qwen3", cfg.Models["smart"].Model)
+		assert.True(t, noLocal["smart"])
+	})
+
+	t.Run("non-dmr resolved selector is untouched", func(t *testing.T) {
+		t.Parallel()
+		cfg := &latest.Config{Models: map[string]latest.ModelConfig{
+			"smart": {Provider: "anthropic", Model: "claude-sonnet-4-6"},
+		}}
+		called := false
+		noLocal := PreferLocalDMRModels(t.Context(), cfg, map[string]bool{"smart": true}, func(context.Context) ([]string, error) {
+			called = true
+			return nil, nil
+		})
+
+		assert.Equal(t, "claude-sonnet-4-6", cfg.Models["smart"].Model)
+		assert.Empty(t, noLocal)
+		assert.False(t, called, "lister must not run for a non-dmr selection")
+	})
+}
+
 func TestAutoModelConfig_DMRListerNotConsultedForCloudProvider(t *testing.T) {
 	t.Parallel()
 
@@ -593,4 +701,34 @@ func TestAutoModelFallbackError(t *testing.T) {
 		assert.Contains(t, err.Error(), "model pull declined by user")
 		assert.ErrorIs(t, err, cause)
 	})
+
+	t.Run("pull-failure cause is summarized, not duplicated", func(t *testing.T) {
+		t.Parallel()
+
+		// A cause that carries its own multi-line "To fix this" guidance must be
+		// reduced to its one-line summary so the two blocks don't stack.
+		cause := &stubPullError{
+			summary:    "failed to pull model ai/qwen3",
+			fullDetail: "VERBOSE DETAIL: 416 Requested Range Not Satisfiable\nTo fix this: remove and re-pull",
+		}
+		err := &AutoModelFallbackError{Cause: cause}
+		msg := err.Error()
+
+		assert.Contains(t, msg, "Could not initialize the auto-selected model: failed to pull model ai/qwen3")
+		assert.NotContains(t, msg, "VERBOSE DETAIL")
+		// Exactly one remediation block (the one AutoModelFallbackError owns).
+		assert.Equal(t, 1, strings.Count(msg, "To fix this"))
+		assert.ErrorIs(t, err, cause)
+	})
 }
+
+// stubPullError implements pullErrorSummarizer with a verbose Error() to prove
+// the summary path avoids duplicating remediation guidance.
+type stubPullError struct {
+	summary    string
+	fullDetail string
+}
+
+func (e *stubPullError) Error() string { return e.fullDetail }
+
+func (e *stubPullError) ModelPullErrorSummary() string { return e.summary }

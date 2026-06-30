@@ -387,7 +387,11 @@ func (mv *messageModel) render(width int) string {
 		}
 		return messageStyle.Width(width - 1).Render(strings.TrimRight(rendered, "\n\r\t "))
 	case types.MessageTypeError:
-		return styles.ErrorMessageStyle.Width(width - 1).Render(msg.Content)
+		// Render the error content with a clickable retry affordance on its own
+		// trailing line so the user can resume the conversation after a failure.
+		retryHint := styles.MutedStyle.Render(types.ErrorRetryLabel)
+		content := msg.Content + "\n\n" + retryHint
+		return styles.ErrorMessageStyle.Width(width - 1).Render(content)
 	case types.MessageTypeLoading:
 		// Show spinner with the loading description, truncated to fit width
 		spinnerView := mv.spinner.View()

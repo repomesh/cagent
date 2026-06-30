@@ -38,6 +38,15 @@ import (
 // ToggleHideToolResultsMsg triggers hiding/showing tool results
 type ToggleHideToolResultsMsg struct{}
 
+// scrollToBottomMsg requests the message list scroll to the bottom. It is
+// returned by commands (e.g. after appending a message) instead of mutating
+// scroll state directly from the command goroutine: bubbletea runs command
+// closures on their own goroutines, so writing scrollOffset / userHasScrolled
+// / bottomSlack there races with View() / updateScrollState() on the event
+// loop. Handling it as a message keeps all scroll-state mutation on the
+// single Update/View goroutine.
+type scrollToBottomMsg struct{}
+
 type toggleableView interface {
 	IsToggleLine(lineIdx int) bool
 	Toggle()
@@ -233,6 +242,12 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := m.handleDebouncedCopy(msg)
 		return m, cmd
 
+	case scrollToBottomMsg:
+		if !m.userHasScrolled {
+			m.scrollToBottom()
+		}
+		return m, nil
+
 	case editfile.ToggleDiffViewMsg:
 		m.invalidateAllItems()
 		return m, nil
@@ -336,6 +351,10 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) 
 		if m.isCopyLabelClick(msgIdx, localLine, col) {
 			cmd := m.copyMessageToClipboard(msgIdx)
 			return m, cmd
+		}
+
+		if m.isRetryLabelClick(msgIdx, localLine, col) {
+			return m, core.CmdHandler(messages.RetryMsg{})
 		}
 	}
 
@@ -1287,8 +1306,7 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	}
 	if shouldAutoScroll {
 		cmds = append(cmds, func() tea.Msg {
-			m.scrollToBottom()
-			return nil
+			return scrollToBottomMsg{}
 		})
 	}
 
@@ -1365,6 +1383,11 @@ func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
 	}
 
 	for pos, item := range sess.Messages {
+		if item.IsError() {
+			errMsg := types.Error(item.Error.Message)
+			appendSessionMessage(errMsg, m.createMessageView(errMsg))
+			continue
+		}
 		if !item.IsMessage() {
 			continue
 		}
@@ -1649,8 +1672,7 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	}
 	if shouldAutoScroll {
 		cmds = append(cmds, func() tea.Msg {
-			m.scrollToBottom()
-			return nil
+			return scrollToBottomMsg{}
 		})
 	}
 
@@ -1678,10 +1700,7 @@ func (m *model) getActiveReasoningBlock(agentName string) (*reasoningblock.Model
 
 func (m *model) ScrollToBottom() tea.Cmd {
 	return func() tea.Msg {
-		if !m.userHasScrolled {
-			m.scrollToBottom()
-		}
-		return nil
+		return scrollToBottomMsg{}
 	}
 }
 
@@ -1900,6 +1919,34 @@ func (m *model) isCopyLabelClick(msgIdx, localLine, col int) bool {
 
 	labelStart := ansi.StringWidth(before)
 	labelEnd := labelStart + ansi.StringWidth(types.AssistantMessageCopyLabel)
+	return col >= labelStart && col < labelEnd
+}
+
+// isRetryLabelClick checks if the click is on the retry label of an error message.
+func (m *model) isRetryLabelClick(msgIdx, localLine, col int) bool {
+	if msgIdx < 0 || msgIdx >= len(m.messages) {
+		return false
+	}
+	if m.messages[msgIdx].Type != types.MessageTypeError {
+		return false
+	}
+	if msgIdx >= len(m.views) {
+		return false
+	}
+
+	item := m.renderItem(msgIdx, m.views[msgIdx])
+	if localLine < 0 || localLine >= len(item.lines) {
+		return false
+	}
+
+	plainLine := ansi.Strip(item.lines[localLine])
+	before, _, ok := strings.Cut(plainLine, types.ErrorRetryLabel)
+	if !ok {
+		return false
+	}
+
+	labelStart := ansi.StringWidth(before)
+	labelEnd := labelStart + ansi.StringWidth(types.ErrorRetryLabel)
 	return col >= labelStart && col < labelEnd
 }
 

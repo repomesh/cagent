@@ -115,6 +115,10 @@ type Store interface {
 	// firstKeptEntry is the index of the first message kept verbatim during compaction.
 	AddSummary(ctx context.Context, sessionID, summary string, firstKeptEntry int) error
 
+	// AddError appends a recorded error item to a session at the next position.
+	// Persisting failures lets them survive a reload and travel with a JSON export.
+	AddError(ctx context.Context, sessionID string, e *Error) error
+
 	// === Granular metadata updates ===
 
 	// UpdateSessionTokens updates only token/cost fields
@@ -291,16 +295,15 @@ func (s *InMemorySessionStore) UpdateMessage(_ context.Context, messageID int64,
 	var found bool
 	s.sessions.Range(func(_ string, session *Session) bool {
 		session.mu.Lock()
+		defer session.mu.Unlock()
 		for i := range session.Messages {
 			if session.Messages[i].Message == nil || session.Messages[i].Message.ID != messageID {
 				continue
 			}
 			session.Messages[i].Message = updated
 			found = true
-			session.mu.Unlock()
 			return false
 		}
-		session.mu.Unlock()
 		return true
 	})
 	if !found {
@@ -334,8 +337,22 @@ func (s *InMemorySessionStore) AddSummary(_ context.Context, sessionID, summary 
 		return ErrNotFound
 	}
 	session.mu.Lock()
+	defer session.mu.Unlock()
 	session.Messages = append(session.Messages, Item{Summary: summary, FirstKeptEntry: firstKeptEntry})
-	session.mu.Unlock()
+	return nil
+}
+
+// AddError appends a recorded error item to a session at the next position.
+func (s *InMemorySessionStore) AddError(_ context.Context, sessionID string, e *Error) error {
+	if sessionID == "" {
+		return ErrEmptyID
+	}
+	session, exists := s.sessions.Load(sessionID)
+	if !exists {
+		return ErrNotFound
+	}
+	errCopy := *e
+	session.AddError(&errCopy)
 	return nil
 }
 
@@ -444,8 +461,8 @@ func (s *InMemorySessionStore) Close() error {
 // at path. If migrations fail (other than a version mismatch or a filesystem
 // open failure) the existing database is moved aside to <path>.bak and a
 // fresh one is created.
-func NewSQLiteSessionStore(path string) (Store, error) {
-	store, err := openAndMigrateSQLiteStore(path)
+func NewSQLiteSessionStore(ctx context.Context, path string) (Store, error) {
+	store, err := openAndMigrateSQLiteStore(ctx, path)
 	if err != nil {
 		// Don't attempt recovery for version mismatch - the user needs to upgrade,
 		// not silently lose their data by starting fresh.
@@ -463,22 +480,22 @@ func NewSQLiteSessionStore(path string) (Store, error) {
 		}
 
 		// If migrations failed, try to recover by backing up the database and starting fresh
-		slog.Warn("Failed to open session store, attempting recovery", "error", err)
+		slog.WarnContext(ctx, "Failed to open session store, attempting recovery", "error", err)
 
 		backupErr := backupDatabase(path)
 		if backupErr != nil {
 			// Return the original error if backup failed
-			slog.Error("Failed to backup database for recovery", "error", backupErr)
+			slog.ErrorContext(ctx, "Failed to backup database for recovery", "error", backupErr)
 			return nil, fmt.Errorf("migration failed: %w (backup also failed: %w)", err, backupErr)
 		}
 
 		// Try again with a fresh database
-		store, err = openAndMigrateSQLiteStore(path)
+		store, err = openAndMigrateSQLiteStore(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("migration failed even after database reset: %w", err)
 		}
 
-		slog.Info("Successfully recovered session store with fresh database")
+		slog.InfoContext(ctx, "Successfully recovered session store with fresh database")
 	}
 
 	return store, nil
@@ -492,24 +509,24 @@ func NewSQLiteSessionStore(path string) (Store, error) {
 // This is intended primarily for tests that want to use an in-memory database
 // (sql.Open("sqlite", ":memory:")) or pre-seed a database with non-default
 // state. Production callers should use NewSQLiteSessionStore.
-func NewSQLiteSessionStoreFromDB(db *sql.DB) (*SQLiteSessionStore, error) {
+func NewSQLiteSessionStoreFromDB(ctx context.Context, db *sql.DB) (*SQLiteSessionStore, error) {
 	if db == nil {
 		return nil, errors.New("db is nil")
 	}
-	if err := setupAndMigrate(db); err != nil {
+	if err := setupAndMigrate(ctx, db); err != nil {
 		return nil, err
 	}
 	return &SQLiteSessionStore{db: db}, nil
 }
 
 // openAndMigrateSQLiteStore opens the database and runs migrations
-func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
-	db, err := sqliteutil.OpenDB(path)
+func openAndMigrateSQLiteStore(ctx context.Context, path string) (*SQLiteSessionStore, error) {
+	db, err := sqliteutil.OpenDB(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := setupAndMigrate(db); err != nil {
+	if err := setupAndMigrate(ctx, db); err != nil {
 		db.Close()
 		if sqliteutil.IsCantOpenError(err) {
 			return nil, sqliteutil.DiagnoseDBOpenError(path, err)
@@ -524,8 +541,8 @@ func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
 // all pending schema migrations. The bootstrap schema only declares the
 // columns the very first migration expects to find; later columns are added
 // by subsequent ALTER TABLE migrations.
-func setupAndMigrate(db *sql.DB) error {
-	_, err := db.ExecContext(context.Background(), `
+func setupAndMigrate(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			messages TEXT,
@@ -537,7 +554,7 @@ func setupAndMigrate(db *sql.DB) error {
 	}
 
 	migrationManager := NewMigrationManager(db)
-	return migrationManager.InitializeMigrations(context.Background())
+	return migrationManager.InitializeMigrations(ctx)
 }
 
 // backupDatabase moves the database file (and related WAL files) to a backup
@@ -762,6 +779,15 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 
 		case "summary":
 			items = append(items, Item{Summary: row.summaryText.String, FirstKeptEntry: row.firstKeptEntry})
+
+		case "error":
+			var e Error
+			if row.messageJSON.Valid && row.messageJSON.String != "" {
+				if err := json.Unmarshal([]byte(row.messageJSON.String), &e); err != nil {
+					return nil, fmt.Errorf("unmarshaling error at position %d: %w", row.position, err)
+				}
+			}
+			items = append(items, Item{Error: &e})
 		}
 	}
 
@@ -891,7 +917,33 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		return ErrEmptyID
 	}
 
-	fields, err := sessionPersistedFieldsOf(session)
+	// Snapshot the persisted fields under session.mu so the reads below
+	// don't race with concurrent writers on the runtime stream goroutine
+	// (SetUsage / ApplyCompaction update InputTokens/OutputTokens while a
+	// stream is running). Mirrors InMemorySessionStore.UpdateSession.
+	// MAINTENANCE: when adding new persisted fields to Session, add them here too.
+	session.mu.RLock()
+	snapshot := &Session{
+		ID:                  session.ID,
+		Title:               session.Title,
+		CreatedAt:           session.CreatedAt,
+		ToolsApproved:       session.ToolsApproved,
+		HideToolResults:     session.HideToolResults,
+		WorkingDir:          session.WorkingDir,
+		SendUserMessage:     session.SendUserMessage,
+		MaxIterations:       session.MaxIterations,
+		Starred:             session.Starred,
+		InputTokens:         session.InputTokens,
+		OutputTokens:        session.OutputTokens,
+		Cost:                session.Cost,
+		Permissions:         clonePermissionsConfig(session.Permissions),
+		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
+		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
+		ParentID:            session.ParentID,
+	}
+	session.mu.RUnlock()
+
+	fields, err := sessionPersistedFieldsOf(snapshot)
 	if err != nil {
 		return err
 	}
@@ -926,9 +978,9 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		   custom_models_used = excluded.custom_models_used,
 		   thinking = excluded.thinking,
 		   parent_id = excluded.parent_id`,
-		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens,
-		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
-		session.CreatedAt.Format(time.RFC3339), session.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
+		snapshot.ID, snapshot.ToolsApproved, snapshot.InputTokens, snapshot.OutputTokens,
+		snapshot.Title, snapshot.Cost, snapshot.SendUserMessage, snapshot.MaxIterations, snapshot.WorkingDir,
+		snapshot.CreatedAt.Format(time.RFC3339), snapshot.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID)
 	if err != nil {
 		return err
@@ -1129,6 +1181,17 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 			sessionID, position, item.Summary, item.FirstKeptEntry)
 		return err
 
+	case item.Error != nil:
+		errJSON, err := json.Marshal(item.Error)
+		if err != nil {
+			return fmt.Errorf("marshaling error: %w", err)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO session_items (session_id, position, item_type, message_json)
+			 VALUES (?, ?, 'error', ?)`,
+			sessionID, position, string(errJSON))
+		return err
+
 	default:
 		return nil // Empty item, skip
 	}
@@ -1149,6 +1212,26 @@ func (s *SQLiteSessionStore) AddSummary(ctx context.Context, sessionID, summary 
 	}
 
 	return nil
+}
+
+// AddError appends a recorded error item to a session at the next position.
+// The error payload is stored as JSON in the message_json column, reusing the
+// existing schema (item_type discriminates the row).
+func (s *SQLiteSessionStore) AddError(ctx context.Context, sessionID string, e *Error) error {
+	if sessionID == "" {
+		return ErrEmptyID
+	}
+
+	errJSON, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("marshaling error: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO session_items (session_id, position, item_type, message_json)
+		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'error', ?)`,
+		sessionID, sessionID, string(errJSON))
+	return err
 }
 
 // UpdateSessionTokens updates only token/cost fields.

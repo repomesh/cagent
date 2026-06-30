@@ -11,11 +11,13 @@ import (
 )
 
 func TestClone_NilSession(t *testing.T) {
+	t.Parallel()
 	var s *Session
 	assert.Nil(t, s.Clone())
 }
 
 func TestClone_CopiesScalarFields(t *testing.T) {
+	t.Parallel()
 	orig := &Session{
 		ID:                      "sess-1",
 		Title:                   "title",
@@ -68,6 +70,7 @@ func TestClone_CopiesScalarFields(t *testing.T) {
 }
 
 func TestClone_DeepCopiesEvalFields(t *testing.T) {
+	t.Parallel()
 	orig := &Session{
 		Evals: &EvalCriteria{
 			Relevance:  []string{"is helpful"},
@@ -104,6 +107,7 @@ func TestClone_DeepCopiesEvalFields(t *testing.T) {
 }
 
 func TestClone_DeepCopiesMessagesAndConfig(t *testing.T) {
+	t.Parallel()
 	orig := &Session{
 		ID:                  "sess-1",
 		Permissions:         &PermissionsConfig{Allow: []string{"a"}, Ask: []string{"k"}},
@@ -166,6 +170,7 @@ func TestClone_DeepCopiesMessagesAndConfig(t *testing.T) {
 }
 
 func TestClone_AppendingDoesNotAffectOriginal(t *testing.T) {
+	t.Parallel()
 	orig := New()
 	orig.AddMessage(UserMessage("first"))
 
@@ -179,6 +184,7 @@ func TestClone_AppendingDoesNotAffectOriginal(t *testing.T) {
 }
 
 func TestClone_PreservesSubSessionAndSummary(t *testing.T) {
+	t.Parallel()
 	sub := New()
 	sub.AddMessage(UserMessage("sub message"))
 
@@ -202,6 +208,7 @@ func TestClone_PreservesSubSessionAndSummary(t *testing.T) {
 // items field-by-field and silently drops the per-item Cost / FirstKeptEntry
 // that can ride alongside a message.
 func TestClone_PreservesItemValueFields(t *testing.T) {
+	t.Parallel()
 	orig := New()
 	orig.Messages = []Item{{
 		Message:        UserMessage("hello"),
@@ -214,4 +221,21 @@ func TestClone_PreservesItemValueFields(t *testing.T) {
 	assert.Equal(t, "hello", clone.Messages[0].Message.Message.Content)
 	assert.InEpsilon(t, 0.5, clone.Messages[0].Cost, 1e-9)
 	assert.Equal(t, 3, clone.Messages[0].FirstKeptEntry)
+}
+
+// TestClone_DeepCopiesErrorItem guards against the clone sharing the *Error
+// pointer with the original, which would let a mutation on one leak into the
+// other.
+func TestClone_DeepCopiesErrorItem(t *testing.T) {
+	t.Parallel()
+	orig := New()
+	orig.AddError(&Error{Message: "boom", Code: "model_error", AgentName: "root"})
+
+	clone := orig.Clone()
+	require.Len(t, clone.Messages, 1)
+	require.True(t, clone.Messages[0].IsError())
+	assert.Equal(t, "boom", clone.Messages[0].Error.Message)
+
+	clone.Messages[0].Error.Message = "mutated"
+	assert.Equal(t, "boom", orig.Messages[0].Error.Message, "Error must be deep-copied")
 }

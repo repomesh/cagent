@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -33,14 +34,15 @@ var testCatalog = Catalog{
 }
 
 func TestMain(m *testing.M) {
-	// Override the production catalogOnce so that tests never hit the network.
-	catalogOnce = func() (Catalog, error) {
+	// Override the production loader so that tests never hit the network.
+	catalogOverride = func(context.Context) (Catalog, error) {
 		return testCatalog, nil
 	}
 	os.Exit(m.Run())
 }
 
 func TestRequiredEnvVars_local(t *testing.T) {
+	t.Parallel()
 	secrets, err := RequiredEnvVars(t.Context(), "github-official")
 	require.NoError(t, err)
 
@@ -50,6 +52,7 @@ func TestRequiredEnvVars_local(t *testing.T) {
 }
 
 func TestRequiredEnvVars_remote(t *testing.T) {
+	t.Parallel()
 	secrets, err := RequiredEnvVars(t.Context(), "apify")
 	require.NoError(t, err)
 
@@ -57,6 +60,7 @@ func TestRequiredEnvVars_remote(t *testing.T) {
 }
 
 func TestServerSpec_local(t *testing.T) {
+	t.Parallel()
 	server, err := ServerSpec(t.Context(), "fetch")
 	require.NoError(t, err)
 
@@ -64,6 +68,7 @@ func TestServerSpec_local(t *testing.T) {
 }
 
 func TestServerSpec_remote(t *testing.T) {
+	t.Parallel()
 	server, err := ServerSpec(t.Context(), "apify")
 	require.NoError(t, err)
 
@@ -73,6 +78,7 @@ func TestServerSpec_remote(t *testing.T) {
 }
 
 func TestServerSpec_notFound(t *testing.T) {
+	t.Parallel()
 	_, err := ServerSpec(t.Context(), "nonexistent")
 	require.Error(t, err)
 
@@ -80,6 +86,7 @@ func TestServerSpec_notFound(t *testing.T) {
 }
 
 func TestParseServerRef(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "github-official", ParseServerRef("docker:github-official"))
 	assert.Equal(t, "github-official", ParseServerRef("github-official"))
 }

@@ -109,6 +109,15 @@ type SubSessionConfig struct {
 	// tool list for the child session. This prevents recursive tool calls
 	// (e.g. run_skill calling itself in a skill sub-session).
 	ExcludedTools []string
+	// AllowedTools, when non-empty, restricts the child session's inherited
+	// agent tools to those whose names match an entry (glob or exact). Used by
+	// fork-mode skills that declare an allowed-tools list. ExtraToolSets are
+	// exempt from this filter.
+	AllowedTools []string
+	// ExtraToolSets are additional toolsets exposed in the child session on
+	// top of the agent's own toolsets. Used by fork-mode skills that declare
+	// assistive toolsets.
+	ExtraToolSets []tools.ToolSet
 }
 
 // delegationRequest bundles a [SubSessionConfig] with the single
@@ -182,6 +191,12 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	if len(excludedTools) > 0 {
 		opts = append(opts, session.WithExcludedTools(excludedTools))
 	}
+	if len(cfg.AllowedTools) > 0 {
+		opts = append(opts, session.WithAllowedTools(cfg.AllowedTools))
+	}
+	if len(cfg.ExtraToolSets) > 0 {
+		opts = append(opts, session.WithExtraToolSets(cfg.ExtraToolSets))
+	}
 	return session.New(opts...)
 }
 
@@ -220,12 +235,12 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 	evts.Emit(AgentSwitching(true, from.Name(), to.Name()))
 	r.executeOnAgentSwitchHooks(ctx, from, sessionID, from.Name(), to.Name(), agentSwitchKindTransferTask)
 	r.setCurrentAgent(to.Name())
-	evts.Emit(AgentInfo(to.Name(), agentModelLabel(to), to.Description(), to.WelcomeMessage()))
+	evts.Emit(AgentInfo(to.Name(), agentModelLabel(ctx, to), to.Description(), to.WelcomeMessage()))
 	return func() {
 		r.setCurrentAgent(from.Name())
 		evts.Emit(AgentSwitching(false, to.Name(), from.Name()))
 		r.executeOnAgentSwitchHooks(ctx, from, sessionID, to.Name(), from.Name(), agentSwitchKindTransferTaskReturn)
-		evts.Emit(AgentInfo(from.Name(), agentModelLabel(from), from.Description(), from.WelcomeMessage()))
+		evts.Emit(AgentInfo(from.Name(), agentModelLabel(ctx, from), from.Description(), from.WelcomeMessage()))
 	}
 }
 
@@ -250,7 +265,7 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
 	span := trace.SpanFromContext(ctx)
 
-	callerAgent, err := r.team.Agent(r.CurrentAgentName())
+	callerAgent, err := r.team.Agent(r.currentAgentName())
 	if err != nil {
 		return nil, fmt.Errorf("current agent not found: %w", err)
 	}
@@ -543,7 +558,7 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	ca := r.CurrentAgentName()
+	ca := r.currentAgentName()
 	currentAgent, err := r.team.Agent(ca)
 	if err != nil {
 		return nil, fmt.Errorf("current agent not found: %w", err)

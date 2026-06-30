@@ -111,13 +111,19 @@ type ToolCallConfirmationEvent struct {
 	Type           string         `json:"type"`
 	ToolCall       tools.ToolCall `json:"tool_call"`
 	ToolDefinition tools.Tool     `json:"tool_definition"`
+	// Metadata carries arbitrary key/value annotations attached to the
+	// confirmation prompt. Toolsets contribute static metadata via
+	// [tools.Tool.Metadata]; a permission_request hook can enrich it per
+	// call. nil when neither source supplied any.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-func ToolCallConfirmation(toolCall tools.ToolCall, toolDefinition tools.Tool, agentName string) Event {
+func ToolCallConfirmation(toolCall tools.ToolCall, toolDefinition tools.Tool, agentName string, metadata map[string]string) Event {
 	return &ToolCallConfirmationEvent{
 		Type:           "tool_call_confirmation",
 		ToolCall:       toolCall,
 		ToolDefinition: toolDefinition,
+		Metadata:       metadata,
 		AgentContext:   newAgentContext(agentName),
 	}
 }
@@ -418,6 +424,29 @@ func SessionTitle(sessionID, title string) Event {
 
 func (e *SessionTitleEvent) GetSessionID() string { return e.SessionID }
 
+// SessionPlanUpdatedEvent fires when the session_plan toolset writes a plan.
+// Content and Path let a UI render the plan inline without re-reading the file.
+type SessionPlanUpdatedEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Content   string `json:"content,omitempty"`
+	Path      string `json:"path,omitempty"`
+}
+
+func SessionPlanUpdated(sessionID, content, path, agentName string) Event {
+	return &SessionPlanUpdatedEvent{
+		Type:         "session_plan_updated",
+		SessionID:    sessionID,
+		Content:      content,
+		Path:         path,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+func (e *SessionPlanUpdatedEvent) GetSessionID() string { return e.SessionID }
+
 type SessionSummaryEvent struct {
 	AgentContext
 
@@ -458,6 +487,15 @@ func SessionCompaction(sessionID, status, agentName string) Event {
 
 func (e *SessionCompactionEvent) GetSessionID() string { return e.SessionID }
 
+// StreamStoppedEvent reports that a RunStream loop has stopped. Reason carries
+// the turnEndReason* classification (normal, error, canceled) so consumers can
+// tell successful completion apart from crashes and user-initiated stops.
+//
+// Delivery is best-effort: it is emitted non-blockingly during teardown and is
+// dropped if the events buffer is full and the consumer has gone away (see
+// finalizeEventChannel). Treat the channel close, not receipt of this event, as
+// the guaranteed terminal signal. Do not assume session-end hooks have finished
+// when this event arrives: it is emitted before they run.
 type StreamStoppedEvent struct {
 	AgentContext
 

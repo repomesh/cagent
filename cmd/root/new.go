@@ -63,9 +63,9 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 		return err
 	}
 	t := loadResult.Team
-	defer stopToolSets(t)
+	defer stopToolSets(ctx, t)
 
-	rt, err := runtime.New(t,
+	rt, err := runtime.New(ctx, t,
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
 		runtime.WithTracer(otel.Tracer(AppName)),
 	)
@@ -91,7 +91,7 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 }
 
 func runTUI(ctx context.Context, rt runtime.Runtime, sess *session.Session, spawner tui.SessionSpawner, cleanup func(), tuiOpts []tui.Option, opts ...app.Opt) error {
-	if gen := rt.TitleGenerator(); gen != nil {
+	if gen := rt.TitleGenerator(ctx); gen != nil {
 		opts = append(opts, app.WithTitleGenerator(gen))
 	}
 
@@ -112,7 +112,13 @@ func runTUI(ctx context.Context, rt runtime.Runtime, sess *session.Session, spaw
 	if cleanup == nil {
 		cleanup = func() {}
 	}
-	wd, _ := os.Getwd()
+	// Prefer the session's working directory so the TUI (and features keyed
+	// off it, like /shell) operate where the tools do — e.g. the worktree
+	// created by --worktree, not the process CWD it was launched from.
+	wd := sess.WorkingDir
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
 	model := tui.New(ctx, spawner, a, wd, cleanup, tuiOpts...)
 
 	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithFilter(filter))
