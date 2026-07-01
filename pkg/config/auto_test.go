@@ -246,7 +246,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"OVH_AI_ENDPOINTS_ACCESS_TOKEN": "test-token",
 			},
 			expectedProvider:  "ovhcloud",
-			expectedModel:     "Qwen3-235B-A22B",
+			expectedModel:     "Qwen3.5-397B-A17B",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -349,7 +349,7 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
 	assert.Equal(t, "meta-llama/llama-3.3-70b-instruct", DefaultModels["openrouter"])
 	assert.Equal(t, "deepseek-ai/DeepSeek-V3.1", DefaultModels["baseten"])
-	assert.Equal(t, "Qwen3-235B-A22B", DefaultModels["ovhcloud"])
+	assert.Equal(t, "Qwen3.5-397B-A17B", DefaultModels["ovhcloud"])
 	assert.Equal(t, "global.anthropic.claude-sonnet-4-5-20250929-v1:0", DefaultModels["amazon-bedrock"])
 	assert.Equal(t, "deepseek-v4-flash", DefaultModels["opencode-go"])
 	assert.Equal(t, "deepseek-v4-flash-free", DefaultModels["opencode-zen"])

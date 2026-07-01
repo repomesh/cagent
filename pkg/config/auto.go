@@ -110,7 +110,7 @@ var DefaultModels = map[string]string{
 	"mistral":        "mistral-small-latest",
 	"openrouter":     "meta-llama/llama-3.3-70b-instruct",
 	"baseten":        "deepseek-ai/DeepSeek-V3.1",
-	"ovhcloud":       "Qwen3-235B-A22B",
+	"ovhcloud":       "Qwen3.5-397B-A17B",
 	"amazon-bedrock": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
 	"opencode-go":    "deepseek-v4-flash",
 	"opencode-zen":   "deepseek-v4-flash-free",

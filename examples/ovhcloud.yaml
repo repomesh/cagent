@@ -3,7 +3,7 @@
 models:
   ovhcloud_model:
     provider: ovhcloud
-    model: Qwen3-235B-A22B
+    model: Qwen3.5-397B-A17B
 
 agents:
   root:

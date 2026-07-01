@@ -31,7 +31,7 @@ built-in support for OVHcloud as an alias provider.
 ```yaml
 agents:
   root:
-    model: ovhcloud/Qwen3-235B-A22B
+    model: ovhcloud/Qwen3.5-397B-A17B
     description: Assistant using OVHcloud
     instruction: You are a helpful assistant.
 ```
@@ -42,7 +42,7 @@ agents:
 models:
   ovhcloud_model:
     provider: ovhcloud
-    model: Qwen3-235B-A22B
+    model: Qwen3.5-397B-A17B
     temperature: 0.7
     max_tokens: 8192
 
@@ -61,12 +61,13 @@ IDs, context limits, and free-tier availability.
 
 | Model | Description |
 | --- | --- |
-| `Qwen3-235B-A22B` | Large Qwen3 MoE — strong general, coding, and reasoning |
+| `Qwen3.5-397B-A17B` | Large Qwen3.5 MoE — strong general, coding, and reasoning |
 | `Qwen3-32B` | Mid-size Qwen3 — fast, tool-calling, reasoning |
+| `Qwen3.6-27B` | Compact Qwen3.6 — fast and efficient |
+| `Qwen3.5-9B` | Small Qwen3.5 — lightweight, free-tier friendly |
+| `Qwen3-Coder-30B-A3B-Instruct` | Qwen3 Coder MoE — optimised for code generation |
 | `Meta-Llama-3_3-70B-Instruct` | Llama 3.3 70B — reliable general-purpose chat |
 | `Mistral-Small-3.2-24B-Instruct-2506` | Compact, fast, tool-calling |
-| `Mixtral-8x7B-Instruct-v0.1` | Mixtral MoE — cost-efficient |
-| `DeepSeek-R1-Distill-Llama-70B` | Distilled reasoning model |
 
 > Model IDs are case-sensitive and must be passed exactly as the catalogue lists
 > them.
@@ -95,8 +96,8 @@ paid plan avoids the free-tier request-rate cap.
 ```yaml
 agents:
   coder:
-    model: ovhcloud/Qwen3-235B-A22B
-    description: Code assistant using Qwen3
+    model: ovhcloud/Qwen3.5-397B-A17B
+    description: Code assistant using Qwen3.5
     instruction: |
       You are an expert programmer.
       Write clean, well-documented code and follow language best practices.
