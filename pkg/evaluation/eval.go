@@ -289,10 +289,7 @@ func (r *Runner) preBuildImages(ctx context.Context, out io.Writer, evals []Inpu
 					continue
 				}
 
-				criteria := eval.Evals
-				if criteria == nil {
-					criteria = &session.EvalCriteria{}
-				}
+				criteria := eval.criteria()
 
 				_, err := r.getOrBuildImage(ctx, criteria)
 				results <- buildResult{title: eval.Title, err: err}
@@ -325,12 +322,7 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 
 	slog.DebugContext(ctx, "Starting evaluation", "title", title)
 
-	var evals *session.EvalCriteria
-	if evalSess.Evals != nil {
-		evals = evalSess.Evals
-	} else {
-		evals = &session.EvalCriteria{}
-	}
+	evals := evalSess.criteria()
 
 	userMessages := getUserMessages(evalSess.Session)
 
