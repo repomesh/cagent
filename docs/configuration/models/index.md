@@ -38,9 +38,9 @@ models:
       pdf: boolean # Optional: whether the model accepts PDF attachments
     provider_opts: # Optional: provider-specific options
       key: value
-    bypass_models_gateway: boolean # Optional: skip the models gateway for this model
     title_model: string # Optional: model used for session-title generation
     compaction_model: string # Optional: model used for session-compaction (summary generation)
+    bypass_models_gateway: boolean # Optional: skip the models gateway for this model
 ```
 
 ## Properties Reference
